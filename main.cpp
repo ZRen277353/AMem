@@ -3,7 +3,7 @@
 #include "imgui/backends/imgui_impl_win32.h"
 #include "imgui/backends/imgui_impl_dx12.h"
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_5.h>
 #include <tchar.h>
 #include <string>
 #include "gui/Gui.h"
@@ -95,6 +95,7 @@ static ID3D12Fence*                 g_fence = nullptr;
 static HANDLE                       g_fenceEvent = nullptr;
 static UINT64                       g_fenceLastSignaledValue = 0;
 static IDXGISwapChain3*             g_pSwapChain = nullptr;
+static bool                         g_SwapChainTearingSupport = false;
 static bool                         g_SwapChainOccluded = false;
 static HANDLE                       g_hSwapChainWaitableObject = nullptr;
 static ID3D12Resource*              g_mainRenderTargetResource[APP_NUM_BACK_BUFFERS] = {};
@@ -105,10 +106,9 @@ bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
-void WaitForLastSubmittedFrame();
-FrameContext* WaitForNextFrameResources();
+void WaitForPendingOperations();
+FrameContext* WaitForNextFrameContext();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
 
 // Main code
 int main(int, char**)
@@ -124,11 +124,14 @@ int main(int, char**)
             printf("程序崩溃!\n%s\n%s\n", info.description.c_str(), info.dumpFilePath.c_str());
         });
 
+    // Make process DPI aware and obtain main monitor scale
+    ImGui_ImplWin32_EnableDpiAwareness();
+    float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
+
     // Create application window
-    //ImGui_ImplWin32_EnableDpiAwareness();
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Android Cheat Engine", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui DirectX12 Example", WS_OVERLAPPEDWINDOW, 100, 100, (int)(1280 * main_scale), (int)(800 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
@@ -150,10 +153,27 @@ int main(int, char**)
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
+    //io.ConfigViewportsNoAutoMerge = true;
+    //io.ConfigViewportsNoTaskBarIcon = true;
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
     //ImGui::StyleColorsLight();
+
+        // Setup scaling
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.ScaleAllSizes(main_scale);        // Bake a fixed style scale. (until we have a solution for dynamic style scaling, changing this requires resetting Style + calling this again)
+        style.FontScaleDpi = main_scale;        // Set initial font scale. (using io.ConfigDpiScaleFonts=true makes this unnecessary. We leave both here for documentation purpose)
+        io.ConfigDpiScaleFonts = true;          // [Experimental] Automatically overwrite style.FontScaleDpi in Begin() when Monitor DPI changes. This will scale fonts but _NOT_ scale sizes/padding for now.
+        io.ConfigDpiScaleViewports = true;      // [Experimental] Scale Dear ImGui and Platform Windows when Monitor DPI changes.
+
+            // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        style.WindowRounding = 0.0f;
+        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+    }
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);
@@ -249,9 +269,10 @@ int main(int, char**)
         //RenderPointerChainExample();
    
         // Rendering
+        // Rendering
         ImGui::Render();
 
-        FrameContext* frameCtx = WaitForNextFrameResources();
+        FrameContext* frameCtx = WaitForNextFrameContext();
         UINT backBufferIdx = g_pSwapChain->GetCurrentBackBufferIndex();
         frameCtx->CommandAllocator->Reset();
 
@@ -278,18 +299,24 @@ int main(int, char**)
 
         g_pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_pd3dCommandList);
 
+        // Update and Render additional Platform Windows
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
+        }
+
+        g_pd3dCommandQueue->Signal(g_fence, ++g_fenceLastSignaledValue);
+        frameCtx->FenceValue = g_fenceLastSignaledValue;
+
         // Present
         HRESULT hr = g_pSwapChain->Present(1, 0);   // Present with vsync
-        //HRESULT hr = g_pSwapChain->Present(0, 0); // Present without vsync
+        //HRESULT hr = g_pSwapChain->Present(0, g_SwapChainTearingSupport ? DXGI_PRESENT_ALLOW_TEARING : 0); // Present without vsync
         g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
-
-        UINT64 fenceValue = g_fenceLastSignaledValue + 1;
-        g_pd3dCommandQueue->Signal(g_fence, fenceValue);
-        g_fenceLastSignaledValue = fenceValue;
-        frameCtx->FenceValue = fenceValue;
+        g_frameIndex++;
     }
 
-    WaitForLastSubmittedFrame();
+    WaitForPendingOperations();
 
     // Cleanup
    // CleanupPointerChainExample();
@@ -306,10 +333,10 @@ int main(int, char**)
 }
 
 // Helper functions
-
 bool CreateDeviceD3D(HWND hWnd)
 {
     // Setup swap chain
+    // This is a basic setup. Optimally could handle fullscreen mode differently. See #8979 for suggestions.
     DXGI_SWAP_CHAIN_DESC1 sd;
     {
         ZeroMemory(&sd, sizeof(sd));
@@ -348,6 +375,15 @@ bool CreateDeviceD3D(HWND hWnd)
         pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
         pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
         pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, true);
+
+        // Disable breaking on this warning because of a suspected bug in the D3D12 SDK layer, see #9084 for details.
+        const int D3D12_MESSAGE_ID_FENCE_ZERO_WAIT_ = 1424; // not in all copies of d3d12sdklayers.h
+        D3D12_MESSAGE_ID disabledMessages[] = { (D3D12_MESSAGE_ID)D3D12_MESSAGE_ID_FENCE_ZERO_WAIT_ };
+        D3D12_INFO_QUEUE_FILTER filter = {};
+        filter.DenyList.NumIDs = 1;
+        filter.DenyList.pIDList = disabledMessages;
+        pInfoQueue->AddStorageFilterEntries(&filter);
+
         pInfoQueue->Release();
         pdx12Debug->Release();
     }
@@ -406,14 +442,24 @@ bool CreateDeviceD3D(HWND hWnd)
         return false;
 
     {
-        IDXGIFactory4* dxgiFactory = nullptr;
+        IDXGIFactory5* dxgiFactory = nullptr;
         IDXGISwapChain1* swapChain1 = nullptr;
         if (CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory)) != S_OK)
             return false;
+
+        BOOL allow_tearing = FALSE;
+        dxgiFactory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow_tearing, sizeof(allow_tearing));
+        g_SwapChainTearingSupport = (allow_tearing == TRUE);
+        if (g_SwapChainTearingSupport)
+            sd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+
         if (dxgiFactory->CreateSwapChainForHwnd(g_pd3dCommandQueue, hWnd, &sd, nullptr, nullptr, &swapChain1) != S_OK)
             return false;
         if (swapChain1->QueryInterface(IID_PPV_ARGS(&g_pSwapChain)) != S_OK)
             return false;
+        if (g_SwapChainTearingSupport)
+            dxgiFactory->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER);
+
         swapChain1->Release();
         dxgiFactory->Release();
         g_pSwapChain->SetMaximumFrameLatency(APP_NUM_BACK_BUFFERS);
@@ -462,49 +508,33 @@ void CreateRenderTarget()
 
 void CleanupRenderTarget()
 {
-    WaitForLastSubmittedFrame();
+    WaitForPendingOperations();
 
     for (UINT i = 0; i < APP_NUM_BACK_BUFFERS; i++)
         if (g_mainRenderTargetResource[i]) { g_mainRenderTargetResource[i]->Release(); g_mainRenderTargetResource[i] = nullptr; }
 }
 
-void WaitForLastSubmittedFrame()
+void WaitForPendingOperations()
 {
-    FrameContext* frameCtx = &g_frameContext[g_frameIndex % APP_NUM_FRAMES_IN_FLIGHT];
+    g_pd3dCommandQueue->Signal(g_fence, ++g_fenceLastSignaledValue);
 
-    UINT64 fenceValue = frameCtx->FenceValue;
-    if (fenceValue == 0)
-        return; // No fence was signaled
-
-    frameCtx->FenceValue = 0;
-    if (g_fence->GetCompletedValue() >= fenceValue)
-        return;
-
-    g_fence->SetEventOnCompletion(fenceValue, g_fenceEvent);
-    WaitForSingleObject(g_fenceEvent, INFINITE);
+    g_fence->SetEventOnCompletion(g_fenceLastSignaledValue, g_fenceEvent);
+    ::WaitForSingleObject(g_fenceEvent, INFINITE);
 }
 
-FrameContext* WaitForNextFrameResources()
+FrameContext* WaitForNextFrameContext()
 {
-    UINT nextFrameIndex = g_frameIndex + 1;
-    g_frameIndex = nextFrameIndex;
-
-    HANDLE waitableObjects[] = { g_hSwapChainWaitableObject, nullptr };
-    DWORD numWaitableObjects = 1;
-
-    FrameContext* frameCtx = &g_frameContext[nextFrameIndex % APP_NUM_FRAMES_IN_FLIGHT];
-    UINT64 fenceValue = frameCtx->FenceValue;
-    if (fenceValue != 0) // means no fence was signaled
+    FrameContext* frame_context = &g_frameContext[g_frameIndex % APP_NUM_FRAMES_IN_FLIGHT];
+    if (g_fence->GetCompletedValue() < frame_context->FenceValue)
     {
-        frameCtx->FenceValue = 0;
-        g_fence->SetEventOnCompletion(fenceValue, g_fenceEvent);
-        waitableObjects[1] = g_fenceEvent;
-        numWaitableObjects = 2;
+        g_fence->SetEventOnCompletion(frame_context->FenceValue, g_fenceEvent);
+        HANDLE waitableObjects[] = { g_hSwapChainWaitableObject, g_fenceEvent };
+        ::WaitForMultipleObjects(2, waitableObjects, TRUE, INFINITE);
     }
+    else
+        ::WaitForSingleObject(g_hSwapChainWaitableObject, INFINITE);
 
-    WaitForMultipleObjects(numWaitableObjects, waitableObjects, TRUE, INFINITE);
-
-    return frameCtx;
+    return frame_context;
 }
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -525,10 +555,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED)
         {
-            WaitForLastSubmittedFrame();
             CleanupRenderTarget();
-            HRESULT result = g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
-            assert(SUCCEEDED(result) && "Failed to resize swapchain.");
+            DXGI_SWAP_CHAIN_DESC1 desc = {};
+            g_pSwapChain->GetDesc1(&desc);
+            HRESULT result = g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), desc.Format, desc.Flags);
+            IM_ASSERT(SUCCEEDED(result) && "Failed to resize swapchain.");
             CreateRenderTarget();
         }
         return 0;
@@ -542,5 +573,3 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
 }
-
-

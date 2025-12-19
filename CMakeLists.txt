@@ -147,7 +147,6 @@ add_definitions(-DIMGUI_DISABLE_DEBUG_TOOLS)
 
 add_executable(ImGuiProject 
     main.cpp 
-    PointerChainExample.cpp
     ${IMGUI_SOURCES} 
     ${GUI_SOURCES} 
     ${SOCKET_SOURCES} 
