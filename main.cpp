@@ -155,8 +155,9 @@ int main(int, char**)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
-    //io.ConfigViewportsNoAutoMerge = true;
-    //io.ConfigViewportsNoTaskBarIcon = true;
+    // Enable independent ImGui windows that can be moved freely
+    io.ConfigViewportsNoAutoMerge = true;                      // Don't merge viewports automatically
+    io.ConfigViewportsNoTaskBarIcon = false;                   // Show taskbar icons for ImGui windows
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
     //ImGui::StyleColorsLight();
@@ -250,7 +251,8 @@ int main(int, char**)
             break;
 
         // Handle window screen locked
-        if ((g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) || ::IsIconic(hwnd))
+        if ((g_SwapChainOccluded && g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)
+         )//|| ::IsIconic(hwnd)
         {
             ::Sleep(10);
             continue;
