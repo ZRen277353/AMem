@@ -7,6 +7,12 @@
 #include "MemoryViewerWindow.h"
 #include "BreakpointWindow.h"
 #include "PointerChainWindow.h"
+#include "LogWindow.h"
+
+#ifdef HAVE_LUAJIT
+#include "LuaScriptWindow.h"
+#endif
+#include "ServerConnectWindow.h"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -40,6 +46,16 @@ void CEWindow::drawMenuBar()
         if (ImGui::BeginMenu("编辑"))
         {
             ImGui::MenuItem("首选项", nullptr, false);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("窗口"))
+        {
+            if (ImGui::MenuItem("Lua脚本管理器"))
+                openLuaScriptWindow();
+            if (ImGui::MenuItem("服务器连接"))
+                openServerConnectWindow();
+            if (ImGui::MenuItem("日志"))
+                openLogWindow();
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -322,6 +338,56 @@ void CEWindow::openPointerChainWindow()
     }
     pointerChainWindow->pOpen = true;
     pointerChainWindow->shouldBringToFront = true;
+}
+
+void CEWindow::openLuaScriptWindow()
+{
+#ifdef HAVE_LUAJIT
+    auto list = Gui::getWindows<LuaScriptWindow>();
+    LuaScriptWindow* lsw = nullptr;
+    if (list.empty()) {
+        lsw = new LuaScriptWindow();
+        Gui::addWindow(lsw);
+    } else {
+        lsw = list.front();
+    }
+    if (lsw) {
+        lsw->pOpen = true;
+        lsw->shouldBringToFront = true;
+    }
+#endif
+}
+
+void CEWindow::openServerConnectWindow()
+{
+    auto list = Gui::getWindows<ServerConnectWindow>();
+    ServerConnectWindow* scw = nullptr;
+    if (list.empty()) {
+        scw = new ServerConnectWindow();
+        Gui::addWindow(scw);
+    } else {
+        scw = list.front();
+    }
+    if (scw) {
+        scw->pOpen = true;
+        scw->shouldBringToFront = true;
+    }
+}
+
+void CEWindow::openLogWindow()
+{
+    auto list = Gui::getWindows<LogWindow>();
+    LogWindow* lw = nullptr;
+    if (list.empty()) {
+        lw = new LogWindow();
+        Gui::addWindow(lw);
+    } else {
+        lw = list.front();
+    }
+    if (lw) {
+        lw->pOpen = true;
+        lw->shouldBringToFront = true;
+    }
 }
 
 

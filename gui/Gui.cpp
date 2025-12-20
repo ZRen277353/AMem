@@ -3,6 +3,7 @@
 #include "CEWindow.h"
 #include "ServerConnectWindow.h"
 #include "ModulesWindow.h"
+#include "LogWindow.h"
 #include "../imgui/imgui.h"
 #include <map>
 
@@ -28,21 +29,6 @@ namespace Gui {
 		windows.emplace_back(window);
 	}
 
-	static void drawLogsPanel()
-	{
-		if (logs.empty())
-			return;
-		if (ImGui::Begin("Logs")) {
-			for (const auto& [msg, dup]: logs) {
-				if (dup > 0)
-					ImGui::TextUnformatted((msg + "  (x" + std::to_string(dup + 1) + ")").c_str());
-				else
-					ImGui::TextUnformatted(msg.c_str());
-			}
-		}
-		ImGui::End();
-	}
-
 	void mainLoop()
 	{
 		static bool bootstrapped = false;
@@ -50,6 +36,7 @@ namespace Gui {
 			if (windows.empty()) {
 				Gui::addWindow(new CEWindow());
 				Gui::addWindow(new ServerConnectWindow());
+				Gui::addWindow(new LogWindow());
 				
 #ifdef HAVE_LUAJIT
 				Gui::addWindow(new LuaScriptWindow());
@@ -70,7 +57,5 @@ namespace Gui {
 				(*w)();
 			}
 		}
-
-		drawLogsPanel();
 	}
 } 

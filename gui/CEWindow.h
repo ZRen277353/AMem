@@ -10,6 +10,9 @@ class ScanWindow;
 class MemoryViewerWindow;
 class BreakpointWindow;
 class PointerChainWindow;
+class LuaScriptWindow;
+class ServerConnectWindow;
+class LogWindow;
 
 class CEWindow : public Window {
 public:
@@ -31,6 +34,9 @@ private:
     void openBreakpointWindow();
     void openModulesWindow();
     void openPointerChainWindow();
+    void openLuaScriptWindow();
+    void openServerConnectWindow();
+    void openLogWindow();
 
     // 状态变量
     bool openProcessModal = false;

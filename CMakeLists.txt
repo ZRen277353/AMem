@@ -92,6 +92,7 @@ set(GUI_SOURCES
     gui/PointerChainWindow.cpp
     gui/DisassemblyHelper.cpp
     gui/ConfigManager.cpp
+    gui/LogWindow.cpp
 )
 
 set(LUA_SOURCES
