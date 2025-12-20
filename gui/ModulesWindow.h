@@ -14,6 +14,7 @@ class ModulesWindow : public Window {
 public:
 	ModulesWindow();
 	void onDraw() override;
+	unsigned int getWindowFlags() const override;
 
 	void triggerAutoRefresh() { autoRefreshOnce = true; }
 	void setMemoryViewerWindow(MemoryViewerWindow* memViewer) { memoryViewerWindow = memViewer; }

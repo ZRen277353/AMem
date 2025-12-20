@@ -28,7 +28,7 @@ CEWindow::CEWindow()
 
 unsigned int CEWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_MenuBar;
+    return ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
 }
 
 void CEWindow::drawMenuBar()

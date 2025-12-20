@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Window.h"
+#include "../socket/client_singleton.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -68,6 +69,7 @@ public:
     BreakpointWindow();
 
     void onDraw() override;
+    unsigned int getWindowFlags() const override;
 
     // 进程信息（从主窗口获取）
     int* selectedPid = nullptr;
@@ -96,6 +98,11 @@ private:
     std::string formatTime(uint64_t timestamp);
     std::string formatTimeDiff(uint64_t start, uint64_t end);
     void addBreakpoint(uint64_t address, BreakpointType type, BreakpointSize size, const std::string& description);
+    
+    // 模块相关方法
+    void refreshModuleList();
+    const ModuleInfoItem* findModuleByAddress(uint64_t address);
+    std::string formatAddressWithModule(uint64_t address);
     void removeBreakpoint(int index);
     void toggleBreakpoint(int index);
     void suspendBreakpoint(int index);
@@ -184,4 +191,10 @@ private:
     // 反汇编助手
     DisassemblyHelper* disassemblyHelper = nullptr;
     bool disassemblyInitialized = false;
+    
+    // 模块列表缓存
+    std::vector<ModuleInfoItem> moduleList;
+    float lastModuleRefreshTime = 0.0f;
+    float moduleRefreshInterval = 5.0f;  // 每5秒刷新一次模块列表
+    bool moduleListValid = false;
 }; 

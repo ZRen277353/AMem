@@ -11,7 +11,7 @@ public:
 	~ServerConnectWindow() override = default;
 
 	void onDraw() override;
-	unsigned int getWindowFlags() const override { return 0; }
+	unsigned int getWindowFlags() const override { return ImGuiWindowFlags_NoDocking; }
 
 	std::function<void()> onConnected; // callback after successful connect
 

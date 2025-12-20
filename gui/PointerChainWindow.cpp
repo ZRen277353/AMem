@@ -12,6 +12,11 @@ PointerChainWindow::PointerChainWindow()
     formatter = std::make_unique<memchainer::PointerFormatter>();
 }
 
+unsigned int PointerChainWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 PointerChainWindow::~PointerChainWindow()
 {
     // 如果有指针加载线程正在运行，先取消并等待

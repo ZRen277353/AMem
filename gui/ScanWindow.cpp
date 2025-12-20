@@ -16,6 +16,11 @@ ScanWindow::ScanWindow()
     name = "数值扫描";
 }
 
+unsigned int ScanWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 ScanWindow::~ScanWindow()
 {
     // 清理扫描线程

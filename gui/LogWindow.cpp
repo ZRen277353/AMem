@@ -7,6 +7,11 @@ LogWindow::LogWindow() {
     name = "Logs";
 }
 
+unsigned int LogWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 void LogWindow::onDraw() {
     if (ImGui::Begin(name.c_str(), &pOpen)) {
         auto& logs = Gui::logs;

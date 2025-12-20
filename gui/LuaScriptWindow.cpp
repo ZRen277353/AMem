@@ -11,6 +11,11 @@ LuaScriptWindow::LuaScriptWindow() {
     refreshScriptList();
 }
 
+unsigned int LuaScriptWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 LuaScriptWindow::~LuaScriptWindow() {
 }
 

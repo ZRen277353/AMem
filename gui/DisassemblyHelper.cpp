@@ -188,8 +188,44 @@ DisassemblyResult DisassemblyHelper::disassembleMultiple(uint64_t address, const
         
         cs_free(insn, count);
     } else {
+        // 检查 Capstone 错误代码
+        cs_err err = cs_errno(handle);
         result.success = false;
-        result.errorMessage = "Failed to disassemble instructions";
+        
+        // 根据错误代码提供更详细的错误信息
+        if (err == CS_ERR_OK) {
+            // 没有错误，但也没有反汇编出指令（可能是数据不是有效的指令）
+            result.errorMessage = "无法反汇编：数据不是有效的指令（可能是数据段而非代码段）";
+        } else {
+            // 有错误，根据错误代码提供详细信息
+            switch (err) {
+                case CS_ERR_MEM:
+                    result.errorMessage = "Capstone 内存分配失败";
+                    break;
+                case CS_ERR_ARCH:
+                    result.errorMessage = "不支持的架构";
+                    break;
+                case CS_ERR_HANDLE:
+                case CS_ERR_CSH:
+                    result.errorMessage = "无效的 Capstone 句柄";
+                    break;
+                case CS_ERR_MODE:
+                    result.errorMessage = "不支持的架构模式";
+                    break;
+                case CS_ERR_DETAIL:
+                    result.errorMessage = "详细信息不可用";
+                    break;
+                case CS_ERR_MEMSETUP:
+                    result.errorMessage = "内存设置失败";
+                    break;
+                case CS_ERR_VERSION:
+                    result.errorMessage = "不支持的版本";
+                    break;
+                default:
+                    result.errorMessage = "反汇编失败（错误代码: " + std::to_string(err) + "）";
+                    break;
+            }
+        }
     }
     
     return result;

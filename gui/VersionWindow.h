@@ -7,6 +7,7 @@ class VersionWindow : public Window {
 public:
 	VersionWindow();
 	void onDraw() override;
+	unsigned int getWindowFlags() const override;
 
 private:
 	bool hasData = false;

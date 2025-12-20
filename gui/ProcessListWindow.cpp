@@ -8,6 +8,11 @@ ProcessListWindow::ProcessListWindow()
 	name = "Process List";
 }
 
+unsigned int ProcessListWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 void ProcessListWindow::onDraw()
 {
 	if (ImGui::Button("Refresh"))

@@ -18,6 +18,7 @@ public:
     ~PointerChainWindow();
 
     void onDraw() override;
+    unsigned int getWindowFlags() const override;
     void setProcessInfo(int* pid, std::string* name);
     void setMemoryViewerWindow(MemoryViewerWindow* memViewer);
     void setOpenMemoryViewerCallback(std::function<MemoryViewerWindow*()> callback);

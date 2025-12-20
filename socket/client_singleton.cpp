@@ -1051,12 +1051,14 @@ bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,
         CeReadProcessMemoryOutput outHdr{};
         if (!client->Receive(&outHdr, sizeof(outHdr)))
           return false;
+
+        out.resize(size);
+        client->Receive(out.data(), out.size());
         if (outHdr.read <= 0) {
           out.clear();
-          return true;
+          return false;  // 视为读取失败，避免上层误判为空数据
         }
-        out.resize(outHdr.read);
-        return client->Receive(out.data(), out.size());
+        return true;
       });
 }
 
@@ -1122,7 +1124,13 @@ bool ReadProcessMemory_(uint64_t address, uint32_t size, void *out,
           return false;
 
         client->Receive(&Realread, sizeof(Realread));
-        return client->Receive(out, size);
+        
+        client->Receive(out, size);
+        if (Realread <= 0) {
+          
+          return false;
+        }
+        return true;
       });
 }
 

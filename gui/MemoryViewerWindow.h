@@ -1,9 +1,14 @@
 #pragma once
 
 #include "Window.h"
+#include "DisassemblyHelper.h"
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <memory>
+
+// 前向声明
+struct ModuleInfoItem;
 
 // 数据结构字段类型枚举
 enum class FieldType {
@@ -100,6 +105,7 @@ public:
     MemoryViewerWindow();
 
     void onDraw() override;
+    unsigned int getWindowFlags() const override;
 
     // 进程信息（从主窗口获取）
     int* selectedPid = nullptr;
@@ -117,6 +123,7 @@ private:
     void drawMemoryHexEditor(); // 新增：十六进制编辑器
     void drawAddressList();     // 新增：地址列表（类似CE）
     void drawAddItemDialog();   // 新增：添加监控项对话框
+    void drawDisassemblyPanel(); // 新增：反汇编查看器面板
     
     // 辅助方法
     const char* getFieldTypeName(FieldType type);
@@ -144,6 +151,12 @@ private:
     void autoAnalyzeStructure(const std::vector<unsigned char>& data);  // 自动分析结构体
     void addStructToWatchList(const StructDefinition& structDef);  // 将结构体添加到监控列表
     bool writeStructFieldValue(int fieldIndex, const std::string& value);  // 写入结构体字段值
+    
+    // 反汇编相关
+    void refreshModuleList();  // 刷新模块列表
+    const ModuleInfoItem* findModuleByAddress(uint64_t address);  // 根据地址查找模块
+    std::string formatAddressWithModule(uint64_t address);  // 格式化地址显示：模块名+偏移量=地址
+    std::string formatAddressWithOffset(uint64_t address);  // 格式化地址显示：地址[偏移量]
     
     // 内存查看器状态
     uint64_t viewAddress = 0;
@@ -220,4 +233,25 @@ private:
     char newItemOffsets[256] = "";
     float watchUpdateInterval = 1.0f;  // 监控更新间隔（增加默认间隔，减少内存读写频率）
     float timeSinceWatchUpdate = 0.0f;
+    
+    // 反汇编查看器状态
+    std::unique_ptr<DisassemblyHelper> disassemblyHelper;  // 反汇编引擎
+    bool disassemblyInitialized = false;  // 反汇编引擎是否已初始化
+    char disassemblyAddressBuf[64] = "";  // 反汇编地址输入框
+    uint64_t disassemblyAddress = 0;  // 当前反汇编地址（高亮地址）
+    std::vector<unsigned char> disassemblyBuffer;  // 反汇编数据缓冲区
+    bool disassemblyBufferValid = false;  // 缓冲区数据是否有效（用于区分从未读取和读取失败）
+    DisassemblyResult cachedDisassemblyResult;  // 缓存的反汇编结果
+    bool disassemblyFailed = false;  // 反汇编是否已失败（避免无限重试）
+    uint64_t disassemblyFailedAddress = 0;  // 反汇编失败时的地址（用于检测地址是否改变）
+    bool disassemblyAutoRefresh = false;  // 是否自动刷新（简化后不再使用自动刷新）
+    float disassemblyRefreshInterval = 2.0f;  // 刷新间隔（保留字段以兼容UI）
+    float timeSinceDisassemblyRefresh = 0.0f;  // 距离上次刷新的时间（保留字段以兼容UI）
+    bool scrollToDisassemblyAddress = false;  // 是否需要滚动到高亮地址
+    static constexpr size_t DISASSEMBLY_BUFFER_SIZE = 4096;  // 反汇编缓冲区大小（4KB）
+    
+    // 模块列表（用于地址格式化）
+    std::vector<ModuleInfoItem> moduleList;  // 模块列表
+    bool moduleListValid = false;  // 模块列表是否有效
+    double lastModuleRefreshTime = 0.0;  // 上次刷新模块列表的时间
 }; 

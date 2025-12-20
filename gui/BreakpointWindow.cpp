@@ -29,6 +29,11 @@ BreakpointWindow::BreakpointWindow()
     }
 }
 
+unsigned int BreakpointWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 void BreakpointWindow::setProcessInfo(int* pid, std::string* processName)
 {
     selectedPid = pid;
@@ -48,6 +53,19 @@ void BreakpointWindow::setOpenMemoryViewerCallback(std::function<MemoryViewerWin
 void BreakpointWindow::onDraw()
 {
     if (!pOpen) return;
+
+    // 自动刷新模块列表（仅当有断点存在时才刷新）
+    if (selectedPid && *selectedPid != 0 && !breakpoints.empty()) {
+        float currentTime = ImGui::GetTime();
+        if (!moduleListValid || (currentTime - lastModuleRefreshTime >= moduleRefreshInterval)) {
+            refreshModuleList();
+        }
+    } else {
+        // 如果没有断点或未附加进程，清除模块列表有效性标记（但不立即清空列表，保留作为缓存）
+        if (!selectedPid || *selectedPid == 0 || breakpoints.empty()) {
+            moduleListValid = false;
+        }
+    }
 
     if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
     {
@@ -235,8 +253,9 @@ void BreakpointWindow::drawBreakpointList()
                         auto maxHit = std::max_element(bp.pcHitStats.begin(), bp.pcHitStats.end(),
                             [](const auto& a, const auto& b) { return a.second.hit_count < b.second.hit_count; });
                         float maxHitRate = bp.hitCount > 0 ? (float)maxHit->second.hit_count / bp.hitCount * 100.0f : 0.0f;
-                        ImGui::SetTooltip("不同PC地址: %d个\n热点PC: 0x%llX\n热点命中: %d次 (%.1f%%)", 
-                                         pcCount, maxHit->first, maxHit->second.hit_count, maxHitRate);
+                        std::string maxHitAddrStr = formatAddressWithModule(maxHit->first);
+                        ImGui::SetTooltip("不同PC地址: %d个\n热点PC: %s (0x%llX)\n热点命中: %d次 (%.1f%%)", 
+                                         pcCount, maxHitAddrStr.c_str(), maxHit->first, maxHit->second.hit_count, maxHitRate);
                     }
                 }
             } else {
@@ -781,7 +800,8 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
             auto maxHit = std::max_element(bp.pcHitStats.begin(), bp.pcHitStats.end(),
                 [](const auto& a, const auto& b) { return a.second.hit_count < b.second.hit_count; });
             float maxHitRate = bp.hitCount > 0 ? (float)maxHit->second.hit_count / bp.hitCount * 100.0f : 0.0f;
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), "0x%llX", maxHit->first);
+            std::string maxHitAddrStr = formatAddressWithModule(maxHit->first);
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), "%s", maxHitAddrStr.c_str());
             ImGui::Text("(%d次, %.1f%%)", maxHit->second.hit_count, maxHitRate);
         } else {
             ImGui::TextDisabled("无");
@@ -988,19 +1008,25 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                     }
                     
                     ImGui::TableSetColumnIndex(1);
-                    char pcAddrStr[32];
-                    sprintf(pcAddrStr, "0x%llX", stat.pc_address);
+                    std::string pcAddrDisplayStr = formatAddressWithModule(stat.pc_address);
+                    char pcAddrStr[256];
+                    snprintf(pcAddrStr, sizeof(pcAddrStr), "%s", pcAddrDisplayStr.c_str());
                     if (ImGui::Selectable(pcAddrStr, isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
                         detailWindow.selectedPCAddress = stat.pc_address;
                         Gui::log("选中PC地址: 0x%llX", stat.pc_address);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("PC地址: 0x%llX", stat.pc_address);
                     }
                     
                     // 右键菜单 - 使用唯一ID避免断言失败
                     char pc_popup_id[64];
                     snprintf(pc_popup_id, sizeof(pc_popup_id), "PCPopup_%llX", stat.pc_address);
                     if (ImGui::BeginPopupContextItem(pc_popup_id)) {
+                        char addrHexStr[32];
+                        snprintf(addrHexStr, sizeof(addrHexStr), "0x%llX", stat.pc_address);
                         if (ImGui::MenuItem("复制地址")) {
-                            ImGui::SetClipboardText(pcAddrStr);
+                            ImGui::SetClipboardText(addrHexStr);
                         }
                         if (ImGui::MenuItem("在内存查看器中打开")) {
                             MemoryViewerWindow* viewer = ensureMemoryViewerWindow();
@@ -1046,7 +1072,11 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                 bool foundHit = false;
                 for (int i = (int)bp.hitHistory.size() - 1; i >= 0; i--) {
                     if (bp.hitHistory[i].regs_info.pc == detailWindow.selectedPCAddress) {
-                        ImGui::Text("PC地址: 0x%llX 的详细信息", detailWindow.selectedPCAddress);
+                        std::string pcAddrDisplayStr = formatAddressWithModule(detailWindow.selectedPCAddress);
+                        ImGui::Text("PC地址: %s 的详细信息", pcAddrDisplayStr.c_str());
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("原始地址: 0x%llX", detailWindow.selectedPCAddress);
+                        }
                         ImGui::Separator();
                         
                         // 使用标签页显示寄存器和反汇编
@@ -1058,7 +1088,8 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                             
                             if (detailWindow.showDisassembly && ImGui::BeginTabItem("反汇编")) {
                                 if (disassemblyInitialized && disassemblyHelper) {
-                                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "PC: 0x%llX 的反汇编", detailWindow.selectedPCAddress);
+                                    std::string pcAddrDisplayStr = formatAddressWithModule(detailWindow.selectedPCAddress);
+                                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "PC: %s 的反汇编", pcAddrDisplayStr.c_str());
                                     ImGui::Separator();
                                     
                                     // 控制选项
@@ -1190,9 +1221,16 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
                 }
                 
                 ImGui::TableSetColumnIndex(1);
-                ImGui::Text("0x%llX", hit.hit_addr);
+                std::string hitAddrStr = formatAddressWithModule(hit.hit_addr);
+                ImGui::Text("%s", hitAddrStr.c_str());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("命中地址: 0x%llX", hit.hit_addr);
+                }
                 
                 ImGui::TableSetColumnIndex(2);
+                // std::string pcAddrStr = formatAddressWithModule(hit.regs_info.pc);
+                // char pcStr[256];
+                // snprintf(pcStr, sizeof(pcStr), "%s", pcAddrStr.c_str());
                 char pcStr[32];
                 sprintf(pcStr, "0x%llX", hit.regs_info.pc);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
@@ -1405,6 +1443,77 @@ std::string BreakpointWindow::formatTimeDiff(uint64_t start, uint64_t end)
         sprintf(buffer, "%.1fM", diff / 1000000.0);
     } else {
         sprintf(buffer, "%.1fG", diff / 1000000000.0);
+    }
+    
+    return std::string(buffer);
+}
+
+// 刷新模块列表
+void BreakpointWindow::refreshModuleList()
+{
+    if (!selectedPid || *selectedPid == 0) {
+        moduleListValid = false;
+        return;
+    }
+    
+    std::vector<ModuleInfoItem> newModules;
+    if (FetchModuleList(newModules, PORT_MAIN)) {
+        moduleList = std::move(newModules);
+        moduleListValid = true;
+        lastModuleRefreshTime = ImGui::GetTime();
+    } else {
+        moduleListValid = false;
+    }
+}
+
+// 根据地址查找对应的模块
+const ModuleInfoItem* BreakpointWindow::findModuleByAddress(uint64_t address)
+{
+    // 如果模块列表无效或为空，且已附加进程，则按需刷新（延迟加载）
+    // 注意：只有在实际需要格式化地址时才会加载模块列表，避免不必要的开销
+    if ((!moduleListValid || moduleList.empty()) && selectedPid && *selectedPid != 0) {
+        refreshModuleList();
+    }
+    
+    // 如果仍然无效或为空，返回nullptr
+    if (!moduleListValid || moduleList.empty()) {
+        return nullptr;
+    }
+    
+    // 在模块列表中查找地址所在的范围
+    for (const auto& module : moduleList) {
+        if (address >= module.base && address < (module.base + module.size)) {
+            return &module;
+        }
+    }
+    
+    return nullptr;
+}
+
+// 格式化地址显示：模块名+偏移量=地址
+std::string BreakpointWindow::formatAddressWithModule(uint64_t address)
+{
+    const ModuleInfoItem* module = findModuleByAddress(address);
+    
+    char buffer[256];
+    if (module) {
+        uint64_t offset = address - module->base;
+        // 提取模块名（如果路径很长，只显示文件名）
+        std::string moduleName = module->name;
+        size_t lastSlash = moduleName.find_last_of("/\\");
+        if (lastSlash != std::string::npos && lastSlash + 1 < moduleName.length()) {
+            moduleName = moduleName.substr(lastSlash + 1);
+        }
+        
+        if (moduleName.empty()) {
+            moduleName = "未知模块";
+        }
+        
+        snprintf(buffer, sizeof(buffer), "%s+0x%llX=0x%llX", 
+                moduleName.c_str(), offset, address);
+    } else {
+        // 如果找不到模块，只显示地址
+        snprintf(buffer, sizeof(buffer), "0x%llX", address);
     }
     
     return std::string(buffer);

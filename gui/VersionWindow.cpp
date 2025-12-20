@@ -9,6 +9,11 @@ VersionWindow::VersionWindow()
 	name = "版本信息";
 }
 
+unsigned int VersionWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 void VersionWindow::onDraw()
 {
 	// ==================== 客户端版本信息 ====================

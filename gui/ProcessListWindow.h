@@ -8,6 +8,7 @@ class ProcessListWindow : public Window {
 public:
 	ProcessListWindow();
 	void onDraw() override;
+	unsigned int getWindowFlags() const override;
 
 private:
 	bool hasData = false;

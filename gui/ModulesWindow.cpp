@@ -33,6 +33,11 @@ enum _ModuleType {
 };
 
 
+unsigned int ModulesWindow::getWindowFlags() const
+{
+    return ImGuiWindowFlags_NoDocking;
+}
+
 ModulesWindow::ModulesWindow()
 {
 	name = "模块列表";

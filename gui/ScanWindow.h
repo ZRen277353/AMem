@@ -17,6 +17,7 @@ class ScanWindow : public Window {
 public:
     ScanWindow();
     ~ScanWindow();  // 析构函数，用于清理线程
+    unsigned int getWindowFlags() const override;
 
     // 扫描参数
     char valueBuf[128] = "100";

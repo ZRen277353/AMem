@@ -11,6 +11,7 @@ public:
     ~LuaScriptWindow();
 
     void onDraw() override;
+    unsigned int getWindowFlags() const override;
 
 private:
     void drawScriptList();
