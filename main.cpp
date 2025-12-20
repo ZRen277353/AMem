@@ -159,8 +159,8 @@ int main(int, char**)
     io.ConfigViewportsNoAutoMerge = true;                      // Don't merge viewports automatically
     io.ConfigViewportsNoTaskBarIcon = false;                   // Show taskbar icons for ImGui windows
     // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
-    //ImGui::StyleColorsLight();
+    // ImGui::StyleColorsDark();
+    ImGui::StyleColorsLight();
 
         // Setup scaling
         ImGuiStyle& style = ImGui::GetStyle();
@@ -169,10 +169,142 @@ int main(int, char**)
         io.ConfigDpiScaleFonts = true;          // [Experimental] Automatically overwrite style.FontScaleDpi in Begin() when Monitor DPI changes. This will scale fonts but _NOT_ scale sizes/padding for now.
         io.ConfigDpiScaleViewports = true;      // [Experimental] Scale Dear ImGui and Platform Windows when Monitor DPI changes.
 
+        // 现代化样式配置 - 圆角和间距
+        style.WindowRounding = 15.0f;           // 窗口圆角
+        style.ChildRounding = 12.0f;            // 子窗口圆角
+        style.FrameRounding = 8.0f;            // 框架（按钮、输入框等）圆角
+        style.PopupRounding = 8.0f;            // 弹出窗口圆角
+        style.ScrollbarRounding = 6.0f;        // 滚动条圆角
+        style.GrabRounding = 4.0f;             // 抓取手柄圆角
+        style.TabRounding = 4.0f;             // 标签页圆角
+        
+        // 间距和填充
+        style.WindowPadding = ImVec2(12.0f, 12.0f);      // 窗口内边距
+        style.FramePadding = ImVec2(8.0f, 6.0f);         // 框架内边距（按钮、输入框等）
+        style.ItemSpacing = ImVec2(8.0f, 6.0f);          // 项目间距
+        style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);     // 项目内部间距
+        style.TouchExtraPadding = ImVec2(0.0f, 0.0f);   // 触摸额外填充
+        style.IndentSpacing = 20.0f;                     // 缩进间距
+        style.ScrollbarSize = 14.0f;                    // 滚动条大小
+        style.GrabMinSize = 12.0f;                      // 抓取手柄最小大小
+        
+        // 边框宽度
+        style.WindowBorderSize = 1.0f;
+        style.ChildBorderSize = 1.0f;
+        style.PopupBorderSize = 1.0f;
+        style.FrameBorderSize = 0.0f;          // 框架无边框，更现代
+        style.TabBorderSize = 1.0f;
+        
+        // 最小窗口大小
+        style.WindowMinSize = ImVec2(200.0f, 100.0f);
+        
+        // 窗口标题对齐
+        style.WindowTitleAlign = ImVec2(0.5f, 0.5f);    // 标题居中
+        
+        // 按钮文本对齐
+        style.ButtonTextAlign = ImVec2(0.5f, 0.5f);      // 按钮文本居中
+        
+        // 选择框文本对齐
+        style.SelectableTextAlign = ImVec2(0.0f, 0.0f);
+        
+        // 显示安全区域填充
+        style.DisplaySafeAreaPadding = ImVec2(3.0f, 3.0f);
+        
+        // 颜色调整 - 莫奈黑白色系配色
+        ImVec4* colors = style.Colors;
+        
+        // 基础颜色 - 莫奈风格黑白色系
+        colors[ImGuiCol_Text] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);                    // 文本颜色（深灰/近黑）
+        colors[ImGuiCol_TextDisabled] = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);          // 禁用文本（中灰）
+        
+        // 背景色 - 柔和的浅灰到白色渐变
+        colors[ImGuiCol_WindowBg] = ImVec4(0.97f, 0.97f, 0.97f, 1.00f);              // 窗口背景（极浅灰/近白）
+        colors[ImGuiCol_ChildBg] = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);               // 子窗口背景（浅灰）
+        colors[ImGuiCol_PopupBg] = ImVec4(0.99f, 0.99f, 0.99f, 0.98f);               // 弹出窗口背景（几乎纯白）
+        
+        // 边框 - 柔和的灰色边框
+        colors[ImGuiCol_Border] = ImVec4(0.70f, 0.70f, 0.70f, 0.50f);                // 边框颜色（浅灰）
+        colors[ImGuiCol_BorderShadow] = ImVec4(0.50f, 0.50f, 0.50f, 0.20f);          // 边框阴影（柔和灰影）
+        
+        // 框架 - 灰色调渐变
+        colors[ImGuiCol_FrameBg] = ImVec4(0.92f, 0.92f, 0.92f, 1.00f);               // 框架背景（浅灰）
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);        // 框架悬停（稍深灰）
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);        // 框架激活（中灰）
+        
+        // 标题栏 - 柔和的灰色渐变
+        colors[ImGuiCol_TitleBg] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);               // 标题背景（浅灰）
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);         // 标题激活（稍深灰）
+        colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.94f, 0.94f, 0.94f, 0.51f);      // 标题折叠（极浅灰）
+        
+        colors[ImGuiCol_MenuBarBg] = ImVec4(0.92f, 0.92f, 0.92f, 1.00f);             // 菜单栏背景（浅灰）
+        
+        // 滚动条 - 灰色系
+        colors[ImGuiCol_ScrollbarBg] = ImVec4(0.94f, 0.94f, 0.94f, 0.53f);           // 滚动条背景（极浅灰）
+        colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);         // 滚动条抓取（浅灰）
+        colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);  // 滚动条抓取悬停（中灰）
+        colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);   // 滚动条抓取激活（深灰）
+        
+        // 复选框和滑块 - 黑色主题
+        colors[ImGuiCol_CheckMark] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);             // 复选框标记（深灰/近黑）
+        colors[ImGuiCol_SliderGrab] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);             // 滑块抓取（中灰）
+        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);       // 滑块抓取激活（深灰）
+        
+        // 按钮 - 灰色系渐变
+        colors[ImGuiCol_Button] = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);                // 按钮（浅灰）
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);          // 按钮悬停（中灰）
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);         // 按钮激活（深灰）
+        
+        // 表头 - 灰色调
+        colors[ImGuiCol_Header] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);                // 表头（浅灰）
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.82f, 0.82f, 0.82f, 1.00f);         // 表头悬停（稍深灰）
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.75f, 0.75f, 0.75f, 1.00f);          // 表头激活（中灰）
+        
+        // 分隔线 - 柔和灰色
+        colors[ImGuiCol_Separator] = ImVec4(0.70f, 0.70f, 0.70f, 0.50f);              // 分隔线（浅灰）
+        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.65f, 0.65f, 0.65f, 0.78f);       // 分隔线悬停（稍深灰）
+        colors[ImGuiCol_SeparatorActive] = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);       // 分隔线激活（中灰）
+        
+        // 调整大小手柄 - 灰色系
+        colors[ImGuiCol_ResizeGrip] = ImVec4(0.85f, 0.85f, 0.85f, 0.20f);             // 调整大小手柄（极浅灰）
+        colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.75f, 0.75f, 0.75f, 0.67f);     // 调整大小手柄悬停（浅灰）
+        colors[ImGuiCol_ResizeGripActive] = ImVec4(0.60f, 0.60f, 0.60f, 0.95f);      // 调整大小手柄激活（中灰）
+        
+        // 标签页 - 灰色渐变
+        colors[ImGuiCol_Tab] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);                   // 标签页（浅灰）
+        colors[ImGuiCol_TabHovered] = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);            // 标签页悬停（稍深灰）
+        colors[ImGuiCol_TabActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);             // 标签页激活（中灰）
+        colors[ImGuiCol_TabUnfocused] = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);          // 标签页未聚焦（极浅灰）
+        colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.92f, 0.92f, 0.92f, 1.00f);    // 标签页未聚焦激活（浅灰）
+        
+        // 停靠 - 灰色预览
+        colors[ImGuiCol_DockingPreview] = ImVec4(0.60f, 0.60f, 0.60f, 0.30f);        // 停靠预览（中灰半透明）
+        colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);        // 停靠空背景（浅灰）
+        
+        // 绘图 - 灰色系
+        colors[ImGuiCol_PlotLines] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);              // 绘图线（中灰）
+        colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);      // 绘图线悬停（深灰）
+        colors[ImGuiCol_PlotHistogram] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);         // 直方图（中灰）
+        colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);   // 直方图悬停（中深灰）
+        
+        // 表格 - 浅灰色调
+        colors[ImGuiCol_TableHeaderBg] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);         // 表格表头背景（浅灰）
+        colors[ImGuiCol_TableBorderStrong] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);      // 表格强边框（浅灰）
+        colors[ImGuiCol_TableBorderLight] = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);      // 表格弱边框（浅灰）
+        colors[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);             // 表格行背景（透明）
+        colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.94f, 0.94f, 0.94f, 0.50f);          // 表格行背景交替（极浅灰）
+        
+        // 其他 - 黑白色主题
+        colors[ImGuiCol_TextSelectedBg] = ImVec4(0.75f, 0.75f, 0.75f, 0.35f);          // 文本选择背景（中灰半透明）
+        colors[ImGuiCol_DragDropTarget] = ImVec4(0.40f, 0.40f, 0.40f, 0.90f);        // 拖放目标（深灰）
+        colors[ImGuiCol_NavHighlight] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);           // 导航高亮（中灰）
+        colors[ImGuiCol_NavWindowingHighlight] = ImVec4(0.98f, 0.98f, 0.98f, 0.70f);  // 导航窗口高亮（极浅灰）
+        colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.85f, 0.85f, 0.85f, 0.20f);     // 导航窗口暗化背景（浅灰）
+        colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.60f);      // 模态窗口暗化背景（深灰/近黑）
+
             // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
-        style.WindowRounding = 0.0f;
+        // 保持圆角，但确保窗口背景不透明
         style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
 
@@ -230,8 +362,8 @@ int main(int, char**)
         }
     }
 
-    // Our state
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    // Our state - 莫奈黑白色系背景
+    ImVec4 clear_color = ImVec4(0.95f, 0.95f, 0.95f, 1.00f);  // 浅灰色背景（莫奈黑白色系）
 
     // Main loop
     bool done = false;
