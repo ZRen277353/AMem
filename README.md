@@ -5,7 +5,7 @@
 
 [视频效果](https://www.bilibili.com/video/BV1KpWbzeEFU/)
 
-[TG频道 内存库文件获取](https://t.me/androidmem)
+[TG频道 内存库文件获取](https://t.me/AndroidMemX)
 
 
 # Android Cheat Engine (ImGui版)
@@ -18,7 +18,6 @@
 
 </div>
 
----
 
 ## 📋 项目简介
 
@@ -33,7 +32,6 @@
 - 📡 **远程连接** - 通过 Socket 连接 Android 设备
 - 💾 **崩溃保护** - 完整的异常捕获和 dump 生成
 
----
 
 ## ✨ 功能特性
 
@@ -93,7 +91,6 @@
 - ✅ 信号处理
 - ✅ 自动生成 .dmp 崩溃转储文件
 
----
 
 ## 🚀 快速开始
 
@@ -154,8 +151,6 @@ cmake --build . --config Release
 build/Release/ImGuiProject.exe
 ```
 
----
-
 ## 📖 使用指南
 
 ### 1. 连接 Android 设备
@@ -212,181 +207,6 @@ build/Release/ImGuiProject.exe
 4. 点击 **"设置断点"**
 5. 触发断点后，查看命中信息
 
----
-
-## 🏗️ 技术架构
-
-### 项目结构
-
-```
-imguiApp/
-├── main.cpp                    # 程序入口
-├── CMakeLists.txt             # CMake 构建配置
-├── build.bat                  # 快速编译脚本
-├── ExceptionHandler.h         # 异常处理模块
-│
-├── imgui/                     # ImGui 库
-│   ├── imgui.cpp/h           # ImGui 核心
-│   └── backends/             # 渲染后端
-│       ├── imgui_impl_win32.cpp/h
-│       └── imgui_impl_dx12.cpp/h
-│
-├── gui/                       # GUI 窗口模块
-│   ├── Gui.cpp/h             # GUI 框架
-│   ├── Window.cpp/h          # 窗口基类
-│   ├── CEWindow.cpp/h        # 主窗口
-│   ├── ScanWindow.cpp/h      # 内存扫描窗口
-│   ├── PointerChainWindow.cpp/h  # 指针链窗口
-│   ├── MemoryViewerWindow.cpp/h  # 内存查看器
-│   ├── BreakpointWindow.cpp/h    # 断点窗口
-│   ├── ModulesWindow.cpp/h       # 模块列表
-│   ├── ProcessListWindow.cpp/h   # 进程列表
-│   └── DisassemblyHelper.cpp/h   # 反汇编辅助
-│
-├── PointerScan/               # 指针扫描引擎
-│   ├── PointerScanner.hpp    # 扫描器主类
-│   ├── scanner.cpp           # 扫描实现
-│   ├── types.h               # 数据类型定义
-│   ├── formatter.cpp/h       # 结果格式化
-│   └── MULTITHREAD_DESIGN.md # 多线程设计文档
-│
-└── socket/                    # 网络通信模块
-    ├── client.hpp            # Socket 客户端
-    └── client_singleton.cpp/h # 单例模式封装
-```
-
-### 核心技术栈
-
-| 技术 | 版本 | 用途 |
-|------|------|------|
-| C++ | C++17 | 核心语言 |
-| CMake | 3.16+ | 构建系统 |
-| Dear ImGui | 最新 | UI 框架 |
-| DirectX 12 | - | 图形渲染 |
-| Capstone | 5.x | 反汇编引擎 |
-| Winsock2 | - | 网络通信 |
-
-### 指针扫描算法
-
-#### 多线程设计
-
-采用 **分区并行 + 延迟统计** 策略：
-
-```
-第0层分支 (1000个分支)
-    ↓
-按线程数分区 (例如4线程)
-    ↓
-┌─────────┬─────────┬─────────┬─────────┐
-│ 线程1   │ 线程2   │ 线程3   │ 线程4   │
-│ 0-249   │ 250-499 │ 500-749 │ 750-999 │
-└─────────┴─────────┴─────────┴─────────┘
-    ↓         ↓         ↓         ↓
-  DFS       DFS       DFS       DFS
-    ↓         ↓         ↓         ↓
- 本地结果  本地结果  本地结果  本地结果
-    └─────────┴─────────┴─────────┘
-                 ↓
-            合并所有结果
-```
-
-**优势**：
-- ✅ 零锁竞争（完全无锁设计）
-- ✅ 数据局部性好
-- ✅ 负载均衡
-- ✅ 易于实现和调试
-
-详见：[PointerScan/MULTITHREAD_DESIGN.md](PointerScan/MULTITHREAD_DESIGN.md)
-
----
-
-## 📚 开发文档
-
-### 已有文档
-
-1. **[ExceptionHandler_README.md](ExceptionHandler_README.md)**
-   - 异常处理模块使用指南
-   - 崩溃捕获和 dump 生成
-   - 完整的集成示例
-
-2. **[MULTITHREAD_DESIGN.md](PointerScan/MULTITHREAD_DESIGN.md)**
-   - 多线程指针扫描设计方案
-   - 性能瓶颈分析
-   - 三种并行方案对比
-
-3. **[树形布局说明.txt](树形布局说明.txt)**
-   - 指针链树形可视化编辑器
-   - 节点布局算法
-   - 交互操作说明
-
-4. **[PointerChainZoomAndCollapse说明.md](PointerChainZoomAndCollapse说明.md)**
-   - 指针链缩放和折叠功能（待完善）
-
-### API 参考
-
-#### PointerScanner 类
-
-```cpp
-namespace memchainer {
-
-// 扫描配置
-struct ScanOptions {
-    uint32_t maxDepth = 10;        // 最大深度
-    int64_t maxOffset = 500;       // 最大偏移量
-    bool limitResults = false;     // 是否限制结果
-    uint32_t resultLimit = 99999999;
-    uint32_t threadCount = 4;      // 线程数量
-};
-
-class PointerScanner {
-public:
-    // 查找所有潜在指针
-    uint32_t findPointers(bool clearExisting = true, 
-                         const FindProgressCallback& progressCb = nullptr);
-    
-    // 扫描指针链
-    int scanPointerChain(Address& targetAddress,
-                        const ScanOptions& options,
-                        const ScanProgressCallback& progressCb = nullptr);
-    
-    // 获取指针数量
-    uint32_t getPointerCount() const;
-    
-    // 获取指针链结果
-    const std::vector<std::list<PointerChainNode>>& getChains() const;
-};
-
-}
-```
-
-#### Socket 通信接口
-
-```cpp
-// 服务器连接
-bool FetchServerVersion(ServerVersionInfo& outInfo);
-
-// 进程管理
-bool FetchProcessList(std::vector<ProcessInfoItem>& outList);
-bool OpenProcessHandle(int pid, int& outHandle);
-
-// 内存操作
-bool ReadProcessMemoryBytes(uint64_t address, uint32_t size, 
-                           std::vector<unsigned char>& out);
-bool WriteProcessMemoryBytes(uint64_t address, uint32_t size, 
-                            std::vector<unsigned char>& data);
-
-// 内存扫描
-int ScanValueWithProgress(uint32_t flags, 
-                         std::vector<unsigned char>& Value,
-                         ScanProgressCallback callback, 
-                         void* userData);
-
-// 断点管理
-bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize);
-bool RemoveKernelBreakpoint(uint64_t address);
-```
-
----
 
 ## ⚙️ 构建配置
 
@@ -408,7 +228,6 @@ set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation 
 - `IMGUI_DISABLE_DEBUG_TOOLS` - 禁用 ImGui 调试工具
 - `DX12_ENABLE_DEBUG_LAYER` - 启用 D3D12 调试层（Debug 模式）
 
----
 
 ## 🔧 故障排除
 
@@ -445,15 +264,6 @@ set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation 
 2. 检查 IP 地址和端口是否正确
 3. 检查防火墙设置
 4. 确认设备在同一网络
-```
-
-**问题**: 指针扫描速度很慢
-```
-解决方案：
-1. 减小最大深度（推荐 5-7）
-2. 减小最大偏移量（推荐 500-2000）
-3. 增加线程数量（根据 CPU 核心数）
-4. 限制结果数量
 ```
 
 **问题**: 程序崩溃
