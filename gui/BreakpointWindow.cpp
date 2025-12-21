@@ -1461,6 +1461,7 @@ void BreakpointWindow::refreshModuleList()
         moduleList = std::move(newModules);
         moduleListValid = true;
         lastModuleRefreshTime = ImGui::GetTime();
+        Gui::log("模块列表刷新成功，模块数量: %d", moduleList.size());
     } else {
         moduleListValid = false;
     }
@@ -1472,11 +1473,13 @@ const ModuleInfoItem* BreakpointWindow::findModuleByAddress(uint64_t address)
     // 如果模块列表无效或为空，且已附加进程，则按需刷新（延迟加载）
     // 注意：只有在实际需要格式化地址时才会加载模块列表，避免不必要的开销
     if ((!moduleListValid || moduleList.empty()) && selectedPid && *selectedPid != 0) {
+       // Gui::log("模块列表无效或为空，刷新模块列表");
         refreshModuleList();
     }
     
     // 如果仍然无效或为空，返回nullptr
     if (!moduleListValid || moduleList.empty()) {
+        //Gui::log("模块列表无效或为空，返回nullptr");
         return nullptr;
     }
     
@@ -1500,7 +1503,7 @@ std::string BreakpointWindow::formatAddressWithModule(uint64_t address)
         uint64_t offset = address - module->base;
         // 提取模块名（如果路径很长，只显示文件名）
         std::string moduleName = module->name;
-        size_t lastSlash = moduleName.find_last_of("/\\");
+        size_t lastSlash = moduleName.find_last_of("/");
         if (lastSlash != std::string::npos && lastSlash + 1 < moduleName.length()) {
             moduleName = moduleName.substr(lastSlash + 1);
         }

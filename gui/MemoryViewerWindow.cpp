@@ -3271,7 +3271,7 @@ void MemoryViewerWindow::drawDataInspector()
 // 刷新模块列表
 void MemoryViewerWindow::refreshModuleList()
 {
-    if (!selectedPid || *selectedPid != 0) {
+    if (selectedPid == nullptr || *selectedPid == 0) {
         moduleListValid = false;
         return;
     }
@@ -3291,11 +3291,13 @@ const ModuleInfoItem* MemoryViewerWindow::findModuleByAddress(uint64_t address)
 {
     // 如果模块列表无效或为空，且已附加进程，则按需刷新（延迟加载）
     if ((!moduleListValid || moduleList.empty()) && selectedPid && *selectedPid != 0) {
+       // Gui::log("模块列表无效或为空，刷新模块列表");
         refreshModuleList();
     }
     
     // 如果仍然无效或为空，返回nullptr
     if (!moduleListValid || moduleList.empty()) {
+       // Gui::log("模块列表无效或为空，返回nullptr");
         return nullptr;
     }
     
@@ -3319,7 +3321,7 @@ std::string MemoryViewerWindow::formatAddressWithModule(uint64_t address)
         uint64_t offset = address - module->base;
         // 提取模块名（如果路径很长，只显示文件名）
         std::string moduleName = module->name;
-        size_t lastSlash = moduleName.find_last_of("/\\");
+        size_t lastSlash = moduleName.find_last_of("/");
         if (lastSlash != std::string::npos && lastSlash + 1 < moduleName.length()) {
             moduleName = moduleName.substr(lastSlash + 1);
         }
