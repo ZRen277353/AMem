@@ -540,8 +540,11 @@ bool GetScanResult(
     std::vector<std::pair<uint64_t, uint64_t>> &results /*address,Value*/,
     PortType port) {
   auto client = GetSocketMgr().GetClient(port);
-  if (!client->IsConnected())
+  if (!client->IsConnected()){
+    std::cout << "GetScanResult: !client->IsConnected()" << std::endl;
     return false;
+  }
+
   int handle = 0;
   if (!EnsureOpenHandle(handle))
     return false;
@@ -559,18 +562,31 @@ bool GetScanResult(
         CeGetScanResultInput input;
         input.offset = offset;
         input.count = count;
+        std::cout << "GetScanResult: input.offset " << input.offset << " input.count " << input.count << std::endl;
         if (!client->Send(&input, sizeof(input)))
           return false;
 
+        std::cout << "GetScanResult: Receive output" << std::endl;
         CeGetScanResultOutput output;
         if (!client->Receive(&output, sizeof(output)))
           return false;
         if (output.actual_count == 0)
           return false;
 
-        results.reserve(output.actual_count);
-        client->Receive(results.data(),
-                        output.actual_count * sizeof(uint64_t) * 2);
+        std::cout << "GetScanResult: output.actual_count " << output.actual_count << std::endl;
+
+        // 使用 resize 而不是 reserve，确保缓冲区大小正确
+        // 这样可以安全地使用 data() 指针
+        results.resize(output.actual_count);
+        if (results.empty() || !results.data()) {
+          std::cout << "GetScanResult: results.empty() || !results.data()" << std::endl;
+          return false;  // 内存分配失败
+        }
+        // 接收数据到缓冲区
+        if (!client->Receive(results.data(),
+                            output.actual_count * sizeof(uint64_t) * 2)) {
+          return false;
+        }
 
         return true;
       });

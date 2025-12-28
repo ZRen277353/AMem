@@ -1,6 +1,7 @@
 #include "MemoryViewerWindow.h"
 #include "Gui.h"
 #include "DisassemblyHelper.h"
+#include "ColorScheme.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
 #include <algorithm>
@@ -214,7 +215,7 @@ void MemoryViewerWindow::onDraw()
     if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
     {
         if (selectedPid && *selectedPid != 0) {
-            ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "已附加: %s (PID %d)", 
+            ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", 
                 selectedName ? selectedName->c_str() : "Unknown", *selectedPid);
         } else {
             ImGui::TextDisabled("未附加进程");
@@ -393,7 +394,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::SameLine();
     
     uint64_t pageNumber = pageBaseAddress / pageSize;
-    ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "页#%llu", pageNumber);
+    ImGui::TextColored(ColorScheme::SuccessLight, "页#%llu", pageNumber);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("当前页号: %llu\n页首: 0x%llX\n页范围: 0x%llX - 0x%llX\n页大小: %d 字节", 
                          pageNumber, pageBaseAddress, 
@@ -403,7 +404,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     if (targetAddress >= pageBaseAddress && targetAddress < pageBaseAddress + pageSize) {
         ImGui::SameLine();
         uint64_t offsetInPage = targetAddress - pageBaseAddress;
-        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.6f, 1.0f), "+0x%llX", offsetInPage);
+        ImGui::TextColored(ColorScheme::WarningLight, "+0x%llX", offsetInPage);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("页内偏移\n目标: 0x%llX", targetAddress);
         }
@@ -559,7 +560,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                 ImGui::TextDisabled("偏移链为空\n点击'添加偏移'添加偏移项");
             } else {
                 // 显示偏移链路径
-                ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "偏移链路径:");
+                ImGui::TextColored(ColorScheme::InfoLight, "偏移链路径:");
                 ImGui::SameLine();
                 std::string chainPath = moduleNameBuf;
                 chainPath += " + 0x" + std::string(baseOffsetBuf);
@@ -578,7 +579,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                     
                     bool isSelected = (selectedOffsetIndex == (int)i);
                     if (isSelected) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 0.5f));
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(ColorScheme::Info.x, ColorScheme::Info.y, ColorScheme::Info.z, 0.5f));
                     }
                     
                     char label[64];
@@ -842,7 +843,7 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
             ImGui::Text("结构体: %s (大小: %d 字节)", structDef.name.c_str(), structDef.totalSize);
             if (structBaseAddress != 0) {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "@ 0x%llX", structBaseAddress);
+                ImGui::TextColored(ColorScheme::SuccessBright, "@ 0x%llX", structBaseAddress);
             }
             
             if (ImGui::Button("编辑结构")) {
@@ -865,7 +866,7 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
             if (!structBuffer.empty() && structBaseAddress != 0) {
                 ImGui::Text("内存数据预览");
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "@ 0x%llX (%d 字节)", structBaseAddress, (int)structBuffer.size());
+                ImGui::TextColored(ColorScheme::SuccessBright, "@ 0x%llX (%d 字节)", structBaseAddress, (int)structBuffer.size());
                 
                 if (ImGui::Button("自动分析此数据")) {
                     autoAnalyzeStructure(structBuffer);
@@ -889,7 +890,7 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
                         
                         // 偏移
                         ImGui::TableSetColumnIndex(0);
-                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.9f, 1.0f), "+0x%X", (int)row);
+                        ImGui::TextColored(ColorScheme::InfoLight, "+0x%X", (int)row);
                         
                         // 十六进制
                         ImGui::TableSetColumnIndex(1);
@@ -1781,7 +1782,7 @@ void MemoryViewerWindow::drawAddressList()
                 if (lastValues.size() <= i) lastValues.resize(watchItems.size());
                 if (lastValues[i] != value) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "*");
+                    ImGui::TextColored(ColorScheme::WarningBright, "*");
                     lastValues[i] = value;
                 }
             } else {
@@ -2771,12 +2772,12 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 高亮显示包含目标地址的行
             if (isTargetRow) {
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.4f, 1.0f), "%016llX", rowAddress);
+                ImGui::TextColored(ColorScheme::WarningLight, "%016llX", rowAddress);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("目标地址所在行\n目标: 0x%llX", targetAddress);
                 }
             } else {
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.9f, 1.0f), "%016llX", rowAddress);
+                ImGui::TextColored(ColorScheme::InfoLight, "%016llX", rowAddress);
             }
             
             // 右键菜单
@@ -2821,20 +2822,20 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 
                 // 设置按钮样式
                 if (isSelected) {
-                    // 选中状态 - 蓝色
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.6f, 0.9f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.2f, 0.4f, 0.7f, 1.0f));
+                    // 选中状态
+                    ImGui::PushStyleColor(ImGuiCol_Button, ColorScheme::ButtonSelected);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorScheme::ButtonSelectedHovered);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorScheme::ButtonSelectedActive);
                 } else if (isTargetUnit) {
-                    // 目标地址 - 黄色高亮
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.5f, 0.2f, 0.6f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.6f, 0.3f, 0.8f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.4f, 0.1f, 0.7f));
+                    // 目标地址 - 高亮
+                    ImGui::PushStyleColor(ImGuiCol_Button, ColorScheme::ButtonHighlight);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorScheme::ButtonHighlightHovered);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorScheme::ButtonHighlightActive);
                 } else {
-                    // 默认状态 - 灰色
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.4f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.6f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.25f, 0.25f, 0.5f));
+                    // 默认状态
+                    ImGui::PushStyleColor(ImGuiCol_Button, ColorScheme::ButtonDefault);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ColorScheme::ButtonDefaultHovered);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ColorScheme::ButtonDefaultActive);
                 }
                 
                 char valueStr[64];
@@ -3006,7 +3007,7 @@ void MemoryViewerWindow::drawMemoryHexEditor()
 
 void MemoryViewerWindow::drawDataInspector()
 {
-    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "数据解析器");
+    ImGui::TextColored(ColorScheme::InfoLight, "数据解析器");
     ImGui::Separator();
     
     if (selectedByteOffset < 0 || selectedByteOffset >= (int)buffer.size()) {
@@ -3541,7 +3542,7 @@ void MemoryViewerWindow::drawDisassemblyPanel()
     
     // 检查反汇编引擎是否可用
     if (!disassemblyInitialized || !disassemblyHelper) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "反汇编引擎未初始化");
+        ImGui::TextColored(ColorScheme::Warning, "反汇编引擎未初始化");
         ImGui::TextWrapped("提示: 请确保已安装 Capstone 库");
         ImGui::Separator();
         ImGui::Text("安装方法:");
@@ -3565,7 +3566,7 @@ void MemoryViewerWindow::drawDisassemblyPanel()
     // 渲染结果（不在这里触发任何读取或反汇编）
     if (!cachedDisassemblyResult.success) {
         if (!cachedDisassemblyResult.errorMessage.empty()) {
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "错误: %s", cachedDisassemblyResult.errorMessage.c_str());
+            ImGui::TextColored(ColorScheme::ErrorBright, "错误: %s", cachedDisassemblyResult.errorMessage.c_str());
         } else {
             ImGui::TextDisabled("请点击读取或刷新以获取反汇编数据");
         }
@@ -3573,7 +3574,7 @@ void MemoryViewerWindow::drawDisassemblyPanel()
     }
 
     if (cachedDisassemblyResult.instructions.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "反汇编结果为空");
+        ImGui::TextColored(ColorScheme::ErrorBright, "反汇编结果为空");
         return;
     }
     
@@ -3695,34 +3696,34 @@ void MemoryViewerWindow::drawDisassemblyPanel()
                     // 高亮地址：模块名+偏移量=地址
                     addrStr = formatAddressWithModule(insn.address);
                     // 使用更明显的颜色高亮显示
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.3f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::WarningBright);
                     ImGui::Text("%s", addrStr.c_str());
                     ImGui::PopStyleColor();
                 } else {
                     // 其他地址：地址[偏移量]
                     addrStr = formatAddressWithOffset(insn.address);
-                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", addrStr.c_str());
+                    ImGui::TextColored(ColorScheme::InfoBright, "%s", addrStr.c_str());
                 }
                 
                 // 高亮整行背景（如果是高亮地址）
                 if (isHighlightAddress) {
                     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, 
-                                         ImGui::ColorConvertFloat4ToU32(ImVec4(0.3f, 0.2f, 0.1f, 0.3f)));
+                                         ImGui::ColorConvertFloat4ToU32(ColorScheme::Warning));
                 }
                 
                 // 字节码列
                 ImGui::TableSetColumnIndex(1);
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", insn.hexBytes.c_str());
+                ImGui::TextColored(ColorScheme::DisassemblyHex, "%s", insn.hexBytes.c_str());
                 
                 // 指令列
                 ImGui::TableSetColumnIndex(2);
                 if (isHighlightAddress) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.3f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::WarningBright);
                 }
                 ImGui::Text("%s", insn.mnemonic.c_str());
                 ImGui::SameLine();
                 //黑色展示
-                ImGui::TextColored(ImVec4(0.0f, 0.0f, 0.0f, 1.0f), "%s", insn.operands.c_str());
+                ImGui::TextColored(ColorScheme::TextPrimary, "%s", insn.operands.c_str());
                 if (isHighlightAddress) {
                     ImGui::PopStyleColor();
                 }

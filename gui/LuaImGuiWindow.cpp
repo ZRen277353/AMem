@@ -1,4 +1,5 @@
 #include "LuaImGuiWindow.h"
+#include "ColorScheme.h"
 #include "../lua/LuaEngine.h"
 #include "../imgui/imgui.h"
 
@@ -32,7 +33,7 @@ void LuaImGuiWindow::onDraw() {
     lua_getglobal(L, luaCallbackName.c_str());
     if (!lua_isfunction(L, -1)) {
         lua_pop(L, 1);
-        ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), 
+        ImGui::TextColored(ColorScheme::ErrorBright, 
             "Lua函数未找到: %s", luaCallbackName.c_str());
         return;
     }
@@ -44,7 +45,7 @@ void LuaImGuiWindow::onDraw() {
     int result = lua_pcall(L, 1, 0, 0);
     if (result != LUA_OK) {
         const char* error = lua_tostring(L, -1);
-        ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), 
+        ImGui::TextColored(ColorScheme::ErrorBright, 
             "Lua错误: %s", error ? error : "未知错误");
         lua_pop(L, 1);
     }

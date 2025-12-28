@@ -1,4 +1,5 @@
 #include "ModulesWindow.h"
+#include "ColorScheme.h"
 #include "MemoryViewerWindow.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
@@ -144,7 +145,7 @@ void ModulesWindow::onDraw()
 	// 显示过滤状态
 	if (strlen(nameFilter) > 0 || selectedModuleTypes != static_cast<uint32_t>(-1) || selectedProtectionFlags != static_cast<uint32_t>(-1)) {
 		ImGui::SameLine();
-		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "(已启用过滤)");
+		ImGui::TextColored(ColorScheme::WarningBright, "(已启用过滤)");
 	}
 
 	if (hasData) {
@@ -185,15 +186,15 @@ void ModulesWindow::onDraw()
 				const char* typeName = getModuleTypeName(module.type);
 				
 				// 根据模块类型着色
-				ImVec4 typeColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // 默认白色
+				ImVec4 typeColor = ColorScheme::TextPrimary; // 默认白色
 				if (module.type & (_ModuleType::Code_App | _ModuleType::Code_System)) {
-					typeColor = ImVec4(1.0f, 0.8f, 0.8f, 1.0f); // 代码段 - 红色
+					typeColor = ColorScheme::ErrorLight; // 代码段
 				} else if (module.type & (_ModuleType::C_Heap | _ModuleType::Java_Heap)) {
-					typeColor = ImVec4(0.8f, 1.0f, 0.8f, 1.0f); // 堆内存 - 绿色
+					typeColor = ColorScheme::SuccessLight; // 堆内存
 				} else if (module.type & _ModuleType::Stack) {
-					typeColor = ImVec4(0.8f, 0.8f, 1.0f, 1.0f); // 栈内存 - 蓝色
+					typeColor = ColorScheme::InfoLight; // 栈内存
 				} else if (module.type & _ModuleType::Anonymous) {
-					typeColor = ImVec4(1.0f, 1.0f, 0.8f, 1.0f); // 匿名内存 - 黄色
+					typeColor = ColorScheme::WarningLight; // 匿名内存
 				}
 				
 				ImGui::TextColored(typeColor, "%s", typeName);
@@ -210,11 +211,11 @@ void ModulesWindow::onDraw()
 				
 				// 根据权限着色
 				if (module.flag & PROT_EXEC) {
-					ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.8f, 1.0f), "%s", protStr.c_str());
+					ImGui::TextColored(ColorScheme::ErrorLight, "%s", protStr.c_str());
 				} else if (module.flag & PROT_WRITE) {
-					ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "%s", protStr.c_str());
+					ImGui::TextColored(ColorScheme::SuccessLight, "%s", protStr.c_str());
 				} else {
-					ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%s", protStr.c_str());
+					ImGui::TextColored(ColorScheme::InfoLight, "%s", protStr.c_str());
 				}
 				
 				ImGui::TableSetColumnIndex(4);
@@ -236,7 +237,7 @@ void ModulesWindow::onDraw()
 					if (module.flag & PROT_PRIVATE) ImGui::Text("  - 私有映射");
 					if (module.flag & PROT_SHARED) ImGui::Text("  - 共享映射");
 					ImGui::Separator();
-					ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "右键菜单可浏览内存");
+					ImGui::TextColored(ColorScheme::SuccessLight, "右键菜单可浏览内存");
 					ImGui::EndTooltip();
 				}
 				
@@ -244,7 +245,7 @@ void ModulesWindow::onDraw()
 				char popup_id[64];
 				std::snprintf(popup_id, sizeof(popup_id), "ModulePopup_%llX", (unsigned long long)module.base);
 				if (ImGui::BeginPopupContextItem(popup_id)) {
-					ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "模块: %s", module.name.c_str());
+					ImGui::TextColored(ColorScheme::InfoLight, "模块: %s", module.name.c_str());
 					ImGui::Separator();
 					
 					if (ImGui::MenuItem("复制模块名")) {

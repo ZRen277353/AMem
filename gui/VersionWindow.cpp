@@ -1,4 +1,5 @@
 #include "VersionWindow.h"
+#include "ColorScheme.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
 #include "Gui.h"
@@ -53,13 +54,13 @@ void VersionWindow::onDraw()
 		int serverProtocolMinor = version / 100;
 		ImGui::Spacing();
 		if (serverProtocolMinor < PROTOCOL_VERSION_MINOR) {
-			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
+			ImGui::TextColored(ColorScheme::Warning, 
 				"⚠ 服务端协议版本较旧，部分功能可能不可用");
 		} else if (serverProtocolMinor == PROTOCOL_VERSION_MINOR) {
-			ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), 
+			ImGui::TextColored(ColorScheme::Success, 
 				"✓ 协议版本匹配");
 		} else {
-			ImGui::TextColored(ImVec4(0.0f, 0.5f, 1.0f, 1.0f), 
+			ImGui::TextColored(ColorScheme::InfoBright, 
 				"服务端支持更新的协议版本");
 		}
 	} else {

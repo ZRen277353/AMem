@@ -1,4 +1,5 @@
 #include "ServerConnectWindow.h"
+#include "ColorScheme.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
 #include "../socket/client.hpp"
@@ -171,7 +172,7 @@ void ServerConnectWindow::drawDriverControls() {
     ImGui::Button("初始化驱动");
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "(需要先连接服务器)");
+    ImGui::TextColored(ColorScheme::Warning, "(需要先连接服务器)");
   }
 
   ImGui::Text("驱动状态: %s", driverStatus.c_str());

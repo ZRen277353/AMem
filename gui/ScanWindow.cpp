@@ -1,4 +1,5 @@
 #include "ScanWindow.h"
+#include "ColorScheme.h"
 #include "MemoryViewerWindow.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
@@ -63,7 +64,7 @@ void ScanWindow::onDraw()
     if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
     {
         if (selectedPid && *selectedPid != 0) {
-            ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "已附加: %s (PID %d)", 
+            ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", 
                 selectedName ? selectedName->c_str() : "Unknown", *selectedPid);
             ImGui::SameLine();
             if (ImGui::Button("刷新地址值")) {
@@ -124,9 +125,9 @@ void ScanWindow::drawScanRangeSettings()
     
     // 显示当前选择状态的简要信息
     if (selectedMemoryTypes == MemoryType::All) {
-        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "All");
+        ImGui::TextColored(ColorScheme::SuccessLight, "All");
     } else if (selectedMemoryTypes == 0) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "None");
+        ImGui::TextColored(ColorScheme::ErrorLight, "None");
     } else {
         // 计算选中的类型数量
         int selectedCount = 0;
@@ -135,7 +136,7 @@ void ScanWindow::drawScanRangeSettings()
             if (tempMask & 1) selectedCount++;
             tempMask >>= 1;
         }
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%d types", selectedCount);
+        ImGui::TextColored(ColorScheme::InfoLight, "%d types", selectedCount);
     }
     
     ImGui::SameLine();
@@ -151,7 +152,7 @@ void ScanWindow::drawScanProgressBar()
         ImGui::Text("正在扫描...");
         
         // 显示真实的进度条
-        ImVec4 progressColor = ImVec4(0.2f, 0.8f, 0.2f, 1.0f);  // 绿色
+        ImVec4 progressColor = ColorScheme::SuccessBright;
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progressColor);
         
         // 使用 std::fixed 创建进度显示文本
@@ -205,7 +206,7 @@ void ScanWindow::drawScanProgressBar()
                     int remainingMinutes = (int)(estimatedRemaining / 60);
                     int remainingSeconds = (int)estimatedRemaining % 60;
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), 
+                    ImGui::TextColored(ColorScheme::InfoLight, 
                         "预计剩余: %d:%02d", remainingMinutes, remainingSeconds);
                 }
             }
@@ -221,7 +222,7 @@ void ScanWindow::drawScanProgressBar()
         if (selectedMemoryTypes == MemoryType::All) {
             ImGui::Text("内存范围: 所有类型");
         } else if (selectedMemoryTypes == 0) {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "内存范围: 未选择");
+            ImGui::TextColored(ColorScheme::ErrorLight, "内存范围: 未选择");
         } else {
             int selectedCount = 0;
             uint32_t tempMask = selectedMemoryTypes;
@@ -247,9 +248,9 @@ void ScanWindow::drawScanProgressBar()
         // 显示扫描完成状态
         ImGui::Separator();
         if (scanCancelled) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "扫描已取消");
+            ImGui::TextColored(ColorScheme::WarningBright, "扫描已取消");
         } else {
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "扫描已完成");
+            ImGui::TextColored(ColorScheme::SuccessBright, "扫描已完成");
         }
         
         if (totalScanResults > 0) {
@@ -259,9 +260,9 @@ void ScanWindow::drawScanProgressBar()
             }
         } else {
             if (scanCancelled) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "扫描被中断");
+                ImGui::TextColored(ColorScheme::WarningBright, "扫描被中断");
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "未找到匹配结果");
+                ImGui::TextColored(ColorScheme::WarningBright, "未找到匹配结果");
             }
         }
     }
@@ -502,7 +503,7 @@ void ScanWindow::drawScanPanel()
     
     if (strlen(scanTypeHelp) > 0) {
         ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", scanTypeHelp);
+        ImGui::TextColored(ColorScheme::TextSecondary, "%s", scanTypeHelp);
         ImGui::PopTextWrapPos();
     }
 
@@ -549,15 +550,15 @@ void ScanWindow::drawScanPanel()
         if (!canScan) {
             ImGui::EndDisabled();
             if (scanInProgress) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "扫描正在进行中...");
+                ImGui::TextColored(ColorScheme::WarningBright, "扫描正在进行中...");
             } else if (selectedMemoryTypes == 0) {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "请先选择内存类型");
+                ImGui::TextColored(ColorScheme::ErrorLight, "请先选择内存类型");
             }
         } else if (!canUseUnknownValue && needValue1) {
             // 检查是否为只能在再次扫描中使用的类型
             if (scanType == ADD_UNKNOW_VAL || scanType == SUB_UNKNOW_VAL || 
                 scanType == CHANGED_VAL || scanType == UNCHANGED_VAL) {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "此扫描类型只能在再次扫描中使用");
+                ImGui::TextColored(ColorScheme::ErrorLight, "此扫描类型只能在再次扫描中使用");
             }
         }
     } else {
@@ -571,7 +572,7 @@ void ScanWindow::drawScanPanel()
         if (!canScan) {
             ImGui::EndDisabled();
             if (scanInProgress) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "扫描正在进行中...");
+                ImGui::TextColored(ColorScheme::WarningBright, "扫描正在进行中...");
             }
         }
         
@@ -644,7 +645,7 @@ void ScanWindow::drawScanPanel()
         }
         
         if (!canScan) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "警告: 未选择内存类型");
+            ImGui::TextColored(ColorScheme::WarningBright, "警告: 未选择内存类型");
         }
     }
 
@@ -660,20 +661,20 @@ void ScanWindow::drawScanPanel()
         if (isFirstScan && !scanCompleted) {
             ImGui::TextDisabled("尚未扫描");
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "未找到匹配结果");
+            ImGui::TextColored(ColorScheme::ErrorLight, "未找到匹配结果");
         }
     } else {
-        ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "找到: %d 个结果", totalScanResults);
+        ImGui::TextColored(ColorScheme::SuccessBright, "找到: %d 个结果", totalScanResults);
         
         // 根据结果数量显示不同的建议
         if (totalScanResults > 100000) {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "结果过多，强烈建议继续筛选");
+            ImGui::TextColored(ColorScheme::ErrorLight, "结果过多，强烈建议继续筛选");
         } else if (totalScanResults > 10000) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "结果较多，建议继续筛选");
+            ImGui::TextColored(ColorScheme::WarningBright, "结果较多，建议继续筛选");
         } else if (totalScanResults > 1000) {
-            ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "结果适中，可以查看或继续筛选");
+            ImGui::TextColored(ColorScheme::SuccessLight, "结果适中，可以查看或继续筛选");
         } else {
-            ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "结果较少，适合详细分析");
+            ImGui::TextColored(ColorScheme::SuccessLight, "结果较少，适合详细分析");
         }
         
         // 结果操作按钮
@@ -878,7 +879,7 @@ void ScanWindow::drawResultsPanel()
         }
         if (selectedCount > 0) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "已选中: %d", selectedCount);
+            ImGui::TextColored(ColorScheme::SuccessLight, "已选中: %d", selectedCount);
         }
         
         ImGui::Separator();
@@ -925,7 +926,7 @@ void ScanWindow::drawResultsPanel()
                 
                 if (valueType <= 3 && minVal != UINT64_MAX) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), " | 范围: %llu - %llu", minVal, maxVal);
+                    ImGui::TextColored(ColorScheme::TextSecondary, " | 范围: %llu - %llu", minVal, maxVal);
                 }
             }
         }
@@ -956,9 +957,12 @@ void ScanWindow::drawResultsPanel()
         std::unique_lock<std::mutex> lock(scanResultsMutex, std::try_to_lock);
         
         if (!lock.owns_lock()) {
-            // 无法获取锁（后台正在刷新），使用上一帧的数据继续显示
-            // 不阻塞UI，保持流畅
+            // 无法获取锁（后台正在刷新），显示提示信息
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextColored(ColorScheme::WarningBright, "正在刷新数据...");
             ImGui::EndTable();
+            ImGui::EndChild();
             return;  // 暂时跳过渲染，等待下一帧
         }
         
@@ -990,15 +994,15 @@ void ScanWindow::drawResultsPanel()
                 ImGui::TableSetColumnIndex(1);
                 ImGui::Text("0x%016llX", scanResults[i].address);
                 ImGui::TableSetColumnIndex(2);
-                // 根据数值类型显示不同颜色
-                ImVec4 typeColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // 默认白色
+                // 根据数值类型显示不同颜色（增强对比度）
+                ImVec4 typeColor = ColorScheme::TextPrimary; // 默认白色
                 switch (valueType) {
-                    case 0: typeColor = ImVec4(0.8f, 1.0f, 0.8f, 1.0f); break; // 1字节 - 绿色
-                    case 1: typeColor = ImVec4(0.8f, 0.8f, 1.0f, 1.0f); break; // 2字节 - 蓝色
-                    case 2: typeColor = ImVec4(1.0f, 1.0f, 0.8f, 1.0f); break; // 4字节 - 黄色
-                    case 3: typeColor = ImVec4(1.0f, 0.8f, 1.0f, 1.0f); break; // 8字节 - 紫色
-                    case 4: typeColor = ImVec4(1.0f, 0.9f, 0.7f, 1.0f); break; // 浮点 - 橙色
-                    case 5: typeColor = ImVec4(1.0f, 0.8f, 0.8f, 1.0f); break; // 双精度 - 红色
+                    case 0: typeColor = ColorScheme::SuccessBright; break; // 1字节（增强可见性）
+                    case 1: typeColor = ColorScheme::InfoBright; break; // 2字节（增强可见性）
+                    case 2: typeColor = ColorScheme::WarningBright; break; // 4字节（增强可见性）
+                    case 3: typeColor = ColorScheme::StatHighlight; break; // 8字节
+                    case 4: typeColor = ColorScheme::WarningBright; break; // 浮点（增强可见性）
+                    case 5: typeColor = ColorScheme::ErrorBright; break; // 双精度（增强可见性）
                 }
                 ImGui::TextColored(typeColor, "%s", value_types[valueType]);
                 ImGui::TableSetColumnIndex(3);
@@ -1012,7 +1016,8 @@ void ScanWindow::drawResultsPanel()
                     // 计算淡出效果
                     float timeSinceChange = ImGui::GetTime() - scanResults[i].changeTime;
                     float alpha = 1.0f - (timeSinceChange / 2.0f);  // 2秒内淡出
-                    ImVec4 highlightColor = ImVec4(1.0f, 0.8f, 0.2f, alpha);  // 黄色高亮
+                    ImVec4 highlightColor = ColorScheme::WarningBright;  // 高亮
+                    highlightColor.w = alpha;
                     
                     if (showHexValues && valueType <= 3) {
                         std::string hexStr = formatScanResultValueHex(scanResults[i].value, valueType);
@@ -1023,7 +1028,9 @@ void ScanWindow::drawResultsPanel()
                     
                     // 添加变化指示器
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, alpha), "*");
+                    ImVec4 starColor = ColorScheme::Warning;
+                    starColor.w = alpha;
+                    ImGui::TextColored(starColor, "*");
                     
                     // 2秒后清除变化标记
                     if (timeSinceChange >= 2.0f) {
@@ -1224,12 +1231,14 @@ void ScanWindow::performFirstScan()
         Gui::log("扫描已被取消");
         totalScanResults = GetScanResultCount(); // 获取当前实际结果数
         if (totalScanResults > 0) {
+            resultOffset = 0;  // 重置偏移量
             loadScanResults();
         }
     } else if (newResultCount >= 0) {
         totalScanResults = newResultCount;
         if (totalScanResults > 0) {
             Gui::log("首次扫描完成，找到 %d 个结果", totalScanResults);
+            resultOffset = 0;  // 重置偏移量
             loadScanResults();
         } else {
             Gui::log("扫描完成，未找到匹配结果");
@@ -1326,12 +1335,14 @@ void ScanWindow::performFirstScanAsync()
             Gui::log("扫描已被取消");
             totalScanResults = GetScanResultCount();
             if (totalScanResults > 0) {
+                resultOffset = 0;  // 重置偏移量
                 loadScanResults();
             }
         } else if (newResultCount >= 0) {
             totalScanResults = newResultCount;
             if (totalScanResults > 0) {
                 Gui::log("首次扫描完成，找到 %d 个结果", totalScanResults);
+                resultOffset = 0;  // 重置偏移量
                 loadScanResults();
             } else {
                 Gui::log("扫描完成，未找到匹配结果");
@@ -1404,12 +1415,14 @@ void ScanWindow::performNextScan()
         Gui::log("扫描已被取消");
         totalScanResults = GetScanResultCount(); // 获取当前实际结果数
         if (totalScanResults > 0) {
+            resultOffset = 0;  // 重置偏移量
             loadScanResults();
         }
     } else if (newResultCount >= 0) {
         totalScanResults = newResultCount;
         if (totalScanResults > 0) {
             Gui::log("再次扫描完成，找到 %d 个结果", totalScanResults);
+            resultOffset = 0;  // 重置偏移量
             loadScanResults();
         } else {
             Gui::log("扫描完成，未找到匹配结果");
@@ -1484,12 +1497,14 @@ void ScanWindow::performNextScanAsync()
             Gui::log("扫描已被取消");
             totalScanResults = GetScanResultCount();
             if (totalScanResults > 0) {
+                resultOffset = 0;  // 重置偏移量
                 loadScanResults();
             }
         } else if (newResultCount >= 0) {
             totalScanResults = newResultCount;
             if (totalScanResults > 0) {
                 Gui::log("再次扫描完成，找到 %d 个结果", totalScanResults);
+                resultOffset = 0;  // 重置偏移量
                 loadScanResults();
             } else {
                 Gui::log("扫描完成，未找到匹配结果");
@@ -1538,8 +1553,13 @@ void ScanWindow::loadScanResults()
     if (totalScanResults == 0) return;
     
     int count = (resultPageSize < (totalScanResults - resultOffset)) ? resultPageSize : (totalScanResults - resultOffset);
+    if (count <= 0) return;  // 防止无效的count值
+    
     std::vector<std::pair<uint64_t, uint64_t>> rawResults;
-    rawResults.resize(count);
+    // 不预先resize，让GetScanResult根据实际返回的数量来设置大小
+    // rawResults.clear();
+    rawResults.reserve(count);
+    Gui::log("loadScanResults: resultOffset %d, count %d", resultOffset, count);
     
     if (GetScanResult(resultOffset, count, rawResults)) {
         // 使用互斥锁保护，因为此函数可能从扫描线程中调用
@@ -1632,10 +1652,20 @@ void ScanWindow::drawAddressListPanel()
     ImGui::SameLine();
     if (ImGui::Button("删除选中")) {
         std::lock_guard<std::mutex> lock(addressListMutex);
-        addressList.erase(
-            std::remove_if(addressList.begin(), addressList.end(),
-                [](const AddressListItem& item) { return !item.active; }),
-            addressList.end());
+        // 修复：删除已勾选的项目（active == true 表示被选中要删除）
+        int removedCount = 0;
+        auto it = std::remove_if(addressList.begin(), addressList.end(),
+            [&removedCount](const AddressListItem& item) { 
+                if (item.active) {
+                    removedCount++;
+                    return true;
+                }
+                return false;
+            });
+        addressList.erase(it, addressList.end());
+        if (removedCount > 0) {
+            Gui::log("已删除 %d 个地址", removedCount);
+        }
     }
     
     if (ImGui::BeginTable("AddressTable", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter))
@@ -1654,7 +1684,7 @@ void ScanWindow::drawAddressListPanel()
             // 无法获取锁（后台正在刷新），跳过本帧渲染
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(1);
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "正在刷新，请稍候...");
+            ImGui::TextColored(ColorScheme::WarningBright, "正在刷新，请稍候...");
             ImGui::EndTable();
             ImGui::EndChild();
             return;  // 直接返回，等待下一帧
@@ -1735,12 +1765,23 @@ void ScanWindow::drawAddressListPanel()
             if (i >= (int)addressList.size()) break;
             
             ImGui::TableSetColumnIndex(3);
-            ImGui::Text("%s", value_types[addressList[i].valueType]);
+            // 根据数值类型显示不同颜色（增强对比度）
+            ImVec4 typeColor = ColorScheme::TextPrimary; // 默认白色
+            // 先复制值，避免后续访问时 addressList 被修改导致段错误
+            int itemValueType = (i < (int)addressList.size()) ? addressList[i].valueType : 0;
+            switch (itemValueType) {
+                case 0: typeColor = ColorScheme::SuccessBright; break; // 1字节
+                case 1: typeColor = ColorScheme::InfoBright; break; // 2字节
+                case 2: typeColor = ColorScheme::WarningBright; break; // 4字节
+                case 3: typeColor = ColorScheme::StatHighlight; break; // 8字节
+                case 4: typeColor = ColorScheme::WarningBright; break; // 浮点
+                case 5: typeColor = ColorScheme::ErrorBright; break; // 双精度
+            }
+            ImGui::TextColored(typeColor, "%s", value_types[itemValueType]);
             ImGui::TableSetColumnIndex(4);
             
             // 复制当前值字符串，避免引用失效
             std::string currentValue = addressList[i].currentValue;
-            int itemValueType = addressList[i].valueType;
             
             // 可编辑的数值显示
             static char editBuf[64];
@@ -1763,8 +1804,13 @@ void ScanWindow::drawAddressListPanel()
             
             // 显示工具提示
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX\n类型: %s", 
-                    itemAddress, value_types[itemValueType]);
+                // 确保索引有效后再访问
+                if (i < (int)addressList.size()) {
+                    ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX\n类型: %s", 
+                        itemAddress, value_types[itemValueType]);
+                } else {
+                    ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX", itemAddress);
+                }
             }
         }
         ImGui::EndTable();
@@ -2469,7 +2515,7 @@ void ScanWindow::drawMemoryTypeSelectionModal()
             
             // 常用类型用绿色高亮
             if (memoryTypes[i].isCommon) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 1.0f, 0.8f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::SuccessLight);
             }
             
             if (ImGui::Checkbox(memoryTypes[i].name, &isSelected)) {
@@ -2515,9 +2561,9 @@ void ScanWindow::drawMemoryTypeSelectionModal()
         
         // 显示当前选择状态
         if (selectedMemoryTypes == MemoryType::All) {
-            ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "Selected: All memory types");
+            ImGui::TextColored(ColorScheme::SuccessLight, "Selected: All memory types");
         } else if (selectedMemoryTypes == 0) {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Selected: No memory types");
+            ImGui::TextColored(ColorScheme::ErrorLight, "Selected: No memory types");
         } else {
             int selectedCount = 0;
             for (int i = 0; i < IM_ARRAYSIZE(memoryTypes); i++) {
@@ -2525,7 +2571,7 @@ void ScanWindow::drawMemoryTypeSelectionModal()
                     selectedCount++;
                 }
             }
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Selected: %d memory types", selectedCount);
+            ImGui::TextColored(ColorScheme::InfoLight, "Selected: %d memory types", selectedCount);
         }
         
         ImGui::Separator();

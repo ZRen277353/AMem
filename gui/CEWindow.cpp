@@ -1,4 +1,5 @@
 #include "CEWindow.h"
+#include "ColorScheme.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
@@ -75,7 +76,7 @@ void CEWindow::drawTopProcessBar()
 void CEWindow::drawSelectedProcessBanner()
 {
     if (selectedPid != 0) {
-        ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "已附加: %s (PID %d)", selectedName.c_str(), selectedPid);
+        ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", selectedName.c_str(), selectedPid);
         ImGui::SameLine();
         if (ImGui::Button("模块列表")) {
             auto list = Gui::getWindows<ModulesWindow>();

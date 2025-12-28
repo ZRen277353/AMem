@@ -1,4 +1,5 @@
 #include "PointerChainWindow.h"
+#include "ColorScheme.h"
 #include "MemoryViewerWindow.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
@@ -56,7 +57,7 @@ void PointerChainWindow::onDraw()
     {
         // 显示进程信息
         if (selectedPid && *selectedPid != 0) {
-            ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "已附加: %s (PID %d)", 
+            ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", 
                 selectedName ? selectedName->c_str() : "Unknown", *selectedPid);
         } else {
             ImGui::TextDisabled("未附加进程");
@@ -89,12 +90,12 @@ void PointerChainWindow::onDraw()
 void PointerChainWindow::drawScanPanel()
 {
     // ===== 潜在指针获取部分 =====
-    ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "潜在指针数据");
+    ImGui::TextColored(ColorScheme::SuccessLight, "潜在指针数据");
     ImGui::Separator();
     
     // 显示潜在指针状态
     if (pointersLoaded) {
-        ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "已加载: %u 个指针", loadedPointerCount);
+        ImGui::TextColored(ColorScheme::SuccessBright, "已加载: %u 个指针", loadedPointerCount);
     } else {
         ImGui::TextDisabled("未加载潜在指针");
     }
@@ -148,7 +149,7 @@ void PointerChainWindow::drawScanPanel()
     // ===== 扫描参数部分 =====
     // 如果正在查看潜在指针，显示过滤选项；否则显示扫描参数
     if (showPotentialPointers) {
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "潜在指针过滤");
+        ImGui::TextColored(ColorScheme::InfoLight, "潜在指针过滤");
     ImGui::Spacing();
     
     // 排序选项
@@ -205,7 +206,7 @@ void PointerChainWindow::drawScanPanel()
     }
     } else {
         // 扫描模式：显示扫描参数
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "扫描参数");
+        ImGui::TextColored(ColorScheme::InfoLight, "扫描参数");
     
     ImGui::Spacing();
     
@@ -287,7 +288,7 @@ void PointerChainWindow::drawScanPanel()
     if (scanCompleted && !chains.empty()) {
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "导出选项");
+        ImGui::TextColored(ColorScheme::InfoLight, "导出选项");
         
         ImGui::Text("文件名:");
         ImGui::SetNextItemWidth(-1);
@@ -305,7 +306,7 @@ void PointerChainWindow::drawProgressPanel()
 {
     // 如果正在加载指针，显示加载进度
     if (pointerLoadInProgress) {
-        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "正在获取潜在指针...");
+        ImGui::TextColored(ColorScheme::SuccessLight, "正在获取潜在指针...");
         ImGui::Separator();
         ImGui::Spacing();
         
@@ -319,7 +320,7 @@ void PointerChainWindow::drawProgressPanel()
         }
         
         ImGui::Text("扫描进度:");
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.8f, 0.8f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ColorScheme::InfoBright);
         ImGui::ProgressBar(pointerLoadProgress, ImVec2(-1, 30), progressText);
         ImGui::PopStyleColor();
         
@@ -336,7 +337,7 @@ void PointerChainWindow::drawProgressPanel()
     }
     
     // 显示扫描进度
-    ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "指针链扫描进行中");
+    ImGui::TextColored(ColorScheme::SuccessLight, "指针链扫描进行中");
     ImGui::Separator();
     ImGui::Spacing();
     
@@ -351,7 +352,7 @@ void PointerChainWindow::drawProgressPanel()
         snprintf(progressText, sizeof(progressText), "准备中...");
     }
     
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.8f, 0.4f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ColorScheme::SuccessBright);
     ImGui::ProgressBar(scanProgressInfo.progress, ImVec2(-1, 35), progressText);
     ImGui::PopStyleColor();
     
@@ -364,7 +365,7 @@ void PointerChainWindow::drawProgressPanel()
     ImGui::Spacing();
     
     // 指针链统计
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::SuccessBright);
     ImGui::Text("  已找到指针链:");
     ImGui::PopStyleColor();
     ImGui::SameLine(150);
@@ -376,7 +377,7 @@ void PointerChainWindow::drawProgressPanel()
     ImGui::Text("  已处理节点:");
     ImGui::SameLine(150);
     if (scanProgressInfo.nodesProcessed > 1000000) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%.2fM", 
+        ImGui::TextColored(ColorScheme::WarningBright, "%.2fM", 
                           scanProgressInfo.nodesProcessed / 1000000.0f);
     } else if (scanProgressInfo.nodesProcessed > 1000) {
         ImGui::Text("%.1fK", scanProgressInfo.nodesProcessed / 1000.0f);
@@ -410,7 +411,7 @@ void PointerChainWindow::drawProgressPanel()
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::WarningBright);
         ImGui::TextWrapped("  提示: 已处理大量节点，扫描可能需要较长时间，请耐心等待...");
         ImGui::PopStyleColor();
     }
@@ -420,14 +421,14 @@ void PointerChainWindow::drawProgressPanel()
 
 void PointerChainWindow::drawResultsPanel()
 {
-    ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "扫描结果");
+    ImGui::TextColored(ColorScheme::SuccessLight, "扫描结果");
     ImGui::SameLine();
     ImGui::TextDisabled("(找到 %d 条指针链)", static_cast<int>(chains.size()));
     ImGui::Separator();
     
     if (chains.empty()) {
         ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "未找到有效的指针链");
+        ImGui::TextColored(ColorScheme::WarningBright, "未找到有效的指针链");
         ImGui::Spacing();
         ImGui::TextWrapped("提示: 尝试增加最大深度或最大偏移量，或者检查目标地址是否正确。");
         return;
@@ -476,7 +477,7 @@ void PointerChainWindow::drawResultsPanel()
         ImGui::SameLine();
         
         // 显示链的深度
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "深度:%d", static_cast<int>(chain.size()));
+        ImGui::TextColored(ColorScheme::InfoLight, "深度:%d", static_cast<int>(chain.size()));
         ImGui::SameLine();
         
         // 显示链字符串（截断）
@@ -502,7 +503,7 @@ void PointerChainWindow::drawResultsPanel()
 
 void PointerChainWindow::drawChainDetail(const std::list<memchainer::PointerChainNode>& chain)
 {
-    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "指针链详情:");
+    ImGui::TextColored(ColorScheme::SuccessLight, "指针链详情:");
     
     if (ImGui::BeginTable("ChainDetailTable", 4, 
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
@@ -546,7 +547,7 @@ void PointerChainWindow::drawChainDetail(const std::list<memchainer::PointerChai
             if (level == 0) {
                 // 显示静态区域信息
                 if (node.staticOffset && node.staticOffset->region) {
-                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "%s+0x%llX", 
+                    ImGui::TextColored(ColorScheme::SuccessLight, "%s+0x%llX", 
                                      node.staticOffset->region->name,
                                      node.staticOffset->staticOffset);
                 } else {
@@ -566,7 +567,7 @@ void PointerChainWindow::drawChainDetail(const std::list<memchainer::PointerChai
 
 void PointerChainWindow::drawPotentialPointersPanel()
 {
-    ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "潜在指针数据分析");
+    ImGui::TextColored(ColorScheme::SuccessLight, "潜在指针数据分析");
     ImGui::Separator();
     
     // 统计信息面板
@@ -587,30 +588,30 @@ void PointerChainWindow::drawPotentialPointersPanel()
     // 第一行：总数和平均引用
     ImGui::Text("  总数:");
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "%d", static_cast<int>(sortedPointers.size()));
+    ImGui::TextColored(ColorScheme::SuccessLight, "%d", static_cast<int>(sortedPointers.size()));
     ImGui::SameLine(150);
     ImGui::Text("原始数量:");
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%u", loadedPointerCount);
+    ImGui::TextColored(ColorScheme::InfoLight, "%u", loadedPointerCount);
     ImGui::SameLine(300);
     ImGui::Text("平均引用:");
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "%.2f", avgRefCount);
+    ImGui::TextColored(ColorScheme::WarningLight, "%.2f", avgRefCount);
     
     ImGui::Spacing();
     
     // 第二行：高频、中频指针数
     ImGui::Text("  ");
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "●");
+    ImGui::TextColored(ColorScheme::ErrorBright, "●");
     ImGui::SameLine();
     ImGui::Text("高频(>10): %d", highFreqCount);
     ImGui::SameLine(150);
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "●");
+    ImGui::TextColored(ColorScheme::WarningBright, "●");
     ImGui::SameLine();
     ImGui::Text("中频(5-10): %d", midFreqCount);
     ImGui::SameLine(300);
-    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "●");
+    ImGui::TextColored(ColorScheme::SuccessLight, "●");
     ImGui::SameLine();
     ImGui::Text("低频(<5): %d", static_cast<int>(sortedPointers.size()) - highFreqCount - midFreqCount);
     
@@ -743,22 +744,22 @@ void PointerChainWindow::drawPotentialPointersPanel()
         ImGui::SameLine();
         
         // 索引
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "[%d]", i);
+        ImGui::TextColored(ColorScheme::TextDisabled, "[%d]", i);
         ImGui::SameLine();
         
         // 频率指示器
         if (pointer->refCount > 10) {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "●");
+            ImGui::TextColored(ColorScheme::ErrorBright, "●");
         } else if (pointer->refCount > 5) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "●");
+            ImGui::TextColored(ColorScheme::WarningBright, "●");
         } else {
-            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "●");
+            ImGui::TextColored(ColorScheme::SuccessLight, "●");
         }
         ImGui::SameLine();
         
         // 地址（可点击跳转）
         std::string addrStr = formatAddress(pointer->address);
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%s", addrStr.c_str());
+        ImGui::TextColored(ColorScheme::InfoLight, "%s", addrStr.c_str());
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("双击跳转到内存查看器");
             if (ImGui::IsMouseDoubleClicked(0)) {
@@ -791,16 +792,16 @@ void PointerChainWindow::drawPotentialPointersPanel()
         ImGui::SameLine();
         
         // 引用次数
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[引用:%d]", pointer->refCount);
+        ImGui::TextColored(ColorScheme::WarningLight, "[引用:%d]", pointer->refCount);
         ImGui::SameLine();
         
         // 偏移量数量
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "[偏移:%d]", static_cast<int>(pointer->Offsets.size()));
+        ImGui::TextColored(ColorScheme::InfoBright, "[偏移:%d]", static_cast<int>(pointer->Offsets.size()));
         
         // 静态偏移信息（如果有）
         if (pointer->staticOffset_ && pointer->staticOffset_->region) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "[%s+0x%llX]", 
+            ImGui::TextColored(ColorScheme::SuccessLight, "[%s+0x%llX]", 
                              pointer->staticOffset_->region->name,
                              pointer->staticOffset_->staticOffset);
         }
@@ -1120,7 +1121,7 @@ void PointerChainWindow::drawPointerDetail(memchainer::PointerAllData* pointer)
 {
     if (!pointer) return;
     
-    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "指针详情:");
+    ImGui::TextColored(ColorScheme::SuccessLight, "指针详情:");
     ImGui::Spacing();
     
     // 基本信息表格
@@ -1172,11 +1173,11 @@ void PointerChainWindow::drawPointerDetail(memchainer::PointerAllData* pointer)
         ImGui::Text("引用次数");
         ImGui::TableNextColumn();
         if (pointer->refCount > 10) {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%d 次 (高频)", pointer->refCount);
+            ImGui::TextColored(ColorScheme::ErrorBright, "%d 次 (高频)", pointer->refCount);
         } else if (pointer->refCount > 5) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%d 次 (中频)", pointer->refCount);
+            ImGui::TextColored(ColorScheme::WarningBright, "%d 次 (中频)", pointer->refCount);
         } else {
-            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "%d 次", pointer->refCount);
+            ImGui::TextColored(ColorScheme::SuccessLight, "%d 次", pointer->refCount);
         }
         
         // 静态偏移信息
@@ -1185,7 +1186,7 @@ void PointerChainWindow::drawPointerDetail(memchainer::PointerAllData* pointer)
         ImGui::Text("静态偏移");
         ImGui::TableNextColumn();
         if (pointer->staticOffset_ && pointer->staticOffset_->region) {
-            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "%s+0x%llX", 
+            ImGui::TextColored(ColorScheme::SuccessLight, "%s+0x%llX", 
                              pointer->staticOffset_->region->name,
                              pointer->staticOffset_->staticOffset);
         } else {
@@ -1200,7 +1201,7 @@ void PointerChainWindow::drawPointerDetail(memchainer::PointerAllData* pointer)
     ImGui::Spacing();
     
     // 偏移量列表
-    ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "偏移量列表:");
+    ImGui::TextColored(ColorScheme::InfoLight, "偏移量列表:");
     ImGui::SameLine();
     ImGui::TextDisabled("(共 %d 个)", static_cast<int>(pointer->Offsets.size()));
     
@@ -1222,7 +1223,7 @@ void PointerChainWindow::drawPointerDetail(memchainer::PointerAllData* pointer)
             }
             
             std::string offsetStr = formatOffset(offset);
-            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "%s", offsetStr.c_str());
+            ImGui::TextColored(ColorScheme::InfoBright, "%s", offsetStr.c_str());
             
             column++;
             if (column >= 5) {

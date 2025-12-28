@@ -180,7 +180,7 @@ private:
     void drawBreakpointDetailWindow(BreakpointDetailWindow& detailWindow);
     void drawPCHitStatisticsInWindow(BreakpointDetailWindow& detailWindow);
     void drawDetailedHitInfoInWindow(BreakpointDetailWindow& detailWindow);
-    void drawRegisterInfoInWindow(const struct _user_pt_regs& regs, BreakpointDetailWindow& detailWindow);
+    void drawRegisterInfoInWindow(const struct _user_pt_regs& regs, const struct _user_fpsimd_state& fpsimd, BreakpointDetailWindow& detailWindow);
     void drawDisassemblyInWindow(uint64_t address, const uint8_t* code, size_t codeSize);
     void drawDisassemblyForPC(uint64_t pcAddress, int beforeCount, int afterCount, BreakpointDetailWindow& detailWindow);
     void closeBreakpointDetailWindow(int windowIndex);

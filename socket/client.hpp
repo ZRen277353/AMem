@@ -126,11 +126,20 @@ struct _user_pt_regs {
     uint64_t orig_x0;
     uint64_t syscallno;
 };
+
+struct _user_fpsimd_state {
+	// unsigned char vregs[32][16];
+	__uint128_t	vregs[32];
+	uint32_t fpsr;
+	uint32_t fpcr;
+};
+
 struct HW_HIT_INFO {
     
     uint64_t hit_addr;
     uint64_t hit_time;
     struct _user_pt_regs regs_info;
+    struct _user_fpsimd_state fpsimd_info;
 };
 
 

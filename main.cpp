@@ -153,14 +153,14 @@ int main(int, char**)
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
+    // io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;       // Enable Multi-Viewport / Platform Windows
     // Enable independent ImGui windows that can be moved freely
     io.ConfigViewportsNoAutoMerge = true;                      // Don't merge viewports automatically
     io.ConfigViewportsNoTaskBarIcon = false;                   // Show taskbar icons for ImGui windows
     // Setup Dear ImGui style
-    // ImGui::StyleColorsDark();
-    ImGui::StyleColorsLight();
+    ImGui::StyleColorsDark();
+    // ImGui::StyleColorsLight();
 
         // Setup scaling
         ImGuiStyle& style = ImGui::GetStyle();
@@ -210,7 +210,7 @@ int main(int, char**)
         // 显示安全区域填充
         style.DisplaySafeAreaPadding = ImVec2(3.0f, 3.0f);
         
-        // 颜色调整 - 莫奈黑白色系配色
+/*         // 颜色调整 - 莫奈黑白色系配色
         ImVec4* colors = style.Colors;
         
         // 基础颜色 - 莫奈风格黑白色系
@@ -300,7 +300,7 @@ int main(int, char**)
         colors[ImGuiCol_NavWindowingHighlight] = ImVec4(0.98f, 0.98f, 0.98f, 0.70f);  // 导航窗口高亮（极浅灰）
         colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.85f, 0.85f, 0.85f, 0.20f);     // 导航窗口暗化背景（浅灰）
         colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.60f);      // 模态窗口暗化背景（深灰/近黑）
-
+ */
             // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {

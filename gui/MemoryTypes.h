@@ -70,7 +70,7 @@ struct ScanResultItem {
 };
 
 struct AddressListItem {
-    bool active = true;
+    bool active = false;  // 默认未选中，用户需要手动勾选才能删除
     std::string description;
     uint64_t address;
     int valueType;

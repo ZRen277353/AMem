@@ -1,4 +1,5 @@
 #include "LuaScriptWindow.h"
+#include "ColorScheme.h"
 #include "../lua/LuaEngine.h"
 #include "../imgui/imgui.h"
 #include <filesystem>
@@ -82,7 +83,7 @@ void LuaScriptWindow::drawScriptControls() {
     ImGui::SameLine();
 
     if (scriptRunning) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ColorScheme::ErrorBright);
         if (ImGui::Button("停止脚本")) {
             stopScript();
         }
@@ -120,7 +121,7 @@ void LuaScriptWindow::drawScriptList() {
     ImGui::Separator();
 
     if (scriptFiles.empty()) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "没有找到脚本文件");
+        ImGui::TextColored(ColorScheme::TextSecondary, "没有找到脚本文件");
         ImGui::Text("请将.lua文件放在 %s 目录下", scriptDirectory.c_str());
         ImGui::Text("或点击'选择文件'按钮从其他目录选择");
         return;
@@ -184,7 +185,7 @@ void LuaScriptWindow::drawScriptContent() {
     ImGui::Separator();
 
     if (selectedScriptIndex < 0 || selectedScriptIndex >= static_cast<int>(scriptFiles.size())) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "未选中任何脚本");
+        ImGui::TextColored(ColorScheme::TextSecondary, "未选中任何脚本");
         return;
     }
 
@@ -194,7 +195,7 @@ void LuaScriptWindow::drawScriptContent() {
 
     ImGui::SameLine();
     if (currentScriptDirty) {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "[已修改未保存]");
+        ImGui::TextColored(ColorScheme::WarningBright, "[已修改未保存]");
     }
 
     // 保存按钮
@@ -401,7 +402,7 @@ void LuaScriptWindow::drawScriptBrowserPopup() {
 
     ImGui::BeginChild("LuaBrowserFileList", ImVec2(500, 300), true);
     if (browserLuaFiles.empty()) {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "该目录下没有找到 .lua 脚本文件");
+        ImGui::TextColored(ColorScheme::TextSecondary, "该目录下没有找到 .lua 脚本文件");
     } else {
         for (size_t i = 0; i < browserLuaFiles.size(); ++i) {
             bool isSelected = (static_cast<int>(i) == browserSelectedIndex);
