@@ -86,13 +86,13 @@ void BreakpointWindow::onDraw()
         
         // 只显示断点列表，详情改为弹窗
         drawBreakpointList();
-        
-        // 添加断点对话框
-        if (showAddBreakpointDialog) {
-            drawAddBreakpointDialog();
-        }
     }
     ImGui::End();
+    
+    // 添加断点对话框 - 必须在主窗口End之后绘制，否则Combo下拉菜单会被裁剪
+    if (showAddBreakpointDialog) {
+        drawAddBreakpointDialog();
+    }
     
     // 绘制所有详情弹窗
     for (size_t i = 0; i < detailWindows.size(); i++) {
