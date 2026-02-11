@@ -28,7 +28,7 @@ namespace ExceptionHandler
         SIGNAL_ILLEGAL,             // SIGILL信号（非法指令）
         SIGNAL_INT,                 // SIGINT信号（中断）
         SIGNAL_SEGV,                // SIGSEGV信号（段错误）
-        SIGNAL_TERM                 // SIGTERM信号（终止）
+       // SIGNAL_TERM                 // SIGTERM信号（终止）
     };
 
     // 异常信息结构
