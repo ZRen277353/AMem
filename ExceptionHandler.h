@@ -540,10 +540,10 @@ namespace ExceptionHandler
             info.type = ExceptionType::SIGNAL_SEGV;
             info.description = "Signal SIGSEGV (段错误)";
             break;
-        case SIGTERM:
-            info.type = ExceptionType::SIGNAL_TERM;
-            info.description = "Signal SIGTERM (终止请求)";
-            break;
+        // case SIGTERM:
+        //     info.type = ExceptionType::SIGNAL_TERM;
+        //     info.description = "Signal SIGTERM (终止请求)";
+        //     break;
         default:
             info.type = ExceptionType::SIGNAL_ABORT;
             info.description = "Unknown Signal (未知信号)";
@@ -599,7 +599,7 @@ namespace ExceptionHandler
         signal(SIGILL, SignalHandler);
         signal(SIGINT, SignalHandler);
         signal(SIGSEGV, SignalHandler);
-        signal(SIGTERM, SignalHandler);
+        // signal(SIGTERM, SignalHandler);
 
         return true;
     }
