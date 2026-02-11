@@ -129,7 +129,11 @@ struct _user_pt_regs {
 
 struct _user_fpsimd_state {
 	// unsigned char vregs[32][16];
+#ifdef _MSC_VER
+	unsigned char vregs[32][16];
+#else
 	__uint128_t	vregs[32];
+#endif
 	uint32_t fpsr;
 	uint32_t fpcr;
 };

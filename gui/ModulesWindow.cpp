@@ -1,6 +1,7 @@
 #include "ModulesWindow.h"
+#include "AppContext.h"
 #include "ColorScheme.h"
-#include "MemoryViewerWindow.h"
+#include "AppContext.h"
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
 #include "Gui.h"
@@ -259,11 +260,8 @@ void ModulesWindow::onDraw()
 					}
 					
 					if (ImGui::MenuItem("在内存查看器中打开")) {
-						MemoryViewerWindow* viewer = ensureMemoryViewerWindow();
-						if (viewer) {
-							viewer->jumpToAddress(module.base);
-							Gui::log("跳转到模块基址: 0x%llX (%s)", (unsigned long long)module.base, module.name.c_str());
-						}
+						navigateToAddress(module.base);
+						Gui::log("跳转到模块基址: 0x%llX (%s)", (unsigned long long)module.base, module.name.c_str());
 					}
 					
 					ImGui::EndPopup();
@@ -448,26 +446,4 @@ void ModulesWindow::drawFilterModal()
 		
 		ImGui::EndPopup();
 	}
-}
-
-// 确保内存查看器窗口存在
-MemoryViewerWindow* ModulesWindow::ensureMemoryViewerWindow()
-{
-	// 如果已经存在，直接返回
-	if (memoryViewerWindow) {
-		return memoryViewerWindow;
-	}
-	
-	// 如果有回调函数，使用回调创建窗口
-	if (openMemoryViewerCallback) {
-		memoryViewerWindow = openMemoryViewerCallback();
-		if (memoryViewerWindow) {
-			Gui::log("已自动打开内存查看器窗口");
-			return memoryViewerWindow;
-		}
-	}
-	
-	// 如果没有回调或回调失败，返回nullptr
-	Gui::log("错误: 无法打开内存查看器窗口");
-	return nullptr;
 } 

@@ -7,9 +7,6 @@
 #include <cstdint>
 #include <memory>
 
-// 前向声明
-struct ModuleInfoItem;
-
 // 数据结构字段类型枚举
 enum class FieldType {
     BYTE = 0,
@@ -103,18 +100,16 @@ enum class AsciiDisplayMode {
 class MemoryViewerWindow : public Window {
 public:
     MemoryViewerWindow();
+    ~MemoryViewerWindow();
 
     void onDraw() override;
     unsigned int getWindowFlags() const override;
 
-    // 进程信息（从主窗口获取）
-    int* selectedPid = nullptr;
-    std::string* selectedName = nullptr;
-
-    void setProcessInfo(int* pid, std::string* name);
     void jumpToAddress(uint64_t address);
 
 private:
+    int navSubscriptionId = 0;  // EventBus 订阅 ID
+    static bool parseAddressExpression(const char* expr, uint64_t& result);
     void drawMemoryViewerPanel();
     void drawStructAnalyzerPanel();
     void drawStructDefinitionEditor();
@@ -153,9 +148,6 @@ private:
     bool writeStructFieldValue(int fieldIndex, const std::string& value);  // 写入结构体字段值
     
     // 反汇编相关
-    void refreshModuleList();  // 刷新模块列表
-    const ModuleInfoItem* findModuleByAddress(uint64_t address);  // 根据地址查找模块
-    std::string formatAddressWithModule(uint64_t address);  // 格式化地址显示：模块名+偏移量=地址
     std::string formatAddressWithOffset(uint64_t address);  // 格式化地址显示：地址[偏移量]
     
     // 内存查看器状态
@@ -250,8 +242,4 @@ private:
     bool scrollToDisassemblyAddress = false;  // 是否需要滚动到高亮地址
     static constexpr size_t DISASSEMBLY_BUFFER_SIZE = 4096;  // 反汇编缓冲区大小（4KB）
     
-    // 模块列表（用于地址格式化）
-    std::vector<ModuleInfoItem> moduleList;  // 模块列表
-    bool moduleListValid = false;  // 模块列表是否有效
-    double lastModuleRefreshTime = 0.0;  // 上次刷新模块列表的时间
-}; 
+};

@@ -1,0 +1,66 @@
+#pragma once
+
+#include <functional>
+#include <vector>
+#include <unordered_map>
+#include <typeindex>
+#include <memory>
+#include <algorithm>
+
+class EventBus {
+public:
+    static EventBus& Get() {
+        static EventBus instance;
+        return instance;
+    }
+
+    template<typename Event>
+    using Handler = std::function<void(const Event&)>;
+
+    // 订阅事件，返回订阅 ID 用于取消订阅
+    template<typename Event>
+    int subscribe(Handler<Event> handler) {
+        int id = nextId_++;
+        auto& handlers = getHandlers<Event>();
+        handlers.push_back({id, std::move(handler)});
+        return id;
+    }
+
+    // 取消订阅
+    template<typename Event>
+    void unsubscribe(int id) {
+        auto& handlers = getHandlers<Event>();
+        handlers.erase(
+            std::remove_if(handlers.begin(), handlers.end(),
+                [id](const auto& entry) { return entry.id == id; }),
+            handlers.end());
+    }
+
+    // 发布事件
+    template<typename Event>
+    void publish(const Event& event) {
+        auto& handlers = getHandlers<Event>();
+        for (auto& entry : handlers) {
+            entry.handler(event);
+        }
+    }
+
+private:
+    EventBus() = default;
+    EventBus(const EventBus&) = delete;
+    EventBus& operator=(const EventBus&) = delete;
+
+    template<typename Event>
+    struct HandlerEntry {
+        int id;
+        Handler<Event> handler;
+    };
+
+    template<typename Event>
+    std::vector<HandlerEntry<Event>>& getHandlers() {
+        static std::vector<HandlerEntry<Event>> handlers;
+        return handlers;
+    }
+
+    int nextId_ = 1;
+};

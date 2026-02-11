@@ -17,4 +17,13 @@ public:
 	virtual unsigned int getWindowFlags() const { return 0; }
 	virtual void draw();
 	void operator()();
+
+	// 便捷方法
+	bool hasProcess() const;
+	int currentPid() const;
+	const std::string& currentProcessName() const;
+	void navigateToAddress(uint64_t addr);
+
+protected:
+	bool shouldRefresh(float& timer, float interval);
 }; 

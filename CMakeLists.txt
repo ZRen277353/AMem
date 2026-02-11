@@ -85,13 +85,25 @@ set(GUI_SOURCES
     gui/ServerConnectWindow.cpp
     gui/ModulesWindow.cpp
     gui/ScanWindow.cpp
+    gui/scan/ScanPanel.cpp
+    gui/scan/ScanResultsPanel.cpp
+    gui/scan/AddressListPanel.cpp
+    gui/scan/ScanEngine.cpp
     gui/MemoryViewerWindow.cpp
+    gui/memview/HexEditorPanel.cpp
+    gui/memview/StructAnalyzerPanel.cpp
+    gui/memview/WatchListPanel.cpp
+    gui/memview/DisassemblyPanel.cpp
     gui/BreakpointWindow.cpp
+    gui/breakpoint/BreakpointListPanel.cpp
+    gui/breakpoint/BreakpointDetailPanel.cpp
     gui/ProcessListWindow.cpp
     gui/VersionWindow.cpp
     gui/DisassemblyHelper.cpp
     gui/ConfigManager.cpp
     gui/LogWindow.cpp
+    gui/AppContext.cpp
+    gui/ValueFormatter.cpp
 )
 
 set(LUA_SOURCES
@@ -125,6 +137,15 @@ endif()
 
 set(SOCKET_SOURCES
     socket/client_singleton.cpp
+    socket/ProcessCommands.cpp
+    socket/MemoryCommands.cpp
+    socket/ScanCommands.cpp
+    socket/BreakpointCommands.cpp
+)
+
+set(RENDERER_SOURCES
+    renderer/DX12Renderer.cpp
+    renderer/StyleSetup.cpp
 )
 
 
@@ -141,17 +162,22 @@ endif()
 
 add_definitions(-DIMGUI_DISABLE_DEBUG_TOOLS)
 
-add_executable(ImGuiProject 
-    main.cpp 
-    ${IMGUI_SOURCES} 
-    ${GUI_SOURCES} 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
+add_executable(ImGuiProject
+    main.cpp
+    ${IMGUI_SOURCES}
+    ${GUI_SOURCES}
     ${SOCKET_SOURCES}
+    ${RENDERER_SOURCES}
     ${LUA_SOURCES}
 )
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
-    imgui imgui/backends gui lua
+    imgui imgui/backends gui lua renderer utils
     ${CMAKE_BINARY_DIR}/generated
 )
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Window.h"
-#include "../socket/client_singleton.h"
 #include <string>
 #include <vector>
 
@@ -26,7 +25,7 @@ private:
     void drawTopProcessBar();
     void drawSelectedProcessBanner();
     void drawProcessSelectModal();
-    
+
     // 窗口管理方法
     void openScanWindow();
     void openMemoryViewerWindow();
@@ -38,11 +37,4 @@ private:
 
     // 状态变量
     bool openProcessModal = false;
-    int selectedPid = 0;
-    std::string selectedName = "";
-    
-    // 子窗口指针
-    ScanWindow* scanWindow = nullptr;
-    MemoryViewerWindow* memoryViewerWindow = nullptr;
-    BreakpointWindow* breakpointWindow = nullptr;
 };

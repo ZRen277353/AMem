@@ -11,7 +11,6 @@
 
 // 前向声明
 struct HW_HIT_INFO;
-class MemoryViewerWindow;
 class DisassemblyHelper;
 struct DisassemblyResult;
 
@@ -70,18 +69,6 @@ public:
 
     void onDraw() override;
     unsigned int getWindowFlags() const override;
-
-    // 进程信息（从主窗口获取）
-    int* selectedPid = nullptr;
-    std::string* selectedName = nullptr;
-    MemoryViewerWindow* memoryViewerWindow = nullptr;
-    
-    // 回调函数：用于请求打开内存查看器窗口
-    std::function<MemoryViewerWindow*()> openMemoryViewerCallback = nullptr;
-
-    void setProcessInfo(int* pid, std::string* name);
-    void setMemoryViewerWindow(MemoryViewerWindow* memViewer);
-    void setOpenMemoryViewerCallback(std::function<MemoryViewerWindow*()> callback);
 
 private:
     void drawBreakpointList();
@@ -185,16 +172,7 @@ private:
     void drawDisassemblyForPC(uint64_t pcAddress, int beforeCount, int afterCount, BreakpointDetailWindow& detailWindow);
     void closeBreakpointDetailWindow(int windowIndex);
     
-    // 辅助方法：确保内存查看器窗口存在
-    MemoryViewerWindow* ensureMemoryViewerWindow();
-    
     // 反汇编助手
     std::unique_ptr<DisassemblyHelper> disassemblyHelper;
     bool disassemblyInitialized = false;
-    
-    // 模块列表缓存
-    std::vector<ModuleInfoItem> moduleList;
-    float lastModuleRefreshTime = 0.0f;
-    float moduleRefreshInterval = 5.0f;  // 每5秒刷新一次模块列表
-    bool moduleListValid = false;
 }; 

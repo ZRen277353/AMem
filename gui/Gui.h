@@ -51,4 +51,19 @@ namespace Gui {
 				res.push_back(tWindow);
 		return res;
 	}
+
+	template<typename T, typename... Args>
+	T* getOrCreate(Args&&... args) {
+		auto list = getWindows<T>();
+		if (!list.empty()) {
+			T* w = list.front();
+			w->pOpen = true;
+			w->shouldBringToFront = true;
+			return w;
+		}
+		T* w = new T(std::forward<Args>(args)...);
+		addWindow(w);
+		w->shouldBringToFront = true;
+		return w;
+	}
 } 
