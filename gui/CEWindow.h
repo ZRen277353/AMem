@@ -9,7 +9,6 @@
 class ScanWindow;
 class MemoryViewerWindow;
 class BreakpointWindow;
-class PointerChainWindow;
 class LuaScriptWindow;
 class ServerConnectWindow;
 class LogWindow;
@@ -33,7 +32,6 @@ private:
     void openMemoryViewerWindow();
     void openBreakpointWindow();
     void openModulesWindow();
-    void openPointerChainWindow();
     void openLuaScriptWindow();
     void openServerConnectWindow();
     void openLogWindow();
@@ -47,5 +45,4 @@ private:
     ScanWindow* scanWindow = nullptr;
     MemoryViewerWindow* memoryViewerWindow = nullptr;
     BreakpointWindow* breakpointWindow = nullptr;
-    PointerChainWindow* pointerChainWindow = nullptr;
-}; 
+};

@@ -11,11 +11,6 @@
 #include "ExceptionHandler.h"
 
 
-// // 指针链树示例
-// void RenderPointerChainExample();
-// void CleanupPointerChainExample();
-
-
 #ifdef _DEBUG
 #define DX12_ENABLE_DEBUG_LAYER
 #endif
@@ -398,11 +393,7 @@ int main(int, char**)
 
         // GUI framework main loop
        Gui::mainLoop();
-        
-        // 指针链树示例窗口（使用简化版本测试）
-        //RenderPointerChainExample();
-   
-        // Rendering
+
         // Rendering
         ImGui::Render();
 
@@ -453,8 +444,6 @@ int main(int, char**)
     WaitForPendingOperations();
 
     // Cleanup
-   // CleanupPointerChainExample();
- 
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

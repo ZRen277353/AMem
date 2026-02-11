@@ -26,7 +26,6 @@
 ### 主要特点
 
 - 🎨 **现代化 UI** - 基于 Dear ImGui，支持中文界面
-- 🚀 **高性能扫描** - 多线程指针链扫描，充分利用多核 CPU
 - 🔗 **指针链分析** - 可视化指针链树，支持复杂的指针路径分析
 - 🐛 **内核级调试** - 硬件断点、内存断点支持
 - 📡 **远程连接** - 通过 Socket 连接 Android 设备
@@ -46,21 +45,7 @@
   <img width="964" height="619" alt="搜索" src="https://github.com/user-attachments/assets/e569c833-1444-43f6-9937-87c557466abe" />
 
 
-### 2. 指针链扫描 (PointerChainWindow)
-- ✅ 自动查找指向目标地址的指针链
-- ✅ 可配置扫描参数：
-  - 最大深度（1-20层）
-  - 最大偏移量
-  - 结果数量限制
-  - 线程数量
-- ✅ 多线程并行扫描（2-16线程）
-- ✅ 实时进度监控
-- ✅ 指针链可视化显示
-- ✅ 指针链树形编辑器（开发中）
-<img width="1145" height="649" alt="指针扫描" src="https://github.com/user-attachments/assets/06e748d9-24c7-4eee-8b7c-395996552f5f" />
-
-
-### 3. 内存查看器 (MemoryViewerWindow)
+### 2. 内存查看器 (MemoryViewerWindow)
 - ✅ 十六进制内存查看
 - ✅ 内存编辑功能
 - ✅ 支持跳转到指定地址
@@ -68,7 +53,7 @@
 <img width="1032" height="568" alt="内存查看" src="https://github.com/user-attachments/assets/a4e09eea-8745-4f32-9c93-3ee02e067185" />
 
 
-### 4. 断点调试 (BreakpointWindow)
+### 3. 断点调试 (BreakpointWindow)
 - ✅ 硬件断点（读/写/执行）
 - ✅ 断点命中信息查看
 - ✅ 断点暂停/恢复
@@ -77,7 +62,7 @@
 <img width="975" height="645" alt="反汇编" src="https://github.com/user-attachments/assets/5fd54c8b-9087-4246-b34e-e44c772b3aa8" />
 
 
-### 5. 进程管理
+### 4. 进程管理
 - ✅ 进程列表查看
 - ✅ 模块列表查看
 - ✅ 进程附加/分离
@@ -85,7 +70,7 @@
 <img width="1111" height="705" alt="模块列表" src="https://github.com/user-attachments/assets/16e59225-3453-48a0-873b-4e8c48ccc4a2" />
 
 
-### 6. 异常处理
+### 5. 异常处理
 - ✅ SEH 异常捕获
 - ✅ C++ 标准异常捕获
 - ✅ 信号处理
@@ -184,19 +169,7 @@ build/Release/ImGuiProject.exe
 2. 选择扫描条件（变大/变小/未变化）
 3. 逐步缩小结果范围
 
-### 4. 指针链扫描
-
-1. 打开 **"指针链扫描"** 窗口
-2. 点击 **"获取潜在指针"** 按钮（首次使用）
-3. 输入目标地址（十六进制）
-4. 配置扫描参数：
-   - **最大深度**: 推荐 5-7 层
-   - **最大偏移量**: 推荐 500-2000
-   - **线程数量**: 根据 CPU 核心数设置
-5. 点击 **"开始扫描"**
-6. 等待扫描完成，查看结果
-
-### 5. 设置断点
+### 4. 设置断点
 
 1. 打开 **"断点管理"** 窗口
 2. 输入断点地址

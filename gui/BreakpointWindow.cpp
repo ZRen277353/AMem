@@ -16,15 +16,14 @@ BreakpointWindow::BreakpointWindow()
     
     // 初始化反汇编助手
     if (DisassemblyHelper::isCapstoneAvailable()) {
-        disassemblyHelper = new DisassemblyHelper();
+        disassemblyHelper = std::make_unique<DisassemblyHelper>();
         // 初始化为 ARM64 架构（根据需要可以改为其他架构）
         if (disassemblyHelper->initialize(DisassemblyHelper::Architecture::ARM64)) {
             disassemblyInitialized = true;
             Gui::log("反汇编引擎已初始化 (ARM64)");
         } else {
             Gui::log("警告: 反汇编引擎初始化失败");
-            delete disassemblyHelper;
-            disassemblyHelper = nullptr;
+            disassemblyHelper.reset();
         }
     } else {
         Gui::log("警告: Capstone 库不可用，反汇编功能已禁用");

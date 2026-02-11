@@ -7,7 +7,6 @@
 #include "ScanWindow.h"
 #include "MemoryViewerWindow.h"
 #include "BreakpointWindow.h"
-#include "PointerChainWindow.h"
 #include "LogWindow.h"
 
 #ifdef HAVE_LUAJIT
@@ -207,10 +206,6 @@ void CEWindow::onDraw()
             openBreakpointWindow();
         }
           ImGui::SameLine();
-        if (ImGui::Button("指针链图表", ImVec2(200, 40))) {
-            openPointerChainWindow();
-        }
-          ImGui::SameLine();
         if (ImGui::Button("SDK解析器", ImVec2(200, 40))) {
           
         }
@@ -258,9 +253,6 @@ void CEWindow::openMemoryViewerWindow()
         }
         if (scanWindow) {
             scanWindow->setMemoryViewerWindow(memoryViewerWindow);
-        }
-        if (pointerChainWindow) {
-            pointerChainWindow->setMemoryViewerWindow(memoryViewerWindow);
         }
         
         // 将引用传递给所有ModulesWindow实例
@@ -319,26 +311,6 @@ void CEWindow::openModulesWindow()
         mw->shouldBringToFront = true;
         mw->triggerAutoRefresh();
     }
-}
-
-void CEWindow::openPointerChainWindow()
-{
-    if (!pointerChainWindow) {
-        pointerChainWindow = new PointerChainWindow();
-        pointerChainWindow->setProcessInfo(&selectedPid, &selectedName);
-        // 如果内存查看器已存在，设置引用
-        if (memoryViewerWindow) {
-            pointerChainWindow->setMemoryViewerWindow(memoryViewerWindow);
-        }
-        // 设置回调函数，用于在需要时自动打开内存查看器
-        pointerChainWindow->setOpenMemoryViewerCallback([this]() -> MemoryViewerWindow* {
-            openMemoryViewerWindow();
-            return memoryViewerWindow;
-        });
-        Gui::addWindow(pointerChainWindow);
-    }
-    pointerChainWindow->pOpen = true;
-    pointerChainWindow->shouldBringToFront = true;
 }
 
 void CEWindow::openLuaScriptWindow()

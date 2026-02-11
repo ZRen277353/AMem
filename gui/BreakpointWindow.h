@@ -189,7 +189,7 @@ private:
     MemoryViewerWindow* ensureMemoryViewerWindow();
     
     // 反汇编助手
-    DisassemblyHelper* disassemblyHelper = nullptr;
+    std::unique_ptr<DisassemblyHelper> disassemblyHelper;
     bool disassemblyInitialized = false;
     
     // 模块列表缓存

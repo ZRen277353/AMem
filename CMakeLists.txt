@@ -89,7 +89,6 @@ set(GUI_SOURCES
     gui/BreakpointWindow.cpp
     gui/ProcessListWindow.cpp
     gui/VersionWindow.cpp
-    gui/PointerChainWindow.cpp
     gui/DisassemblyHelper.cpp
     gui/ConfigManager.cpp
     gui/LogWindow.cpp
@@ -128,10 +127,6 @@ set(SOCKET_SOURCES
     socket/client_singleton.cpp
 )
 
-set(POINTERSCAN_SOURCES
-    PointerScan/formatter.cpp
-    PointerScan/scanner.cpp
-)
 
 # 配置 DirectX 后端
 if(USE_DX11)
@@ -150,14 +145,13 @@ add_executable(ImGuiProject
     main.cpp 
     ${IMGUI_SOURCES} 
     ${GUI_SOURCES} 
-    ${SOCKET_SOURCES} 
-    ${POINTERSCAN_SOURCES}
+    ${SOCKET_SOURCES}
     ${LUA_SOURCES}
 )
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
-    imgui imgui/backends gui PointerScan lua
+    imgui imgui/backends gui lua
     ${CMAKE_BINARY_DIR}/generated
 )
 
