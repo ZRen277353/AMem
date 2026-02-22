@@ -13,6 +13,51 @@
 
 void MemoryViewerWindow::drawMemoryViewerPanel()
 {
+    // 窗口聚焦时的键盘快捷键
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyAlt) {
+            // Alt+Left: 后退
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && historyIndex > 0) {
+                historyIndex--;
+                uint64_t historyAddr = addressHistory[historyIndex];
+                targetAddress = historyAddr;
+                pageBaseAddress = (historyAddr / pageSize) * pageSize;
+                viewAddress = pageBaseAddress;
+                viewSize = pageSize;
+                buffer.resize(viewSize);
+                ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
+                scrollToTarget = true;
+            }
+            // Alt+Right: 前进
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && historyIndex < (int)addressHistory.size() - 1) {
+                historyIndex++;
+                uint64_t historyAddr = addressHistory[historyIndex];
+                targetAddress = historyAddr;
+                pageBaseAddress = (historyAddr / pageSize) * pageSize;
+                viewAddress = pageBaseAddress;
+                viewSize = pageSize;
+                buffer.resize(viewSize);
+                ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
+                scrollToTarget = true;
+            }
+        }
+        if (io.KeyCtrl) {
+            // Ctrl+G: 聚焦地址输入框
+            if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+                ImGui::SetKeyboardFocusHere(8); // 跳到地址输入框（近似偏移）
+            }
+            // Ctrl+R: 刷新内存
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+                refreshMemory();
+            }
+        }
+        // F5: 刷新内存
+        if (ImGui::IsKeyPressed(ImGuiKey_F5)) {
+            refreshMemory();
+        }
+    }
+
     // 工具栏 - 第一行：导航和地址
     ImGui::BeginGroup();
     
@@ -52,8 +97,8 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         }
     }
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("后退");
-    
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("后退 (Alt+Left)");
+
     ImGui::SameLine();
     ImGui::BeginDisabled(historyIndex >= (int)addressHistory.size() - 1);
     if (ImGui::ArrowButton("##forward", ImGuiDir_Right)) {
@@ -70,7 +115,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         }
     }
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("前进");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("前进 (Alt+Right)");
     
     ImGui::SameLine();
     ImGui::Separator();
@@ -106,7 +151,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     }
     
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("支持十六进制运算\n例如: 1000+200, 5000-100\n按回车确认");
+        ImGui::SetTooltip("支持十六进制运算\n例如: 1000+200, 5000-100\n按回车确认 (Ctrl+G 聚焦)");
     }
     
     ImGui::SameLine();

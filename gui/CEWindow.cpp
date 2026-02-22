@@ -38,7 +38,7 @@ void CEWindow::drawMenuBar()
     {
         if (ImGui::BeginMenu("文件"))
         {
-            if (ImGui::MenuItem("打开进程"))
+            if (ImGui::MenuItem("打开进程", "Ctrl+P"))
                 openProcessModal = true;
             ImGui::MenuItem("保存", nullptr, false);
             ImGui::MenuItem("退出", nullptr, false);
@@ -51,7 +51,14 @@ void CEWindow::drawMenuBar()
         }
         if (ImGui::BeginMenu("窗口"))
         {
-            if (ImGui::MenuItem("Lua脚本管理器"))
+            if (ImGui::MenuItem("数值扫描", "Ctrl+S"))
+                openScanWindow();
+            if (ImGui::MenuItem("内存查看器", "Ctrl+M"))
+                openMemoryViewerWindow();
+            if (ImGui::MenuItem("断点调试", "Ctrl+B"))
+                openBreakpointWindow();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Lua脚本管理器", "Ctrl+L"))
                 openLuaScriptWindow();
             if (ImGui::MenuItem("服务器连接"))
                 openServerConnectWindow();
@@ -102,7 +109,7 @@ void CEWindow::drawProcessSelectModal()
         if (ImGui::Button("刷新")) {
             list.clear();
             if (!FetchProcessList(list))
-                Gui::log("获取进程列表失败");
+                Gui::log("获取进程列表失败，请检查服务器连接状态");
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(450.0f);
@@ -165,6 +172,18 @@ void CEWindow::onDraw()
     style.FrameRounding = 2.0f;
 
     ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_Once);
+
+    // 全局键盘快捷键（不在文本输入框中时生效）
+    if (!ImGui::GetIO().WantTextInput) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl) {
+            if (ImGui::IsKeyPressed(ImGuiKey_P)) { openProcessModal = true; }
+            else if (ImGui::IsKeyPressed(ImGuiKey_S)) { openScanWindow(); }
+            else if (ImGui::IsKeyPressed(ImGuiKey_M)) { openMemoryViewerWindow(); }
+            else if (ImGui::IsKeyPressed(ImGuiKey_B)) { openBreakpointWindow(); }
+            else if (ImGui::IsKeyPressed(ImGuiKey_L)) { openLuaScriptWindow(); }
+        }
+    }
 
     drawMenuBar();
     drawSelectedProcessBanner();

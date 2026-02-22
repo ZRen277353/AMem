@@ -7,8 +7,6 @@
 #include "../imgui/imgui.h"
 #include "../socket/client_singleton.h"
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
 #include <cstring>
 #include <cstdint>
 #include <cmath>
@@ -39,6 +37,22 @@ void ScanWindow::onDraw()
     auto& ctx = AppContext::Get();
     if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
     {
+        // 窗口聚焦时的键盘快捷键
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
+            // F5: 刷新地址值
+            if (ImGui::IsKeyPressed(ImGuiKey_F5) && ctx.hasProcess()) {
+                refreshAddressValues();
+            }
+            // Enter/F9: 执行扫描（首次或再次）
+            if (ImGui::IsKeyPressed(ImGuiKey_F9) && !scanInProgress && ctx.hasProcess()) {
+                if (totalScanResults == 0) {
+                    performFirstScanAsync();
+                } else {
+                    performNextScanAsync();
+                }
+            }
+        }
+
         if (ctx.hasProcess()) {
             ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
                 ctx.selectedName.c_str(), ctx.selectedPid.load());
@@ -73,15 +87,6 @@ void ScanWindow::updateScanProgress(float progress, uint64_t matchCount, uint64_
     scanMatchCount = matchCount;
     scanScannedBytes = scannedBytes;
     scanTotalBytes = totalBytes;
-    
-    // 使用 std::fixed 格式化进度信息用于日志输出
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1) << (progress * 100.0f) << "%";
-    if (totalBytes > 0) {
-        oss << " (" << (scannedBytes / (1024 * 1024)) << " / " << (totalBytes / (1024 * 1024)) << " MB)";
-    }
-    // 可选：输出调试信息
-    // Gui::log("扫描进度: %s, 匹配: %llu", oss.str().c_str(), matchCount);
 }
 
 // 从CEWindow.cpp移植所有扫描相关的方法
