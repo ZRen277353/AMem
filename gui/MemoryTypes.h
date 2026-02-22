@@ -75,5 +75,4 @@ struct AddressListItem {
     uint64_t address;
     int valueType;
     std::string currentValue;
-    bool frozen = false;
 }; 

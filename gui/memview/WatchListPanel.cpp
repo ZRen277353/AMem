@@ -11,6 +11,36 @@
 #include <cstring>
 #include <fstream>
 
+// 辅助：判断类型是否可冻结（固定大小 ≤ 8 字节的数值类型）
+static bool isFreezableType(FieldType type) {
+    switch (type) {
+        case FieldType::BYTE:
+        case FieldType::WORD:
+        case FieldType::DWORD:
+        case FieldType::QWORD:
+        case FieldType::FLOAT:
+        case FieldType::DOUBLE:
+        case FieldType::POINTER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 辅助：获取类型对应的字节大小（仅用于可冻结类型）
+static uint8_t getFreezeDataSize(FieldType type) {
+    switch (type) {
+        case FieldType::BYTE:    return 1;
+        case FieldType::WORD:    return 2;
+        case FieldType::DWORD:   return 4;
+        case FieldType::FLOAT:   return 4;
+        case FieldType::QWORD:   return 8;
+        case FieldType::DOUBLE:  return 8;
+        case FieldType::POINTER: return 8;
+        default:                 return 0;
+    }
+}
+
 void MemoryViewerWindow::drawAddressList()
 {
     // 工具栏
@@ -154,6 +184,15 @@ void MemoryViewerWindow::drawAddressList()
                 if (ImGui::InputText("##value", valueBuf, sizeof(valueBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
                     if (writeWatchItemValue(item, valueBuf)) {
                         item.cachedValue = valueBuf;  // 立即更新缓存
+                        // 如果该项正在冻结，同步更新服务端冻结值
+                        if (item.frozen && item.frozenDataSize > 0) {
+                            std::vector<unsigned char> rawData;
+                            if (ReadProcessMemoryBytes(item.address, item.frozenDataSize, rawData) &&
+                                rawData.size() >= item.frozenDataSize) {
+                                memcpy(item.frozenData, rawData.data(), item.frozenDataSize);
+                                FreezeUpdate(item.address, item.frozenData);
+                            }
+                        }
                     }
                 }
                 ImGui::PopItemWidth();
@@ -176,9 +215,41 @@ void MemoryViewerWindow::drawAddressList()
                 jumpToAddress(item.address);
             }
             ImGui::SameLine();
-            if (ImGui::Checkbox("冻结", &item.frozen)) {
+            // 冻结：仅数值类型（≤8字节）可冻结
+            if (!isFreezableType(item.type)) {
+                ImGui::BeginDisabled();
+                bool dummy = false;
+                ImGui::Checkbox("冻结", &dummy);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("该类型不支持冻结");
+                }
+            } else if (ImGui::Checkbox("冻结", &item.frozen)) {
                 if (item.frozen) {
-                    item.frozenValue = readWatchItemValue(item);
+                    // 读取当前原始字节
+                    uint8_t dataSize = getFreezeDataSize(item.type);
+                    std::vector<unsigned char> rawData;
+                    if (dataSize > 0 && dataSize <= 8 &&
+                        ReadProcessMemoryBytes(item.address, dataSize, rawData) &&
+                        rawData.size() >= dataSize) {
+                        item.frozenDataSize = dataSize;
+                        memset(item.frozenData, 0, sizeof(item.frozenData));
+                        memcpy(item.frozenData, rawData.data(), dataSize);
+                        // 委托服务端冻结
+                        if (!FreezeAdd(item.address, dataSize, item.frozenData)) {
+                            Gui::log("冻结失败: 0x%llX", (unsigned long long)item.address);
+                            item.frozen = false;
+                            item.frozenDataSize = 0;
+                        }
+                    } else {
+                        Gui::log("冻结失败: 无法读取地址 0x%llX", (unsigned long long)item.address);
+                        item.frozen = false;
+                    }
+                } else {
+                    // 取消冻结
+                    FreezeRemove(item.address);
+                    item.frozenDataSize = 0;
+                    memset(item.frozenData, 0, sizeof(item.frozenData));
                 }
             }
             
@@ -501,14 +572,8 @@ void MemoryViewerWindow::updateWatchItems()
             continue;
         }
         
-        // 如果冻结，写入冻结值（保持值不变）
-        if (item.frozen && !item.frozenValue.empty()) {
-            writeWatchItemValue(item, item.frozenValue);
-            item.cachedValue = item.frozenValue;  // 显示冻结值
-        } else {
-            // 如果未冻结，读取当前值并缓存（只在此处读取，避免每帧读取）
-            item.cachedValue = readWatchItemValue(item);
-        }
+        // 冻结项和非冻结项统一读取当前值显示
+        item.cachedValue = readWatchItemValue(item);
     }
 }
 
@@ -516,28 +581,25 @@ void MemoryViewerWindow::saveWatchList()
 {
     std::ofstream file("watch_list.dat", std::ios::binary);
     if (!file.is_open()) return;
-    
+
     size_t count = watchItems.size();
     file.write((char*)&count, sizeof(count));
-    
+
     for (const auto& item : watchItems) {
         size_t descLen = item.description.size();
         file.write((char*)&descLen, sizeof(descLen));
         file.write(item.description.c_str(), descLen);
-        
+
         file.write((char*)&item.address, sizeof(item.address));
         file.write((char*)&item.type, sizeof(item.type));
         file.write((char*)&item.enabled, sizeof(item.enabled));
         file.write((char*)&item.frozen, sizeof(item.frozen));
-        
-        size_t frozenValLen = item.frozenValue.size();
-        file.write((char*)&frozenValLen, sizeof(frozenValLen));
-        if (frozenValLen > 0) {
-            file.write(item.frozenValue.c_str(), frozenValLen);
-        }
-        
+
+        file.write((char*)&item.frozenDataSize, sizeof(item.frozenDataSize));
+        file.write((char*)item.frozenData, sizeof(item.frozenData));
+
         file.write((char*)&item.isPointer, sizeof(item.isPointer));
-        
+
         size_t offsetCount = item.offsets.size();
         file.write((char*)&offsetCount, sizeof(offsetCount));
         for (uint64_t offset : item.offsets) {
@@ -550,43 +612,51 @@ void MemoryViewerWindow::loadWatchList()
 {
     std::ifstream file("watch_list.dat", std::ios::binary);
     if (!file.is_open()) return;
-    
+
     watchItems.clear();
-    
+
     size_t count;
     if (!file.read((char*)&count, sizeof(count))) return;
-    
+
     for (size_t i = 0; i < count; i++) {
         MemoryWatchItem item;
-        
+
         size_t descLen;
         if (!file.read((char*)&descLen, sizeof(descLen))) break;
+        if (descLen > 4096) break;
         item.description.resize(descLen);
         if (!file.read(&item.description[0], descLen)) break;
-        
+
         if (!file.read((char*)&item.address, sizeof(item.address))) break;
         if (!file.read((char*)&item.type, sizeof(item.type))) break;
         if (!file.read((char*)&item.enabled, sizeof(item.enabled))) break;
         if (!file.read((char*)&item.frozen, sizeof(item.frozen))) break;
-        
-        size_t frozenValLen;
-        if (!file.read((char*)&frozenValLen, sizeof(frozenValLen))) break;
-        if (frozenValLen > 0) {
-            item.frozenValue.resize(frozenValLen);
-            if (!file.read(&item.frozenValue[0], frozenValLen)) break;
-        }
-        
+
+        if (!file.read((char*)&item.frozenDataSize, sizeof(item.frozenDataSize))) break;
+        if (!file.read((char*)item.frozenData, sizeof(item.frozenData))) break;
+
         if (!file.read((char*)&item.isPointer, sizeof(item.isPointer))) break;
-        
+
         size_t offsetCount;
         if (!file.read((char*)&offsetCount, sizeof(offsetCount))) break;
+        if (offsetCount > 1024) break;
         for (size_t j = 0; j < offsetCount; j++) {
             uint64_t offset;
             if (!file.read((char*)&offset, sizeof(offset))) break;
             item.offsets.push_back(offset);
         }
-        
+
         watchItems.push_back(item);
+    }
+
+    // 加载后，对冻结项重新注册到服务端
+    for (auto& item : watchItems) {
+        if (item.frozen && item.frozenDataSize > 0 && isFreezableType(item.type)) {
+            if (!FreezeAdd(item.address, item.frozenDataSize, item.frozenData)) {
+                item.frozen = false;
+                item.frozenDataSize = 0;
+            }
+        }
     }
 }
 

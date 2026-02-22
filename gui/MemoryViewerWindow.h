@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
 // 数据结构字段类型枚举
@@ -30,16 +31,20 @@ struct MemoryWatchItem {
     FieldType type;                 // 数据类型
     bool enabled;                   // 是否启用
     bool frozen;                    // 是否冻结
-    std::string frozenValue;        // 冻结值
+    uint8_t frozenData[8];          // 冻结值（原始字节）
+    uint8_t frozenDataSize;         // 冻结值字节数（0 表示未设置，最大 8）
     std::vector<uint64_t> offsets;  // 偏移链
     std::string moduleName;         // 模块名
     uint64_t moduleOffset;          // 模块偏移
     bool isPointer;                 // 是否是指针
     int arrayLength;                // 如果是数组，数组长度
     std::string cachedValue;        // 缓存的当前值，避免每帧读取
-    
-    MemoryWatchItem() : address(0), type(FieldType::DWORD), enabled(true), 
-                        frozen(false), moduleOffset(0), isPointer(false), arrayLength(1), cachedValue("N/A") {}
+
+    MemoryWatchItem() : address(0), type(FieldType::DWORD), enabled(true),
+                        frozen(false), frozenDataSize(0), moduleOffset(0),
+                        isPointer(false), arrayLength(1), cachedValue("N/A") {
+        memset(frozenData, 0, sizeof(frozenData));
+    }
 };
 
 // 数据结构字段定义
