@@ -11,8 +11,8 @@
 // 端口类型枚举（与服务端保持一致）
 enum PortType {
   PORT_MAIN = 1,  // 主通信端口
-  PORT_DEBUG = 2, // 调试端口
-  PORT_ERROR = 3, // 错误通知端口
+  PORT_ERROR = 2, // 错误通知端口
+  PORT_DEBUG = 3, // 调试端口
 };
 
 /**
@@ -218,3 +218,16 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
 
 // 停止扫描
 bool StopSearchScan(PortType type = PORT_DEBUG);
+
+// 冻结功能
+bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
+               PortType type = PORT_MAIN);
+bool FreezeRemove(uint64_t address, PortType type = PORT_MAIN);
+bool FreezeClear(PortType type = PORT_MAIN);
+bool FreezePause(PortType type = PORT_MAIN);
+bool FreezeResume(PortType type = PORT_MAIN);
+bool FreezeGetList(std::vector<CeFreezeItem> &outList, bool &isPaused,
+                   uint32_t &interval_ms, PortType type = PORT_MAIN);
+bool FreezeUpdate(uint64_t address, const uint8_t data[8],
+                  PortType type = PORT_MAIN);
+bool FreezeSetInterval(uint32_t interval_ms, PortType type = PORT_MAIN);

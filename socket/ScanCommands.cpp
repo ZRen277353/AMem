@@ -103,6 +103,9 @@ bool RemoveScanResult(std::vector<uint64_t> address, PortType port) {
         unsigned char command = CMD_REMOVESCANRESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
+        int len = static_cast<int>(address.size());
+        if (!client->Send(&len, sizeof(len)))
+            return false;
         if (!client->Send(address.data(), address.size() * sizeof(uint64_t)))
             return false;
         return true;

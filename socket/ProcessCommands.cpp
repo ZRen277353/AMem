@@ -6,7 +6,7 @@
 
 bool GetMemType(int &outType, PortType type) {
     return SocketCommand::executeNoHandle(type, [&](WindowsSocketClient* client) -> bool {
-        unsigned char command = CMD_GETARCHITECTURE;
+        unsigned char command = CMD_GETMEMTYPE;
         if (!client->Send(&command, sizeof(command)))
             return false;
         unsigned char t = 0;
@@ -127,12 +127,7 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             return false;
         CeModuleListEntry entry{};
         outList.clear();
-        int magic = 0x1145;
         while (len > 0) {
-            if (!client->Receive(&magic, sizeof(magic)))
-                return false;
-            if (magic != 0x1145)
-                return false;
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 break;

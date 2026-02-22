@@ -141,6 +141,7 @@ set(SOCKET_SOURCES
     socket/MemoryCommands.cpp
     socket/ScanCommands.cpp
     socket/BreakpointCommands.cpp
+    socket/FreezeCommands.cpp
 )
 
 set(RENDERER_SOURCES

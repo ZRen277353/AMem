@@ -19,6 +19,7 @@
 #define CMD_OPENPROCESS 3
 
 #define CMD_GETARCHITECTURE 21
+#define CMD_GETMEMTYPE 100
 
 
 #define CMD_INITRWDRIVER 251
@@ -62,6 +63,16 @@
 #define CMD_SHELLEXEC 227
 
 #define CMD_STOPPROCESS 226 //用于其他线程发送停止命令
+
+//冻结相关命令
+#define CMD_FREEZE_ADD 225
+#define CMD_FREEZE_REMOVE 224
+#define CMD_FREEZE_CLEAR 223
+#define CMD_FREEZE_PAUSE 222
+#define CMD_FREEZE_RESUME 221
+#define CMD_FREEZE_GETLIST 220
+#define CMD_FREEZE_UPDATE 219
+#define CMD_FREEZE_SETINTERVAL 218
 
 
 
@@ -113,9 +124,9 @@ struct CeGetScanResultOutput {
 struct ScanProgress {
     int msgType;
     float percent;
-    uint64_t matchCount;
-    uint64_t scannedBytes;
     uint64_t totalBytes;
+    uint64_t scannedBytes;
+    uint64_t matchCount;
 };
 
 struct _user_pt_regs {
@@ -157,6 +168,30 @@ struct CeReadBratchMemoryOutput{
 struct CeReadBratchAddr{
 	uint64_t addr;
 	uint32_t size;
+};
+
+// 冻结项结构体
+struct CeFreezeItem {
+	uint64_t address;
+	uint8_t dataSize;
+	uint8_t data[8];
+};
+
+struct CeFreezeAddInput {
+	uint64_t address;
+	uint8_t dataSize;
+	uint8_t data[8];
+};
+
+struct CeFreezeUpdateInput {
+	uint64_t address;
+	uint8_t data[8];
+};
+
+struct CeFreezeListOutput {
+	int count;
+	uint8_t isPaused;
+	uint32_t interval_ms;
 };
 
 #pragma pack()
