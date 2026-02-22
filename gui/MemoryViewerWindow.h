@@ -80,6 +80,32 @@ struct StructDefinition {
     }
 };
 
+// Dissector 行（CE 风格）
+struct DissectRow {
+    int offset;              // 相对基址的字节偏移
+    FieldType type;          // 当前解释类型
+    std::string name;        // 用户命名（空则自动生成 field_XXXX）
+    std::string cachedValue; // 缓存的显示值
+    int storedSize = 0;      // 该行占用字节数（STRING 等变长类型用）
+
+    int getSize() const {
+        switch (type) {
+            case FieldType::BYTE: return 1;
+            case FieldType::WORD: return 2;
+            case FieldType::DWORD: return 4;
+            case FieldType::QWORD: return 8;
+            case FieldType::FLOAT: return 4;
+            case FieldType::DOUBLE: return 8;
+            case FieldType::POINTER: return 8;
+            case FieldType::STRING:
+            case FieldType::STRING_UTF8:
+            case FieldType::STRING_UTF16:
+                return storedSize > 0 ? storedSize : 1;
+            default: return 4;
+        }
+    }
+};
+
 // 显示格式枚举（移到类外部）
 enum class DisplayFormat {
     Hex_Byte = 0,      // 单字节十六进制
@@ -117,8 +143,7 @@ private:
     static bool parseAddressExpression(const char* expr, uint64_t& result);
     void drawMemoryViewerPanel();
     void drawStructAnalyzerPanel();
-    void drawStructDefinitionEditor();
-    void drawStructInstanceViewer();
+    void drawDissectorTable();
     void drawDataInspector();  // 新增：数据类型解析面板
     void drawMemoryHexEditor(); // 新增：十六进制编辑器
     void drawAddressList();     // 新增：地址列表（类似CE）
@@ -151,6 +176,15 @@ private:
     void autoAnalyzeStructure(const std::vector<unsigned char>& data);  // 自动分析结构体
     void addStructToWatchList(const StructDefinition& structDef);  // 将结构体添加到监控列表
     bool writeStructFieldValue(int fieldIndex, const std::string& value);  // 写入结构体字段值
+
+    // Dissector 相关
+    void regenerateDissectRows();
+    void refreshDissectValues();
+    void onDissectRowTypeChanged(int rowIndex, FieldType newType);
+    void followPointerInDissector(int rowIndex);
+    bool writeDissectRowValue(int rowIndex, const std::string& valueStr);
+    void saveDissectAsTemplate(const std::string& name);
+    void loadTemplateIntoDissector(int index);
     
     // 反汇编相关
     std::string formatAddressWithOffset(uint64_t address);  // 格式化地址显示：地址[偏移量]
@@ -201,21 +235,27 @@ private:
     
     // 数据结构分析器状态
     bool showStructAnalyzer = false;
-    bool showStructEditor = false;
     std::vector<StructDefinition> structDefinitions;
     int selectedStructIndex = -1;
     uint64_t structBaseAddress = 0;
     std::vector<unsigned char> structBuffer;
-    
-    // 结构体编辑器状态
     char newStructName[128] = "";
-    char newFieldName[128] = "";
-    int newFieldType = 0;
-    int newFieldOffset = 0;
-    int newFieldArrayCount = 1;
-    char newFieldDescription[256] = "";
-    bool newFieldIsPointer = false;
-    char newFieldStructType[128] = "";
+
+    // Dissector 状态
+    std::vector<DissectRow> dissectRows;
+    int dissectDefaultSize = 4;          // 默认元素大小 1/2/4/8
+    int dissectTotalSize = 256;          // 显示区域总字节数
+    bool dissectAutoRefresh = false;
+    float dissectRefreshInterval = 1.0f;
+    float timeSinceDissectRefresh = 0.0f;
+
+    // 指针跟踪历史
+    std::vector<uint64_t> dissectAddrHistory;
+    int dissectHistoryIdx = -1;
+
+    // 保存模板对话框
+    bool showSaveTemplateDialog = false;
+    char saveTemplateName[128] = "";
     
     // 地址列表（监控项）
     std::vector<MemoryWatchItem> watchItems;
