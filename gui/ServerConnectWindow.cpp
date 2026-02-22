@@ -47,7 +47,7 @@ void ServerConnectWindow::updateStatus(bool ok, const char* action)
 			updateMemType();
 		} else {
 			status = std::string(action) + ": 失败 -> 未知服务器";
-			Gui::log("获取服务器版本失败");
+			Gui::log("获取服务器版本失败，服务端可能不兼容");
 		}
 	} else {
 		status = std::string(action) + ": 失败";
@@ -62,7 +62,7 @@ void ServerConnectWindow::updateMemType()
 		if (GetMemType(currentMemType)) {
 			Gui::log("当前内存类型: %s (%d)", memTypeNames[currentMemType].c_str(), currentMemType);
 		} else {
-			Gui::log("获取内存类型失败");
+			Gui::log("获取内存类型失败，请检查连接状态");
 			currentMemType = 0;
 		}
 	}
@@ -207,7 +207,7 @@ void ServerConnectWindow::saveConfig()
 	if (config.saveConfig("config.ini")) {
 		Gui::log("配置已保存: 卡密=%s, 内核版本=%c", cardKeyBuf, KernelVersionBuf);
 	} else {
-		Gui::log("配置保存失败");
+		Gui::log("配置保存失败: 无法写入 config.ini");
 	}
 }
 

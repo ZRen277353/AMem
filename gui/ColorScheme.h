@@ -19,9 +19,9 @@ namespace ColorScheme {
     inline const ImVec4 SuccessBright = ImVec4(0.5f, 0.8f, 0.5f, 1.0f);      // 成功（亮色，用于强调，增强对比度）
     
     // 警告/暂停状态 - 淡灰黄色系（增强对比度，提高深度）
-    inline const ImVec4 Warning = ImVec4(0.85f, 0.8f, 0.65f, 1.0f);         // 警告/暂停（增强可见性）
-    inline const ImVec4 WarningLight = ImVec4(0.85f, 0.85f, 0.7f, 1.0f);   // 警告（浅色，提高深度）
-    inline const ImVec4 WarningBright = ImVec4(0.9f, 0.7f, 0.0f, 1.0f);     // 警告（亮色，用于强调，增强对比度）
+    inline const ImVec4 Warning = ImVec4(0.92f, 0.85f, 0.55f, 1.0f);         // 警告/暂停
+    inline const ImVec4 WarningLight = ImVec4(0.90f, 0.88f, 0.65f, 1.0f);   // 警告（浅色）
+    inline const ImVec4 WarningBright = ImVec4(0.95f, 0.75f, 0.0f, 1.0f);     // 警告（亮色，用于强调）
     
     // 错误状态 - 淡灰红色系（增强对比度，提高深度）
     inline const ImVec4 Error = ImVec4(0.85f, 0.7f, 0.7f, 1.0f);            // 错误（增强可见性）
@@ -29,9 +29,9 @@ namespace ColorScheme {
     inline const ImVec4 ErrorBright = ImVec4(0.9f, 0.2f, 0.2f, 1.0f);       // 错误（亮色，用于强调，增强对比度）
     
     // 信息状态 - 淡灰蓝色系（增强对比度，提高深度）
-    inline const ImVec4 Info = ImVec4(0.65f, 0.75f, 0.85f, 1.0f);           // 信息（增强可见性）
-    inline const ImVec4 InfoLight = ImVec4(0.7f, 0.8f, 0.85f, 1.0f);        // 信息（浅色，提高深度）
-    inline const ImVec4 InfoBright = ImVec4(0.45f, 0.8f, 0.9f, 1.0f);       // 信息（亮色，用于强调，增强对比度）
+    inline const ImVec4 Info = ImVec4(0.55f, 0.78f, 0.95f, 1.0f);           // 信息
+    inline const ImVec4 InfoLight = ImVec4(0.65f, 0.82f, 0.92f, 1.0f);        // 信息（浅色）
+    inline const ImVec4 InfoBright = ImVec4(0.4f, 0.85f, 0.95f, 1.0f);       // 信息（亮色，用于强调）
     
     // ========== 特殊用途颜色 ==========
     // 地址/数值显示 - 淡蓝色系（增强对比度，提高深度）

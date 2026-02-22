@@ -42,7 +42,7 @@ void VersionWindow::onDraw()
 			Gui::log("服务端版本: %d (%s)", version, versionString.c_str());
 		} else {
 			hasData = false;
-			Gui::log("获取服务端版本失败");
+			Gui::log("获取服务端版本失败，请检查连接状态");
 		}
 	}
 

@@ -24,7 +24,7 @@ BreakpointWindow::BreakpointWindow()
             disassemblyInitialized = true;
             Gui::log("反汇编引擎已初始化 (ARM64)");
         } else {
-            Gui::log("警告: 反汇编引擎初始化失败");
+            Gui::log("警告: 反汇编引擎初始化失败 (ARM64)，断点反汇编功能不可用");
             disassemblyHelper.reset();
         }
     } else {
