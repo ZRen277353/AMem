@@ -30,7 +30,7 @@ void BreakpointWindow::openBreakpointDetailWindow(int breakpointIndex)
     // 创建新的详情窗口
     auto& bp = breakpoints[breakpointIndex];
     char title[256];
-    sprintf(title, "断点详情 - 0x%llX##BP%d", bp.address, breakpointIndex);  // 添加##确保ID唯一
+    snprintf(title, sizeof(title), "断点详情 - 0x%llX##BP%d", bp.address, breakpointIndex);  // 添加##确保ID唯一
     
     Gui::log("创建详情窗口: 索引=%d, 地址=0x%llX, 标题=%s", breakpointIndex, bp.address, title);
     
@@ -412,7 +412,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                     // 过滤逻辑
                     if (!filterStr.empty()) {
                         char addrStr[32];
-                        sprintf(addrStr, "%llx", stat.pc_address);
+                        snprintf(addrStr, sizeof(addrStr), "%llx", stat.pc_address);
                         std::string addrStrLower = addrStr;
                         std::transform(addrStrLower.begin(), addrStrLower.end(), addrStrLower.begin(), ::tolower);
                         
@@ -644,7 +644,7 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
                 
                 ImGui::TableSetColumnIndex(0);
                 char indexStr[16];
-                sprintf(indexStr, "%d", i + 1);
+                snprintf(indexStr, sizeof(indexStr), "%d", i + 1);
                 if (ImGui::Selectable(indexStr, isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
                     detailWindow.selectedHitIndex = i;
                 }
@@ -661,7 +661,7 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
                 // char pcStr[256];
                 // snprintf(pcStr, sizeof(pcStr), "%s", pcAddrStr.c_str());
                 char pcStr[32];
-                sprintf(pcStr, "0x%llX", hit.regs_info.pc);
+                snprintf(pcStr, sizeof(pcStr), "0x%llX", hit.regs_info.pc);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
                     navigateToAddress(hit.regs_info.pc);
                     Gui::log("跳转到PC地址: 0x%llX", hit.regs_info.pc);
@@ -737,7 +737,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     ImGui::TextColored(ColorScheme::Register, "X%d", i);
                     ImGui::TableSetColumnIndex(1);
                     char regStr[32];
-                    sprintf(regStr, "0x%016llX", regs.regs[i]);
+                    snprintf(regStr, sizeof(regStr), "0x%016llX", regs.regs[i]);
                     if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
                         if (regs.regs[i] != 0) {
                             navigateToAddress(regs.regs[i]);
@@ -752,7 +752,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         ImGui::TableSetColumnIndex(2);
                         ImGui::TextColored(ColorScheme::Register, "X%d", i + 1);
                         ImGui::TableSetColumnIndex(3);
-                        sprintf(regStr, "0x%016llX", regs.regs[i + 1]);
+                        snprintf(regStr, sizeof(regStr), "0x%016llX", regs.regs[i + 1]);
                         if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
                             if (regs.regs[i + 1] != 0) {
                                 navigateToAddress(regs.regs[i + 1]);
@@ -771,7 +771,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::RegisterSpecial, "SP");
                 ImGui::TableSetColumnIndex(1);
                 char spStr[32];
-                sprintf(spStr, "0x%016llX", regs.sp);
+                snprintf(spStr, sizeof(spStr), "0x%016llX", regs.sp);
                 if (ImGui::Selectable(spStr, false, ImGuiSelectableFlags_None)) {
                     navigateToAddress(regs.sp);
                     Gui::log("跳转到栈指针地址: 0x%llX", regs.sp);
@@ -784,7 +784,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::RegisterSpecial, "PC");
                 ImGui::TableSetColumnIndex(3);
                 char pcStr[32];
-                sprintf(pcStr, "0x%016llX", regs.pc);
+                snprintf(pcStr, sizeof(pcStr), "0x%016llX", regs.pc);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
                     navigateToAddress(regs.pc);
                     Gui::log("跳转到程序计数器地址: 0x%llX", regs.pc);
@@ -846,7 +846,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::FloatRegister, "FPSR");
                 ImGui::TableSetColumnIndex(1);
                 char fpsrStr[64];
-                sprintf(fpsrStr, "0x%08X", fpsimd.fpsr);
+                snprintf(fpsrStr, sizeof(fpsrStr), "0x%08X", fpsimd.fpsr);
                 if (ImGui::Selectable(fpsrStr, false, ImGuiSelectableFlags_None)) {
                     ImGui::SetClipboardText(fpsrStr);
                 }
@@ -867,7 +867,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::FloatRegister, "FPCR");
                 ImGui::TableSetColumnIndex(3);
                 char fpcrStr[64];
-                sprintf(fpcrStr, "0x%08X", fpsimd.fpcr);
+                snprintf(fpcrStr, sizeof(fpcrStr), "0x%08X", fpsimd.fpcr);
                 if (ImGui::Selectable(fpcrStr, false, ImGuiSelectableFlags_None)) {
                     ImGui::SetClipboardText(fpcrStr);
                 }
@@ -989,7 +989,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     // 半精度浮点数模式：显示8个16位值
                     for (int i = 0; i < 8; i++) {
                         char colName[16];
-                        sprintf(colName, "H[%d]", i);
+                        snprintf(colName, sizeof(colName), "H[%d]", i);
                         ImGui::TableSetupColumn(colName, ImGuiTableColumnFlags_WidthStretch);
                     }
                 } else if (fpDisplayMode == 5) {
@@ -1035,9 +1035,9 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     // 低64位
                     ImGui::TableSetColumnIndex(1);
                     char lowStr[32];
-                    sprintf(lowStr, "0x%016llX", low64);
+                    snprintf(lowStr, sizeof(lowStr), "0x%016llX", low64);
                     char lowDisplayStr[64];
-                    sprintf(lowDisplayStr, "D%d: %s", i, lowStr);
+                    snprintf(lowDisplayStr, sizeof(lowDisplayStr), "D%d: %s", i, lowStr);
                     if (ImGui::Selectable(lowDisplayStr, false, ImGuiSelectableFlags_None)) {
                         ImGui::SetClipboardText(lowStr);
                         Gui::log("已复制 D%d 的值: %s", i, lowStr);
@@ -1049,9 +1049,9 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     // 高64位
                     ImGui::TableSetColumnIndex(2);
                     char highStr[32];
-                    sprintf(highStr, "0x%016llX", high64);
+                    snprintf(highStr, sizeof(highStr), "0x%016llX", high64);
                     char highDisplayStr[64];
-                    sprintf(highDisplayStr, "Q%d[64:127]", i);
+                    snprintf(highDisplayStr, sizeof(highDisplayStr), "Q%d[64:127]", i);
                     if (ImGui::Selectable(highDisplayStr, false, ImGuiSelectableFlags_None)) {
                         ImGui::SetClipboardText(highStr);
                         Gui::log("已复制 Q%d[64:127] 的值: %s", i, highStr);
@@ -1072,9 +1072,9 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         else if (specialLow == 3) colorLow = ColorScheme::WarningBright; // Inf
                         
                         char dLowStr[128];
-                        if (specialLow == 2) sprintf(dLowStr, "D%d: NaN", i);
-                        else if (specialLow == 3) sprintf(dLowStr, "D%d: %sInf", i, dLow < 0 ? "-" : "+");
-                        else sprintf(dLowStr, "D%d: %.15g", i, dLow);
+                        if (specialLow == 2) snprintf(dLowStr, sizeof(dLowStr), "D%d: NaN", i);
+                        else if (specialLow == 3) snprintf(dLowStr, sizeof(dLowStr), "D%d: %sInf", i, dLow < 0 ? "-" : "+");
+                        else snprintf(dLowStr, sizeof(dLowStr), "D%d: %.15g", i, dLow);
                         
                         ImGui::TextColored(colorLow, "%s", dLowStr);
                         if (ImGui::IsItemHovered()) {
@@ -1090,9 +1090,9 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         else if (specialHigh == 3) colorHigh = ColorScheme::WarningBright;
                         
                         char dHighStr[128];
-                        if (specialHigh == 2) sprintf(dHighStr, "Q%d[64:127]: NaN", i);
-                        else if (specialHigh == 3) sprintf(dHighStr, "Q%d[64:127]: %sInf", i, dHigh < 0 ? "-" : "+");
-                        else sprintf(dHighStr, "Q%d[64:127]: %.15g", i, dHigh);
+                        if (specialHigh == 2) snprintf(dHighStr, sizeof(dHighStr), "Q%d[64:127]: NaN", i);
+                        else if (specialHigh == 3) snprintf(dHighStr, sizeof(dHighStr), "Q%d[64:127]: %sInf", i, dHigh < 0 ? "-" : "+");
+                        else snprintf(dHighStr, sizeof(dHighStr), "Q%d[64:127]: %.15g", i, dHigh);
                         
                         ImGui::TextColored(colorHigh, "%s", dHighStr);
                         if (ImGui::IsItemHovered()) {
@@ -1116,9 +1116,9 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                             else if (special == 3) color = ColorScheme::WarningBright;
                             
                             char sStr[128];
-                            if (special == 2) sprintf(sStr, "NaN");
-                            else if (special == 3) sprintf(sStr, "%sInf", fVal < 0 ? "-" : "+");
-                            else sprintf(sStr, "%.7g", fVal);
+                            if (special == 2) snprintf(sStr, sizeof(sStr), "NaN");
+                            else if (special == 3) snprintf(sStr, sizeof(sStr), "%sInf", fVal < 0 ? "-" : "+");
+                            else snprintf(sStr, sizeof(sStr), "%.7g", fVal);
                             
                             ImGui::TextColored(color, "%s", sStr);
                             if (ImGui::IsItemHovered()) {
@@ -1126,7 +1126,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                             }
                             if (ImGui::IsItemClicked(0)) {
                                 char hexStr[16];
-                                sprintf(hexStr, "0x%08X", fValues[j]);
+                                snprintf(hexStr, sizeof(hexStr), "0x%08X", fValues[j]);
                                 ImGui::SetClipboardText(hexStr);
                             }
                         }
@@ -1153,21 +1153,21 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                             char hStr[64];
                             if (exp == 0x1F) {
                                 // 特殊值：Inf 或 NaN
-                                if (mant == 0) sprintf(hStr, "%sInf", sign ? "-" : "+");
-                                else sprintf(hStr, "NaN");
+                                if (mant == 0) snprintf(hStr, sizeof(hStr), "%sInf", sign ? "-" : "+");
+                                else snprintf(hStr, sizeof(hStr), "NaN");
                             } else if (exp == 0 && mant == 0) {
                                 // 零值
-                                sprintf(hStr, "0.0");
+                                snprintf(hStr, sizeof(hStr), "0.0");
                             } else {
                                 // 规范化或非规范化数：简化的转换（对于调试显示足够）
                                 if (exp == 0) {
                                     // 非规范化数（denormalized）
                                     float approx = (float)(sign ? -1 : 1) * powf(2.0f, -14.0f) * (mant / 1024.0f);
-                                    sprintf(hStr, "%.4g", approx);
+                                    snprintf(hStr, sizeof(hStr), "%.4g", approx);
                                 } else {
                                     // 规范化数
                                     float approx = (float)(sign ? -1 : 1) * powf(2.0f, (int)exp - 15) * (1.0f + mant / 1024.0f);
-                                    sprintf(hStr, "%.4g", approx);
+                                    snprintf(hStr, sizeof(hStr), "%.4g", approx);
                                 }
                             }
                             
@@ -1208,14 +1208,14 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         // 十六进制显示模式：显示完整的Q寄存器
                         ImGui::TableSetColumnIndex(3);
                         char qLowStr[64];
-                        sprintf(qLowStr, "Q%d[0:63]", i);
+                        snprintf(qLowStr, sizeof(qLowStr), "Q%d[0:63]", i);
                         if (ImGui::Selectable(qLowStr, false, ImGuiSelectableFlags_None)) {
                             ImGui::SetClipboardText(lowStr);
                         }
                         
                         ImGui::TableSetColumnIndex(4);
                         char qHighStr[64];
-                        sprintf(qHighStr, "Q%d[64:127]", i);
+                        snprintf(qHighStr, sizeof(qHighStr), "Q%d[64:127]", i);
                         if (ImGui::Selectable(qHighStr, false, ImGuiSelectableFlags_None)) {
                             ImGui::SetClipboardText(highStr);
                         }
@@ -1252,7 +1252,7 @@ std::string BreakpointWindow::formatTime(uint64_t timestamp)
     
     // 简单的时间戳格式化
     char buffer[32];
-    sprintf(buffer, "%llu", timestamp);
+    snprintf(buffer, sizeof(buffer), "%llu", timestamp);
     return std::string(buffer);
 }
 
@@ -1264,13 +1264,13 @@ std::string BreakpointWindow::formatTimeDiff(uint64_t start, uint64_t end)
     char buffer[32];
     
     if (diff < 1000) {
-        sprintf(buffer, "%llu", diff);
+        snprintf(buffer, sizeof(buffer), "%llu", diff);
     } else if (diff < 1000000) {
-        sprintf(buffer, "%.1fK", diff / 1000.0);
+        snprintf(buffer, sizeof(buffer), "%.1fK", diff / 1000.0);
     } else if (diff < 1000000000) {
-        sprintf(buffer, "%.1fM", diff / 1000000.0);
+        snprintf(buffer, sizeof(buffer), "%.1fM", diff / 1000000.0);
     } else {
-        sprintf(buffer, "%.1fG", diff / 1000000000.0);
+        snprintf(buffer, sizeof(buffer), "%.1fG", diff / 1000000000.0);
     }
     
     return std::string(buffer);
@@ -1322,7 +1322,7 @@ void BreakpointWindow::drawDisassemblyInWindow(uint64_t address, const uint8_t* 
             // 地址列
             ImGui::TableSetColumnIndex(0);
             char addrStr[32];
-            sprintf(addrStr, "0x%llX", instr.address);
+            snprintf(addrStr, sizeof(addrStr), "0x%llX", instr.address);
             if (ImGui::Selectable(addrStr, false, ImGuiSelectableFlags_SpanAllColumns)) {
                 // 点击地址可以跳转到内存查看器
                 navigateToAddress(instr.address);

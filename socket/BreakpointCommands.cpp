@@ -1,16 +1,18 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
+#include <cstring>
 
 bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_SETBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
-        if (!client->Send(&address, sizeof(address)))
-            return false;
-        if (!client->Send(&bpType, sizeof(bpType)))
-            return false;
-        if (!client->Send(&bpSize, sizeof(bpSize)))
+        // 合并三次 Send 为一次连续字节发送
+        unsigned char buf[sizeof(address) + sizeof(bpType) + sizeof(bpSize)];
+        memcpy(buf, &address, sizeof(address));
+        memcpy(buf + sizeof(address), &bpType, sizeof(bpType));
+        memcpy(buf + sizeof(address) + sizeof(bpType), &bpSize, sizeof(bpSize));
+        if (!client->Send(buf, sizeof(buf)))
             return false;
         int result = 0;
         if (!client->Receive(&result, sizeof(result)))

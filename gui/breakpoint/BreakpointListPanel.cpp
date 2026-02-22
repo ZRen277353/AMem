@@ -73,7 +73,7 @@ void BreakpointWindow::drawBreakpointList()
 
             ImGui::TableSetColumnIndex(1);
             char addrStr[32];
-            sprintf(addrStr, "0x%llX", bp.address);
+            snprintf(addrStr, sizeof(addrStr), "0x%llX", bp.address);
             if (ImGui::Selectable(addrStr, false, ImGuiSelectableFlags_SpanAllColumns)) {
                 // 双击打开详情窗口
                 if (ImGui::IsMouseDoubleClicked(0)) {
@@ -154,7 +154,7 @@ void BreakpointWindow::drawBreakpointList()
 
             ImGui::TableSetColumnIndex(8);
             char buttonId[32];
-            sprintf(buttonId, "详情##%d", (int)i);
+            snprintf(buttonId, sizeof(buttonId), "详情##%d", (int)i);
             if (ImGui::SmallButton(buttonId)) {
                 Gui::log("用户点击详情按钮，断点索引: %d", (int)i);
                 openBreakpointDetailWindow((int)i);
