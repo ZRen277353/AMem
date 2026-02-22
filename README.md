@@ -30,6 +30,8 @@
 - 🐛 **内核级调试** - 硬件断点、内存断点支持
 - 📡 **远程连接** - 通过 Socket 连接 Android 设备
 - 💾 **崩溃保护** - 完整的异常捕获和 dump 生成
+- 🤖 **AI 集成 (MCP)** - 内置 IPC Server + MCP 代理，支持 Claude Code 等 AI 客户端直接调用全部能力
+- 📜 **Lua 脚本** - LuaJIT 脚本引擎，支持自动化操作
 
 
 ## ✨ 功能特性
@@ -75,6 +77,13 @@
 - ✅ C++ 标准异常捕获
 - ✅ 信号处理
 - ✅ 自动生成 .dmp 崩溃转储文件
+
+### 6. MCP / AI 集成
+- ✅ GUI 内嵌 HTTP IPC Server（`127.0.0.1:28100`）
+- ✅ MCP Python 代理，支持 Claude Code / Claude Desktop 等 AI 客户端
+- ✅ 通过 MCP 调用全部功能：进程管理、内存读写、扫描、断点
+- ✅ `execute_lua` tool — AI 可直接编写并执行 Lua 脚本完成复杂自动化
+- ✅ 零协议重复，所有请求复用 GUI 已有的 C++ 实现
 
 
 ## 🚀 快速开始
@@ -181,6 +190,55 @@ build/Release/ImGuiProject.exe
 5. 触发断点后，查看命中信息
 
 
+### 5. MCP (AI 集成) 使用
+
+AMem 内置了 IPC HTTP Server，配合 `mcp/` 目录下的 Python MCP Server，可让 Claude Code 等 AI 客户端直接操控全部调试功能。
+
+#### 架构
+
+```
+Claude Code ──stdio──> MCP Server (Python) ──HTTP──> AMem GUI (C++ IPC Server) ──TCP──> Android
+```
+
+#### 使用步骤
+
+1. 启动 AMem GUI（IPC Server 自动监听 `127.0.0.1:28100`）
+2. 安装 Python 依赖：
+   ```bash
+   pip install mcp
+   ```
+3. 在 Claude Code 的 MCP 配置中添加：
+   ```json
+   {
+     "mcpServers": {
+       "amem": {
+         "command": "python",
+         "args": ["mcp/server.py"]
+       }
+     }
+   }
+   ```
+4. AI 即可调用 `list_processes`、`read_memory`、`scan_value`、`execute_lua` 等全部 tool
+
+#### 可用 MCP Tools
+
+| 分类 | Tools |
+|------|-------|
+| 状态 | `get_status`, `get_server_version`, `get_architecture`, `init_driver` |
+| 进程 | `list_processes`, `open_process`, `list_modules`, `get_module_base` |
+| 内存 | `read_memory`, `read_value`, `write_value`, `write_bytes` |
+| 扫描 | `scan_set_range`, `scan_value`, `scan_next`, `scan_fuzzy`, `scan_hex`, `get_scan_count`, `get_scan_results`, `clear_scan` |
+| 断点 | `set_breakpoint`, `remove_breakpoint`, `read_breakpoint_info`, `suspend_breakpoint`, `resume_breakpoint` |
+| Lua | `execute_lua` — 在 GUI 内执行任意 Lua 脚本 |
+| 辅助 | `resolve_offset_chain` |
+
+#### 直接测试 IPC
+
+```bash
+curl -X POST http://127.0.0.1:28100 -d "{\"method\":\"get_status\"}"
+```
+
+
 ## ⚙️ 构建配置
 
 ### CMake 选项
@@ -198,6 +256,7 @@ set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation 
 
 - `USE_DX12` - 使用 DirectX 12 渲染
 - `HAVE_CAPSTONE` - 启用反汇编功能
+- `HAVE_LUAJIT` - 启用 LuaJIT 脚本引擎
 - `IMGUI_DISABLE_DEBUG_TOOLS` - 禁用 ImGui 调试工具
 - `DX12_ENABLE_DEBUG_LAYER` - 启用 D3D12 调试层（Debug 模式）
 

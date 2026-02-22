@@ -7,6 +7,7 @@
 #include "renderer/DX12Renderer.h"
 #include "renderer/StyleSetup.h"
 #include "ExceptionHandler.h"
+#include "ipc/IpcServer.h"
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -86,6 +87,9 @@ int main(int, char**)
 
     StyleSetup::loadFonts(io);
 
+    // 启动 IPC HTTP Server（供 MCP 代理调用）
+    IpcServer::GetInstance().Start(28100);
+
     bool done = false;
     while (!done)
     {
@@ -113,6 +117,9 @@ int main(int, char**)
     }
 
     g_renderer.waitForPendingOperations();
+
+    // 停止 IPC Server
+    IpcServer::GetInstance().Stop();
 
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();

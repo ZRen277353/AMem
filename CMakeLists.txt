@@ -148,6 +148,10 @@ set(RENDERER_SOURCES
     renderer/StyleSetup.cpp
 )
 
+set(IPC_SOURCES
+    ipc/IpcServer.cpp
+)
+
 
 # 配置 DirectX 后端
 if(USE_DX11)
@@ -172,12 +176,14 @@ add_executable(ImGuiProject
     ${GUI_SOURCES}
     ${SOCKET_SOURCES}
     ${RENDERER_SOURCES}
+    ${IPC_SOURCES}
     ${LUA_SOURCES}
 )
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
-    imgui imgui/backends gui lua renderer utils
+    imgui imgui/backends gui lua renderer utils ipc
+    ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_BINARY_DIR}/generated
 )
 
