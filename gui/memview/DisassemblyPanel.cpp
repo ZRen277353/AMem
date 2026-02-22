@@ -14,14 +14,13 @@
 
 std::string MemoryViewerWindow::formatAddressWithOffset(uint64_t address)
 {
-    const ModuleInfoItem* module = AppContext::Get().moduleCache.findByAddress(address);
+    ModuleInfoItem module = AppContext::Get().moduleCache.findByAddress(address);
 
     char buffer[256];
-    if (module) {
-        uint64_t offset = address - module->base;
+    if (!module.name.empty()) {
+        uint64_t offset = address - module.base;
         snprintf(buffer, sizeof(buffer), "0x%llX[+0x%llX]", address, offset);
     } else {
-        // 如果找不到模块，只显示地址
         snprintf(buffer, sizeof(buffer), "0x%llX", address);
     }
 

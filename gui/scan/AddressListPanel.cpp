@@ -112,19 +112,23 @@ void ScanWindow::drawAddressListPanel()
         // 已获得锁，安全访问 addressList
         int addressListSize = (int)addressList.size();
 
-        for (int i = 0; i < addressListSize; i++)
+        ImGuiListClipper clipper;
+        clipper.Begin(addressListSize);
+        while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
         {
             // 边界检查，防止在循环中 addressList 被修改
             if (i >= (int)addressList.size()) break;
 
+            ImGui::PushID(i);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::Checkbox((std::string("##active") + std::to_string(i)).c_str(), &addressList[i].active);
+            ImGui::Checkbox("##active", &addressList[i].active);
             ImGui::TableSetColumnIndex(1);
             static char descBuf[256];
             strncpy(descBuf, addressList[i].description.c_str(), sizeof(descBuf) - 1);
             descBuf[sizeof(descBuf) - 1] = '\0';
-            if (ImGui::InputText((std::string("##desc") + std::to_string(i)).c_str(), descBuf, sizeof(descBuf))) {
+            if (ImGui::InputText("##desc", descBuf, sizeof(descBuf))) {
                 addressList[i].description = descBuf;
             }
             ImGui::TableSetColumnIndex(2);
@@ -152,10 +156,8 @@ void ScanWindow::drawAddressListPanel()
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("点击跳转到内存查看器");
             }
-            // 右键菜单 - 使用唯一ID避免断言失败
-            char addr_popup_id[64];
-            snprintf(addr_popup_id, sizeof(addr_popup_id), "AddrPopup_%d", i);
-            if (ImGui::BeginPopupContextItem(addr_popup_id)) {
+            // 右键菜单 - PushID already provides unique scope
+            if (ImGui::BeginPopupContextItem("AddrPopup")) {
                 // 边界检查
                 if (i < (int)addressList.size()) {
                     if (ImGui::MenuItem("复制地址")) {
@@ -201,7 +203,7 @@ void ScanWindow::drawAddressListPanel()
             std::snprintf(editBuf, sizeof(editBuf), "%s", currentValue.c_str());
 
             ImGui::PushItemWidth(-1);
-            if (ImGui::InputText(("##value" + std::to_string(i)).c_str(), editBuf, sizeof(editBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (ImGui::InputText("##value", editBuf, sizeof(editBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
                 // 写入新值到内存
                 if (i < (int)addressList.size() && writeAddressValue(i, editBuf)) {
                     Gui::log("成功写入地址 0x%016llX 的值: %s", itemAddress, editBuf);
@@ -225,7 +227,9 @@ void ScanWindow::drawAddressListPanel()
                     ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX", itemAddress);
                 }
             }
+            ImGui::PopID();
         }
+        } // clipper.Step()
         ImGui::EndTable();
     }
     ImGui::EndChild();
@@ -477,7 +481,7 @@ bool ScanWindow::writeAddressValue(int index, const std::string& value)
         if (WriteProcessMemoryBytes(item.address, data.size(), data)) {
             return true;
         } else {
-            Gui::log("错误：写入内存失败");
+            Gui::log("错误：写入内存失败 - 地址 0x%llX", (unsigned long long)item.address);
             return false;
         }
     } catch (const std::exception& e) {

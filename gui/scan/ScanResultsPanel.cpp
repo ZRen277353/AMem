@@ -224,10 +224,11 @@ void ScanWindow::drawResultsPanel()
         {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd && i < scanResultsSize; i++)
             {
+                ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 bool isSelected = selectedScanResults[i] != 0;
-                if (ImGui::Checkbox(("##select" + std::to_string(i)).c_str(), &isSelected)) {
+                if (ImGui::Checkbox("##select", &isSelected)) {
                     selectedScanResults[i] = isSelected ? 1 : 0;
                 }
                 ImGui::TableSetColumnIndex(1);
@@ -394,6 +395,7 @@ void ScanWindow::drawResultsPanel()
 
                     ImGui::EndPopup();
                 }
+                ImGui::PopID();
             }
         }
         ImGui::EndTable();

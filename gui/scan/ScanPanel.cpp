@@ -4,8 +4,6 @@
 #include "../Gui.h"
 #include "../../imgui/imgui.h"
 #include "../../socket/client_singleton.h"
-#include <sstream>
-#include <iomanip>
 #include <cstring>
 #include <cstdint>
 
@@ -46,15 +44,18 @@ void ScanWindow::drawScanProgressBar()
         ImVec4 progressColor = ColorScheme::SuccessBright;
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progressColor);
 
-        // 使用 std::fixed 创建进度显示文本
-        std::ostringstream progressOss;
-        progressOss << std::fixed << std::setprecision(1) << (scanProgress * 100.0f) << "%";
+        // 进度显示文本
+        char progressBuf[64];
         if (scanTotalBytes > 0) {
-            progressOss << " (" << (scanScannedBytes / (1024 * 1024))
-                       << " / " << (scanTotalBytes / (1024 * 1024)) << " MB)";
+            std::snprintf(progressBuf, sizeof(progressBuf), "%.1f%% (%llu / %llu MB)",
+                scanProgress * 100.0f,
+                (unsigned long long)(scanScannedBytes / (1024 * 1024)),
+                (unsigned long long)(scanTotalBytes / (1024 * 1024)));
+        } else {
+            std::snprintf(progressBuf, sizeof(progressBuf), "%.1f%%", scanProgress * 100.0f);
         }
 
-        ImGui::ProgressBar(scanProgress, ImVec2(-1, 0), progressOss.str().c_str());
+        ImGui::ProgressBar(scanProgress, ImVec2(-1, 0), progressBuf);
         ImGui::PopStyleColor();
 
         // 显示匹配计数和扫描速度
@@ -82,10 +83,10 @@ void ScanWindow::drawScanProgressBar()
             uint64_t bytesDelta = scanScannedBytes - lastScannedBytes;
             float speed = (float)bytesDelta / timeDelta / (1024 * 1024); // MB/s
 
-            // 使用 std::fixed 显示速度
-            std::ostringstream speedOss;
-            speedOss << "扫描速度: " << std::fixed << std::setprecision(1) << speed << " MB/s";
-            ImGui::Text("%s", speedOss.str().c_str());
+            // 显示速度
+            char speedBuf[64];
+            std::snprintf(speedBuf, sizeof(speedBuf), "扫描速度: %.1f MB/s", speed);
+            ImGui::Text("%s", speedBuf);
 
             // 计算并显示预计剩余时间
             if (scanProgress > 0.01f && speed > 0.1f) {
