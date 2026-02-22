@@ -4,6 +4,7 @@
 #include "client.hpp"
 #include "socket_request_manager.h"
 #include <functional>
+#include <chrono>
 
 namespace SocketCommand {
 
@@ -65,16 +66,27 @@ inline bool sendCommandWithHandle(WindowsSocketClient* client, uint8_t cmd, int 
     return true;
 }
 
-// 扫描进度接收循环
+// 扫描进度接收循环（带节流，避免高频回调导致 UI 卡顿）
 inline bool receiveProgressLoop(WindowsSocketClient* client, ScanProgressCallback cb, void* userData) {
+    auto lastCallTime = std::chrono::steady_clock::now();
+    constexpr auto THROTTLE_INTERVAL = std::chrono::milliseconds(100);
+
     while (true) {
         ScanProgress progress;
         if (!client->Receive(&progress, sizeof(progress)))
             return false;
+
+        bool isTerminal = (progress.msgType == 2 || progress.msgType == 3);
         if (cb) {
-            cb(progress.percent, progress.matchCount,
-               progress.scannedBytes, progress.totalBytes, userData);
+            auto now = std::chrono::steady_clock::now();
+            // 终止消息或超过节流间隔时才回调
+            if (isTerminal || (now - lastCallTime) >= THROTTLE_INTERVAL) {
+                cb(progress.percent, progress.matchCount,
+                   progress.scannedBytes, progress.totalBytes, userData);
+                lastCallTime = now;
+            }
         }
+
         if (progress.msgType == 2) // 扫描完成
             return true;
         if (progress.msgType == 3) // 扫描出错

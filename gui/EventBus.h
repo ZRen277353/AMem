@@ -2,9 +2,7 @@
 
 #include <functional>
 #include <vector>
-#include <unordered_map>
-#include <typeindex>
-#include <memory>
+#include <atomic>
 #include <algorithm>
 
 class EventBus {
@@ -20,7 +18,7 @@ public:
     // 订阅事件，返回订阅 ID 用于取消订阅
     template<typename Event>
     int subscribe(Handler<Event> handler) {
-        int id = nextId_++;
+        int id = nextId_.fetch_add(1, std::memory_order_relaxed);
         auto& handlers = getHandlers<Event>();
         handlers.push_back({id, std::move(handler)});
         return id;
@@ -36,11 +34,11 @@ public:
             handlers.end());
     }
 
-    // 发布事件
+    // 发布事件（拷贝 handler 列表后迭代，防止回调中 unsubscribe 导致迭代器失效）
     template<typename Event>
     void publish(const Event& event) {
-        auto& handlers = getHandlers<Event>();
-        for (auto& entry : handlers) {
+        auto handlersCopy = getHandlers<Event>();
+        for (auto& entry : handlersCopy) {
             entry.handler(event);
         }
     }
@@ -62,5 +60,5 @@ private:
         return handlers;
     }
 
-    int nextId_ = 1;
+    std::atomic<int> nextId_{1};
 };

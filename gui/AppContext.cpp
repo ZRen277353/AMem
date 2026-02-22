@@ -7,7 +7,10 @@
 
 void AppContext::selectProcess(int pid, const std::string& name) {
     selectedPid.store(pid, std::memory_order_relaxed);
-    selectedName = name;
+    {
+        std::lock_guard<std::mutex> lock(nameMutex_);
+        selectedName_ = name;
+    }
 
     SetCurrentPid(pid);
     int handle = 0;
@@ -24,32 +27,40 @@ void AppContext::selectProcess(int pid, const std::string& name) {
 
 void AppContext::ModuleCache::refresh() {
     std::lock_guard<std::mutex> lock(mutex);
+
+    // 节流：如果缓存有效且距上次刷新不足 MIN_REFRESH_INTERVAL 秒，跳过
+    double now = ImGui::GetTime();
+    if (valid && (now - lastRefreshTime) < MIN_REFRESH_INTERVAL) {
+        return;
+    }
+
     std::vector<ModuleInfoItem> newList;
     if (FetchModuleList(newList)) {
         modules = std::move(newList);
         valid = true;
-        lastRefreshTime = ImGui::GetTime();
+        lastRefreshTime = now;
     }
 }
 
-const ModuleInfoItem* AppContext::ModuleCache::findByAddress(uint64_t addr) {
+ModuleInfoItem AppContext::ModuleCache::findByAddress(uint64_t addr) {
     std::lock_guard<std::mutex> lock(mutex);
     for (const auto& m : modules) {
         if (addr >= m.base && addr < m.base + static_cast<uint64_t>(m.size)) {
-            return &m;
+            return m;  // 返回拷贝
         }
     }
-    return nullptr;
+    return ModuleInfoItem{};  // 空对象，name 为空表示未找到
 }
 
 std::string AppContext::ModuleCache::formatWithModule(uint64_t addr) {
-    const ModuleInfoItem* mod = findByAddress(addr);
-    std::ostringstream oss;
-    if (mod && !mod->name.empty()) {
-        uint64_t offset = addr - mod->base;
-        oss << mod->name << "+0x" << std::hex << std::uppercase << offset;
-    } else {
-        oss << "0x" << std::hex << std::uppercase << addr;
+    ModuleInfoItem mod = findByAddress(addr);
+    if (!mod.name.empty()) {
+        char buf[256];
+        uint64_t offset = addr - mod.base;
+        snprintf(buf, sizeof(buf), "%s+0x%llX", mod.name.c_str(), (unsigned long long)offset);
+        return buf;
     }
-    return oss.str();
+    char buf[32];
+    snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)addr);
+    return buf;
 }
