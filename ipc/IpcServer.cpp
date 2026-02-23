@@ -1,6 +1,7 @@
 #include "IpcServer.h"
 #include "../socket/client_singleton.h"
 #include "../gui/AppContext.h"
+#include "../gui/Gui.h"
 
 #ifdef HAVE_LUAJIT
 #include "../lua/LuaEngine.h"
@@ -27,8 +28,15 @@ bool IpcServer::Start(uint16_t port) {
     port_ = port;
     RegisterBuiltinMethods();
 
+    // 确保 Winsock 已初始化（可能在 WindowsSocketClient 之前启动）
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+
     listenSocket_ = (uintptr_t)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSocket_ == (uintptr_t)INVALID_SOCKET) return false;
+    if (listenSocket_ == (uintptr_t)INVALID_SOCKET) {
+        Gui::log("[IPC] 创建 socket 失败");
+        return false;
+    }
 
     // 允许端口复用
     int opt = 1;
@@ -40,12 +48,14 @@ bool IpcServer::Start(uint16_t port) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 仅本地
 
     if (::bind((SOCKET)listenSocket_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        Gui::log("[IPC] 绑定端口 %d 失败", (int)port_);
         ::closesocket((SOCKET)listenSocket_);
         listenSocket_ = (uintptr_t)INVALID_SOCKET;
         return false;
     }
 
     if (::listen((SOCKET)listenSocket_, SOMAXCONN) == SOCKET_ERROR) {
+        Gui::log("[IPC] listen 失败");
         ::closesocket((SOCKET)listenSocket_);
         listenSocket_ = (uintptr_t)INVALID_SOCKET;
         return false;
@@ -53,11 +63,13 @@ bool IpcServer::Start(uint16_t port) {
 
     running_.store(true);
     serverThread_ = std::thread(&IpcServer::ServerThread, this);
+    Gui::log("[IPC] 服务已启动，监听端口 %d", (int)port_);
     return true;
 }
 void IpcServer::Stop() {
     if (!running_.load()) return;
     running_.store(false);
+    Gui::log("[IPC] 服务正在停止...");
 
     // 关闭监听 socket 以唤醒 accept()
     if (listenSocket_ != (uintptr_t)INVALID_SOCKET) {
@@ -151,9 +163,11 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     } catch (const json::parse_error& e) {
         statusCode = 400;
         response = {{"success", false}, {"error", std::string("JSON 解析错误: ") + e.what()}};
+        Gui::log("[IPC] JSON 解析错误: %s", e.what());
     } catch (const std::exception& e) {
         statusCode = 500;
         response = {{"success", false}, {"error", e.what()}};
+        Gui::log("[IPC] 请求处理异常: %s", e.what());
     }
 
     std::string httpResp = BuildHttpResponse(statusCode, response.dump());
@@ -181,14 +195,24 @@ json IpcServer::DispatchRequest(const json& request) {
     std::string method = request["method"].get<std::string>();
     json params = request.value("params", json::object());
 
+    Gui::log("[IPC] 收到请求: %s", method.c_str());
+
     auto it = handlers_.find(method);
     if (it == handlers_.end()) {
+        Gui::log("[IPC] 未知方法: %s", method.c_str());
         return {{"success", false}, {"error", "未知方法: " + method}};
     }
 
     try {
-        return it->second(params);
+        json result = it->second(params);
+        bool ok = result.value("success", false);
+        if (!ok) {
+            std::string err = result.value("error", "");
+            Gui::log("[IPC] %s 失败: %s", method.c_str(), err.c_str());
+        }
+        return result;
     } catch (const std::exception& e) {
+        Gui::log("[IPC] %s 异常: %s", method.c_str(), e.what());
         return {{"success", false}, {"error", std::string("执行错误: ") + e.what()}};
     }
 }
