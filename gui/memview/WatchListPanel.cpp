@@ -108,6 +108,7 @@ void MemoryViewerWindow::drawAddressList()
     if (ImGui::BeginTable("AddressList", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | 
                           ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable))
     {
+        ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 30);  // 启用/冻结
         ImGui::TableSetupColumn("描述", ImGuiTableColumnFlags_WidthFixed, 150);
         ImGui::TableSetupColumn("地址", ImGuiTableColumnFlags_WidthFixed, 140);
@@ -120,16 +121,15 @@ void MemoryViewerWindow::drawAddressList()
             auto& item = watchItems[i];
             ImGui::TableNextRow();
             ImGui::PushID((int)i);
-            
-            // 选择列
-            ImGui::TableSetColumnIndex(0);
+
+            // 选中行高亮背景
             bool isSelected = (selectedWatchIndex == (int)i);
-            if (ImGui::Selectable("##select", isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
-                selectedWatchIndex = (int)i;
+            if (isSelected) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ImGui::GetColorU32(ImGuiCol_Header));
             }
-            
-            // 复选框（启用/禁用）
-            ImGui::SameLine();
+
+            // 选择列：复选框（启用/禁用）
+            ImGui::TableSetColumnIndex(0);
             ImGui::Checkbox("##enabled", &item.enabled);
             
             // 描述
@@ -253,6 +253,11 @@ void MemoryViewerWindow::drawAddressList()
                 }
             }
             
+            // 点击行空白区域选中（右键也可选中）
+            if (ImGui::IsItemClicked(0) || ImGui::IsItemClicked(1)) {
+                selectedWatchIndex = (int)i;
+            }
+
             // 右键菜单
             if (ImGui::BeginPopupContextItem("WatchItemContext")) {
                 ImGui::Text("地址: 0x%llX", item.address);

@@ -21,10 +21,6 @@ LuaScriptWindow::~LuaScriptWindow() {
 }
 
 void LuaScriptWindow::onDraw() {
-    if (!pOpen) return;
-
-    ImGui::Begin(name.c_str(), &pOpen);
-
     drawScriptControls();
     ImGui::Separator();
 
@@ -62,8 +58,6 @@ void LuaScriptWindow::onDraw() {
     if (showScriptBrowser) {
         drawScriptBrowserPopup();
     }
-
-    ImGui::End();
 }
 
 void LuaScriptWindow::drawScriptControls() {

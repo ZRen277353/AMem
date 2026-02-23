@@ -219,21 +219,17 @@ void MemoryViewerWindow::writeMemoryByte(uint64_t address, unsigned char value)
 
 void MemoryViewerWindow::onDraw()
 {
-    if (!pOpen) return;
+    if (AppContext::Get().hasProcess()) {
+        ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
+            AppContext::Get().selectedName.c_str(), AppContext::Get().selectedPid.load());
+    } else {
+        ImGui::TextDisabled("未附加进程");
+    }
+    ImGui::Separator();
 
-    if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
+    // 添加标签页
+    if (ImGui::BeginTabBar("MemoryViewerTabs"))
     {
-        if (AppContext::Get().hasProcess()) {
-            ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
-                AppContext::Get().selectedName.c_str(), AppContext::Get().selectedPid.load());
-        } else {
-            ImGui::TextDisabled("未附加进程");
-        }
-        ImGui::Separator();
-
-        // 添加标签页
-        if (ImGui::BeginTabBar("MemoryViewerTabs"))
-        {
             if (ImGui::BeginTabItem("内存查看器"))
             {
                 drawMemoryViewerPanel();
@@ -260,6 +256,4 @@ void MemoryViewerWindow::onDraw()
             
             ImGui::EndTabBar();
         }
-    }
-    ImGui::End();
 }

@@ -32,50 +32,45 @@ ScanWindow::~ScanWindow()
 
 void ScanWindow::onDraw()
 {
-    if (!pOpen) return;
-
     auto& ctx = AppContext::Get();
-    if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
-    {
-        // 窗口聚焦时的键盘快捷键
-        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
-            // F5: 刷新地址值
-            if (ImGui::IsKeyPressed(ImGuiKey_F5) && ctx.hasProcess()) {
-                refreshAddressValues();
-            }
-            // Enter/F9: 执行扫描（首次或再次）
-            if (ImGui::IsKeyPressed(ImGuiKey_F9) && !scanInProgress && ctx.hasProcess()) {
-                if (totalScanResults == 0) {
-                    performFirstScanAsync();
-                } else {
-                    performNextScanAsync();
-                }
+
+    // 窗口聚焦时的键盘快捷键
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
+        // F5: 刷新地址值
+        if (ImGui::IsKeyPressed(ImGuiKey_F5) && ctx.hasProcess()) {
+            refreshAddressValues();
+        }
+        // Enter/F9: 执行扫描（首次或再次）
+        if (ImGui::IsKeyPressed(ImGuiKey_F9) && !scanInProgress && ctx.hasProcess()) {
+            if (totalScanResults == 0) {
+                performFirstScanAsync();
+            } else {
+                performNextScanAsync();
             }
         }
-
-        if (ctx.hasProcess()) {
-            ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
-                ctx.selectedName.c_str(), ctx.selectedPid.load());
-            ImGui::SameLine();
-            if (ImGui::Button("刷新地址值")) {
-                refreshAddressValues();
-            }
-        } else {
-            ImGui::TextDisabled("未附加进程");
-        }
-        ImGui::Separator();
-
-        // 主要布局：左侧扫描面板，右侧结果面板
-        drawScanPanel();
-        ImGui::SameLine();
-        ImGui::BeginChild("RightPanel", ImVec2(0, 0), ImGuiChildFlags_Borders);
-        drawResultsPanel();
-        drawAddressListPanel();
-        ImGui::EndChild();
-
-        drawMemoryTypeSelectionModal();
     }
-    ImGui::End();
+
+    if (ctx.hasProcess()) {
+        ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
+            ctx.selectedName.c_str(), ctx.selectedPid.load());
+        ImGui::SameLine();
+        if (ImGui::Button("刷新地址值")) {
+            refreshAddressValues();
+        }
+    } else {
+        ImGui::TextDisabled("未附加进程");
+    }
+    ImGui::Separator();
+
+    // 主要布局：左侧扫描面板，右侧结果面板
+    drawScanPanel();
+    ImGui::SameLine();
+    ImGui::BeginChild("RightPanel", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    drawResultsPanel();
+    drawAddressListPanel();
+    ImGui::EndChild();
+
+    drawMemoryTypeSelectionModal();
 }
 
 void ScanWindow::updateScanProgress(float progress, uint64_t matchCount, uint64_t scannedBytes, uint64_t totalBytes)

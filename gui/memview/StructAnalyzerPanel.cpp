@@ -73,7 +73,8 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
     ImGui::Text("  显示大小:");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
-    if (ImGui::InputInt("##dissect_total", &dissectTotalSize, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue)) {
+    ImGui::InputInt("##dissect_total", &dissectTotalSize, 0, 0);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
         if (dissectTotalSize < 16) dissectTotalSize = 16;
         if (dissectTotalSize > 65536) dissectTotalSize = 65536;
         if (structBaseAddress != 0) {
@@ -124,6 +125,7 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
 
         ImGui::Separator();
 
+        int pendingDeleteIndex = -1;
         for (size_t i = 0; i < structDefinitions.size(); i++) {
             bool isSelected = (selectedStructIndex == (int)i);
             if (ImGui::Selectable(structDefinitions[i].name.c_str(), isSelected)) {
@@ -137,12 +139,15 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
                     loadTemplateIntoDissector((int)i);
                 }
                 if (ImGui::MenuItem("删除")) {
-                    structDefinitions.erase(structDefinitions.begin() + i);
-                    if (selectedStructIndex >= (int)structDefinitions.size())
-                        selectedStructIndex = -1;
+                    pendingDeleteIndex = (int)i;
                 }
                 ImGui::EndPopup();
             }
+        }
+        if (pendingDeleteIndex >= 0) {
+            structDefinitions.erase(structDefinitions.begin() + pendingDeleteIndex);
+            if (selectedStructIndex >= (int)structDefinitions.size())
+                selectedStructIndex = -1;
         }
     }
     ImGui::EndChild();
@@ -184,6 +189,13 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
 // ============================================================
 void MemoryViewerWindow::drawDissectorTable()
 {
+    // 延迟操作：避免在遍历 dissectRows 期间修改向量导致迭代器失效 / abort
+    int pendingTypeChangeRow = -1;
+    FieldType pendingNewType = FieldType::DWORD;
+    int pendingFollowRow = -1;
+    int pendingWriteRow = -1;
+    std::string pendingWriteValue;
+
     const int colCount = 6;
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
@@ -202,6 +214,7 @@ void MemoryViewerWindow::drawDissectorTable()
         clipper.Begin((int)dissectRows.size());
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                if (i < 0 || i >= (int)dissectRows.size()) break;
                 auto& row = dissectRows[i];
                 ImGui::TableNextRow();
                 ImGui::PushID(i);
@@ -225,7 +238,7 @@ void MemoryViewerWindow::drawDissectorTable()
                 }
                 ImGui::PopItemWidth();
 
-                // 类型列（下拉）
+                // 类型列（下拉）— 延迟执行类型变更
                 ImGui::TableSetColumnIndex(3);
                 const char* typeNames[] = {
                     "BYTE", "WORD", "DWORD", "QWORD",
@@ -235,25 +248,27 @@ void MemoryViewerWindow::drawDissectorTable()
                 int currentType = (int)row.type;
                 ImGui::PushItemWidth(-1);
                 if (ImGui::Combo("##type", &currentType, typeNames, IM_ARRAYSIZE(typeNames))) {
-                    onDissectRowTypeChanged(i, (FieldType)currentType);
+                    pendingTypeChangeRow = i;
+                    pendingNewType = (FieldType)currentType;
                 }
                 ImGui::PopItemWidth();
-                // 值列（可编辑，回车写入）
+                // 值列（可编辑，回车写入）— 延迟执行写入
                 ImGui::TableSetColumnIndex(4);
                 char valBuf[256];
                 strncpy(valBuf, row.cachedValue.c_str(), sizeof(valBuf) - 1);
                 valBuf[sizeof(valBuf) - 1] = '\0';
                 ImGui::PushItemWidth(-1);
                 if (ImGui::InputText("##val", valBuf, sizeof(valBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    writeDissectRowValue(i, valBuf);
+                    pendingWriteRow = i;
+                    pendingWriteValue = valBuf;
                 }
                 ImGui::PopItemWidth();
 
-                // 操作列
+                // 操作列 — 延迟执行指针跟踪
                 ImGui::TableSetColumnIndex(5);
                 if (row.type == FieldType::POINTER) {
                     if (ImGui::SmallButton("->")) {
-                        followPointerInDissector(i);
+                        pendingFollowRow = i;
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("跟踪指针");
                 }
@@ -281,6 +296,17 @@ void MemoryViewerWindow::drawDissectorTable()
             }
         }
         ImGui::EndTable();
+    }
+
+    // 表格绘制完毕后，安全地执行延迟操作
+    if (pendingTypeChangeRow >= 0) {
+        onDissectRowTypeChanged(pendingTypeChangeRow, pendingNewType);
+    }
+    if (pendingWriteRow >= 0) {
+        writeDissectRowValue(pendingWriteRow, pendingWriteValue);
+    }
+    if (pendingFollowRow >= 0) {
+        followPointerInDissector(pendingFollowRow);
     }
 }
 
