@@ -56,8 +56,11 @@ private:
 
     template<typename Event>
     std::vector<HandlerEntry<Event>>& getHandlers() {
-        static std::vector<HandlerEntry<Event>> handlers;
-        return handlers;
+        // 使用堆分配避免静态析构顺序问题：
+        // Gui::windows 析构时会调用 unsubscribe，此时 function-local static
+        // 可能已被销毁。堆分配的对象永不析构，进程退出时由 OS 回收。
+        static auto* handlers = new std::vector<HandlerEntry<Event>>();
+        return *handlers;
     }
 
     std::atomic<int> nextId_{1};
