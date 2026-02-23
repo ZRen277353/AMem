@@ -158,7 +158,7 @@ bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortT
     if (!FetchModuleList(mods, port))
         return false;
     for (const auto &m : mods) {
-        if (_stricmp(m.name.c_str(), moduleName.c_str()) == 0) {
+        if (m.name.find(moduleName) != std::string::npos) {
             outBase = m.base;
             return true;
         }

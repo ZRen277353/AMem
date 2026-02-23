@@ -315,20 +315,48 @@ void IpcServer::RegisterBuiltinMethods() {
     });
 
     // ── list_modules ─────────────────────────────────────────────
-    RegisterMethod("list_modules", [](const json&) -> json {
+    RegisterMethod("list_modules", [](const json& p) -> json {
         std::vector<ModuleInfoItem> list;
         if (!FetchModuleList(list))
             return {{"success", false}, {"error", "获取模块列表失败"}};
+
+        // 可选：名称过滤（大小写不敏感子串匹配）
+        std::string filter = p.value("filter", "");
+        std::vector<ModuleInfoItem*> filtered;
+        if (!filter.empty()) {
+            std::string lowerFilter = filter;
+            std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(),
+                [](unsigned char c) { return (char)std::tolower(c); });
+            for (auto& m : list) {
+                std::string lowerName = m.name;
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                    [](unsigned char c) { return (char)std::tolower(c); });
+                if (lowerName.find(lowerFilter) != std::string::npos)
+                    filtered.push_back(&m);
+            }
+        } else {
+            for (auto& m : list) filtered.push_back(&m);
+        }
+
+        int total = (int)filtered.size();
+        int offset = p.value("offset", 0);
+        int count = p.value("count", 200);
+        if (count > 1000) count = 1000;
+        if (offset < 0) offset = 0;
+        if (offset > total) offset = total;
+        int end = (std::min)(offset + count, total);
+
         json arr = json::array();
-        for (auto& m : list) {
+        for (int i = offset; i < end; i++) {
+            auto* m = filtered[i];
             std::ostringstream baseStr;
-            baseStr << "0x" << std::hex << m.base;
+            baseStr << "0x" << std::hex << m->base;
             arr.push_back({
-                {"base", baseStr.str()}, {"size", m.size},
-                {"type", m.type}, {"flag", m.flag}, {"name", m.name}
+                {"base", baseStr.str()}, {"size", m->size},
+                {"type", m->type}, {"flag", m->flag}, {"name", m->name}
             });
         }
-        return {{"success", true}, {"result", arr}};
+        return {{"success", true}, {"result", {{"total", total}, {"offset", offset}, {"modules", arr}}}};
     });
 
     // ── read_memory ──────────────────────────────────────────────
@@ -438,9 +466,14 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── get_scan_results ─────────────────────────────────────────
     RegisterMethod("get_scan_results", [](const json& p) -> json {
+        int total = GetScanResultCount();
         int offset = p.value("offset", 0);
         int count = p.value("count", 20);
         if (count > 1000) count = 1000;
+        if (offset < 0) offset = 0;
+        if (offset >= total) {
+            return {{"success", true}, {"result", {{"total", total}, {"offset", offset}, {"items", json::array()}}}};
+        }
         std::vector<std::pair<uint64_t, uint64_t>> results;
         if (!GetScanResult(offset, count, results))
             return {{"success", false}, {"error", "获取扫描结果失败"}};
@@ -450,7 +483,7 @@ void IpcServer::RegisterBuiltinMethods() {
             addrStr << "0x" << std::hex << addr;
             arr.push_back({{"address", addrStr.str()}, {"value", val}});
         }
-        return {{"success", true}, {"result", arr}};
+        return {{"success", true}, {"result", {{"total", total}, {"offset", offset}, {"items", arr}}}};
     });
 
     // ── clear_scan ───────────────────────────────────────────────
@@ -523,42 +556,14 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("execute_lua", [](const json& p) -> json {
         std::string code = p.at("code").get<std::string>();
         auto& engine = LuaEngine::GetInstance();
-        if (!engine.IsInitialized())
-            return {{"success", false}, {"error", "Lua 引擎未初始化"}};
-
-        // 捕获 print 输出：临时重定向 Lua print 到 buffer
-        lua_State* L = engine.GetState();
-
-        // 保存原始 print
-        lua_getglobal(L, "print");
-        int printRef = luaL_ref(L, LUA_REGISTRYINDEX);
-
-        // 创建输出收集器
-        std::string output;
-        lua_pushlightuserdata(L, &output);
-        lua_pushcclosure(L, [](lua_State* L) -> int {
-            std::string* out = (std::string*)lua_touserdata(L, lua_upvalueindex(1));
-            int n = lua_gettop(L);
-            for (int i = 1; i <= n; i++) {
-                if (i > 1) *out += "\t";
-                const char* s = lua_tostring(L, i);
-                if (s) *out += s;
-            }
-            *out += "\n";
-            return 0;
-        }, 1);
-        lua_setglobal(L, "print");
-
-        bool ok = engine.ExecuteString(code, "ipc");
-
-        // 恢复原始 print
-        lua_rawgeti(L, LUA_REGISTRYINDEX, printRef);
-        lua_setglobal(L, "print");
-        luaL_unref(L, LUA_REGISTRYINDEX, printRef);
-
-        if (!ok) {
-            return {{"success", false}, {"error", engine.GetLastError()}, {"output", output}};
+        if (!engine.IsInitialized()) {
+            if (!engine.Initialize())
+                return {{"success", false}, {"error", "Lua 引擎初始化失败: " + engine.GetLastError()}};
         }
+        std::string output;
+        bool ok = engine.ExecuteStringCapture(code, "ipc", output);
+        if (!ok)
+            return {{"success", false}, {"error", engine.GetLastError()}, {"output", output}};
         return {{"success", true}, {"result", {{"output", output}}}};
     });
 #endif

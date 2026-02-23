@@ -42,6 +42,9 @@ public:
     bool ExecuteString(const std::string& code);
     bool ExecuteString(const std::string& code, const std::string& chunkName);
 
+    // 执行代码并捕获 print 输出（线程安全，用于 IPC）
+    bool ExecuteStringCapture(const std::string& code, const std::string& chunkName, std::string& output);
+
     // 脚本管理
     bool ReloadScript(const std::string& name);
     void UnloadScript(const std::string& name);

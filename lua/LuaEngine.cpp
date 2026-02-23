@@ -144,6 +144,58 @@ bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkN
     return true;
 }
 
+bool LuaEngine::ExecuteStringCapture(const std::string& code, const std::string& chunkName, std::string& output) {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (!initialized || !L) {
+        lastError = "Lua engine not initialized";
+        return false;
+    }
+
+    // 保存原始 print
+    lua_getglobal(L, "print");
+    int printRef = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    // 设置捕获 print → 写入 output
+    lua_pushlightuserdata(L, &output);
+    lua_pushcclosure(L, [](lua_State* L) -> int {
+        std::string* out = (std::string*)lua_touserdata(L, lua_upvalueindex(1));
+        int n = lua_gettop(L);
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) *out += "\t";
+            const char* s = lua_tostring(L, i);
+            if (s) *out += s;
+        }
+        *out += "\n";
+        return 0;
+    }, 1);
+    lua_setglobal(L, "print");
+
+    // 加载并执行代码
+    int result = luaL_loadbuffer(L, code.c_str(), code.length(), chunkName.c_str());
+    if (result != LUA_OK) {
+        lastError = GetLuaError(L);
+        // 恢复原始 print
+        lua_rawgeti(L, LUA_REGISTRYINDEX, printRef);
+        lua_setglobal(L, "print");
+        luaL_unref(L, LUA_REGISTRYINDEX, printRef);
+        return false;
+    }
+
+    result = lua_pcall(L, 0, LUA_MULTRET, 0);
+    bool ok = (result == LUA_OK);
+    if (!ok) {
+        lastError = GetLuaError(L);
+    }
+
+    // 恢复原始 print
+    lua_rawgeti(L, LUA_REGISTRYINDEX, printRef);
+    lua_setglobal(L, "print");
+    luaL_unref(L, LUA_REGISTRYINDEX, printRef);
+
+    return ok;
+}
+
 bool LuaEngine::ReloadScript(const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex);
     

@@ -156,14 +156,29 @@ def open_process(pid: int) -> str:
 
 
 @mcp.tool()
-def list_modules() -> str:
-    """列出当前进程加载的所有模块。"""
-    mods = ipc.call_or_raise("list_modules")
+def list_modules(filter: str = "", offset: int = 0, count: int = 200) -> str:
+    """列出当前进程加载的模块。
+
+    Args:
+        filter: 模块名称过滤（大小写不敏感子串匹配），留空返回全部
+        offset: 起始偏移，默认 0
+        count: 获取数量，默认 200，最大 1000
+    """
+    count = min(count, 1000)
+    params = {"offset": offset, "count": count}
+    if filter:
+        params["filter"] = filter
+    r = ipc.call_or_raise("list_modules", params)
+    total = r.get("total", 0)
+    mods = r.get("modules", [])
+    off = r.get("offset", offset)
     if not mods:
-        return "未获取到模块列表"
-    lines = [f"共 {len(mods)} 个模块:", ""]
+        return f"未获取到模块（总数: {total}）"
+    lines = [f"模块列表（总数: {total}, offset: {off}, 本页: {len(mods)}）:", ""]
     for m in mods:
         lines.append(f"  {m['base']}  size={m['size']:#010x}  {m['name']}")
+    if off + len(mods) < total:
+        lines.append(f"\n... 还有 {total - off - len(mods)} 个模块未显示，使用 offset={off + len(mods)} 获取更多")
     return "\n".join(lines)
 
 
@@ -321,12 +336,17 @@ def get_scan_results(offset: int = 0, count: int = 20) -> str:
         count: 获取数量，默认 20，最大 1000
     """
     count = min(count, 1000)
-    results = ipc.call_or_raise("get_scan_results", {"offset": offset, "count": count})
-    if not results:
-        return "无扫描结果"
-    lines = [f"扫描结果 (offset={offset}, count={len(results)}):", ""]
-    for r in results:
-        lines.append(f"  {r['address']}  value={r['value']} ({r['value']:#x})")
+    r = ipc.call_or_raise("get_scan_results", {"offset": offset, "count": count})
+    total = r.get("total", 0)
+    items = r.get("items", [])
+    off = r.get("offset", offset)
+    if not items:
+        return f"无扫描结果（总数: {total}）"
+    lines = [f"扫描结果（总数: {total}, offset: {off}, 本页: {len(items)}）:", ""]
+    for item in items:
+        lines.append(f"  {item['address']}  value={item['value']} ({item['value']:#x})")
+    if off + len(items) < total:
+        lines.append(f"\n... 还有 {total - off - len(items)} 个结果未显示")
     return "\n".join(lines)
 
 
@@ -419,6 +439,7 @@ def execute_lua(code: str) -> str:
     """在 AMem GUI 内执行 Lua 脚本。
     可使用 mem/process/scan/bp 等全部 Lua API。
     这是最强大的工具 — 可以编写任意复杂的自动化逻辑。
+    Lua 引擎会在首次调用时自动初始化，无需手动打开 Lua 窗口。
 
     Args:
         code: Lua 脚本代码
