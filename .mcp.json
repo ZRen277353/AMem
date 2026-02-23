@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+      "amem": {
+        "command": "python",
+        "args": ["D:/AndroidMEM/AMem/mcp/server.py"]
+      }
+    }
+}
