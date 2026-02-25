@@ -1,6 +1,7 @@
 #include "LuaAPI.h"
 #include "LuaAPI_Memory.h"
 #include "LuaAPI_ImGui.h"
+#include "LuaAPI_Assembly.h"
 #include "../socket/client_singleton.h"
 #include "../gui/Gui.h"
 #include <string>
@@ -161,6 +162,9 @@ void LuaAPI::RegisterAll(lua_State* L) {
 
     // 注册 ImGui API
     LuaAPI_ImGui::Register(L);
+
+    // 注册汇编 API
+    LuaAPI_Assembly::Register(L);
 }
 
 // ==================== 内存操作API实现 ====================

@@ -69,6 +69,23 @@ else()
     message(WARNING "Capstone not found! Disassembly features will be disabled.")
 endif()
 
+# 查找 Keystone 库
+set(keystone_ROOT "C:/vcpkg/installed/x64-windows" CACHE PATH "Keystone installation directory")
+
+find_path(KEYSTONE_INCLUDE_DIR keystone/keystone.h
+    HINTS "${keystone_ROOT}/include" "${keystone_ROOT}" PATH_SUFFIXES include)
+find_library(KEYSTONE_LIBRARY NAMES keystone
+    HINTS "${keystone_ROOT}/lib" "${keystone_ROOT}" PATH_SUFFIXES lib lib64)
+
+if(KEYSTONE_INCLUDE_DIR AND KEYSTONE_LIBRARY)
+    set(HAVE_KEYSTONE TRUE)
+    set(KEYSTONE_LIBRARIES ${KEYSTONE_LIBRARY})
+    set(KEYSTONE_INCLUDE_DIRS ${KEYSTONE_INCLUDE_DIR})
+else()
+    set(HAVE_KEYSTONE FALSE)
+    message(WARNING "Keystone not found! Assembly features will be disabled.")
+endif()
+
 set(IMGUI_SOURCES
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
@@ -100,6 +117,7 @@ set(GUI_SOURCES
     gui/ProcessListWindow.cpp
     gui/VersionWindow.cpp
     gui/DisassemblyHelper.cpp
+    gui/AssemblyHelper.cpp
     gui/ConfigManager.cpp
     gui/LogWindow.cpp
     gui/AppContext.cpp
@@ -111,6 +129,7 @@ set(LUA_SOURCES
     lua/LuaAPI.cpp
     lua/LuaAPI_Memory.cpp
     lua/LuaAPI_ImGui.cpp
+    lua/LuaAPI_Assembly.cpp
 )
 
 # 查找 LuaJIT 库
@@ -192,6 +211,10 @@ if(HAVE_CAPSTONE)
     target_include_directories(ImGuiProject PRIVATE ${CAPSTONE_INCLUDE_DIRS})
 endif()
 
+if(HAVE_KEYSTONE)
+    target_include_directories(ImGuiProject PRIVATE ${KEYSTONE_INCLUDE_DIRS})
+endif()
+
 if(HAVE_LUAJIT)
     target_include_directories(ImGuiProject PRIVATE ${LUAJIT_INCLUDE})
 endif()
@@ -219,4 +242,28 @@ endif()
 if(HAVE_CAPSTONE)
     target_link_libraries(ImGuiProject ${CAPSTONE_LIBRARIES})
     target_compile_definitions(ImGuiProject PRIVATE HAVE_CAPSTONE)
+
+    # 拷贝 capstone.dll 到输出目录
+    get_filename_component(_capstone_lib_dir ${CAPSTONE_LIBRARY} DIRECTORY)
+    get_filename_component(_capstone_bin_dir "${_capstone_lib_dir}/../bin" ABSOLUTE)
+    if(EXISTS "${_capstone_bin_dir}/capstone.dll")
+        add_custom_command(TARGET ImGuiProject POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_capstone_bin_dir}/capstone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/capstone.dll")
+    endif()
+endif()
+
+# 链接 Keystone 库
+if(HAVE_KEYSTONE)
+    target_link_libraries(ImGuiProject ${KEYSTONE_LIBRARIES})
+    target_compile_definitions(ImGuiProject PRIVATE HAVE_KEYSTONE)
+
+    # 拷贝 keystone.dll 到输出目录
+    get_filename_component(_keystone_lib_dir ${KEYSTONE_LIBRARY} DIRECTORY)
+    get_filename_component(_keystone_bin_dir "${_keystone_lib_dir}/../bin" ABSOLUTE)
+    if(EXISTS "${_keystone_bin_dir}/keystone.dll")
+        add_custom_command(TARGET ImGuiProject POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_keystone_bin_dir}/keystone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/keystone.dll")
+    endif()
 endif()

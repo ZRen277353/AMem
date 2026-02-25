@@ -102,6 +102,11 @@
   # 使用 vcpkg 安装
   vcpkg install capstone:x64-windows
   ```
+- **Keystone**: 汇编库（用于汇编指令转机器码）
+  ```bash
+  # 使用 vcpkg 安装
+  vcpkg install keystone:x64-windows
+  ```
 
 ### 编译步骤
 
@@ -115,18 +120,17 @@ build.bat
 #### 方法二：手动构建
 
 ```bash
-# 1. 创建构建目录
-mkdir build
-cd build
+# 1. 配置（使用 Clang + Ninja）
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE \
+  -DCMAKE_C_COMPILER="C:/Program Files/LLVM/bin/clang.exe" \
+  -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang++.exe" \
+  --no-warn-unused-cli -S . -B build -G Ninja
 
-# 2. 生成 Visual Studio 项目
-cmake -G "Visual Studio 17 2022" -A x64 ..
+# 2. 编译项目
+cmake --build build
 
-# 3. 编译项目（Release 模式）
-cmake --build . --config Release
-
-# 4. 运行程序
-.\Release\ImGuiProject.exe
+# 3. 运行程序
+.\bin\ImGuiProject.exe
 ```
 
 #### 方法三：使用 Visual Studio
@@ -256,6 +260,7 @@ set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation 
 
 - `USE_DX12` - 使用 DirectX 12 渲染
 - `HAVE_CAPSTONE` - 启用反汇编功能
+- `HAVE_KEYSTONE` - 启用汇编功能
 - `HAVE_LUAJIT` - 启用 LuaJIT 脚本引擎
 - `IMGUI_DISABLE_DEBUG_TOOLS` - 禁用 ImGui 调试工具
 - `DX12_ENABLE_DEBUG_LAYER` - 启用 D3D12 调试层（Debug 模式）
@@ -316,6 +321,7 @@ set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation 
 
 - [Dear ImGui](https://github.com/ocornut/imgui) - 优秀的即时模式 GUI 库
 - [Capstone](https://www.capstone-engine.org/) - 强大的反汇编引擎
+- [Keystone](https://www.keystone-engine.org/) - 轻量级汇编引擎
 - Cheat Engine - 灵感来源
 
 <div align="center">
