@@ -13,94 +13,29 @@
 #include <cmath>
 
 // ============================================================
+// resolveNodeByPath — 通过路径定位树中节点
+// ============================================================
+DissectNode* MemoryViewerWindow::resolveNodeByPath(const std::vector<int>& path)
+{
+    if (path.empty()) return nullptr;
+    std::vector<DissectNode>* vec = &dissectNodes;
+    DissectNode* node = nullptr;
+    for (size_t i = 0; i < path.size(); i++) {
+        int idx = path[i];
+        if (idx < 0 || idx >= (int)vec->size()) return nullptr;
+        node = &(*vec)[idx];
+        if (i + 1 < path.size())
+            vec = &node->children;
+    }
+    return node;
+}
+
+// ============================================================
 // drawStructAnalyzerPanel — 主入口
 // ============================================================
 void MemoryViewerWindow::drawStructAnalyzerPanel()
 {
-    // --- 工具栏第一行：地址 + 导航 ---
-    ImGui::Text("地址:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputScalar("##struct_addr", ImGuiDataType_U64, &structBaseAddress,
-                        nullptr, nullptr, "%llX", ImGuiInputTextFlags_CharsHexadecimal);
-
-    ImGui::SameLine();
-    if (ImGui::Button("解析")) {
-        if (structBaseAddress != 0) {
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            regenerateDissectRows();
-            refreshDissectValues();
-            // 重置历史
-            dissectAddrHistory.clear();
-            dissectAddrHistory.push_back(structBaseAddress);
-            dissectHistoryIdx = 0;
-        }
-    }
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(dissectHistoryIdx <= 0);
-    if (ImGui::Button("<< 后退")) {
-        dissectHistoryIdx--;
-        structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
-        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-        regenerateDissectRows();
-        refreshDissectValues();
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(dissectHistoryIdx < 0 || dissectHistoryIdx >= (int)dissectAddrHistory.size() - 1);
-    if (ImGui::Button("前进 >>")) {
-        dissectHistoryIdx++;
-        structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
-        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-        regenerateDissectRows();
-        refreshDissectValues();
-    }
-    ImGui::EndDisabled();
-
-    // --- 工具栏第二行：元素大小 + 显示大小 ---
-    ImGui::Text("元素大小:");
-    ImGui::SameLine();
-    if (ImGui::RadioButton("1", dissectDefaultSize == 1)) { dissectDefaultSize = 1; if (!dissectRows.empty()) { regenerateDissectRows(); refreshDissectValues(); } }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("2", dissectDefaultSize == 2)) { dissectDefaultSize = 2; if (!dissectRows.empty()) { regenerateDissectRows(); refreshDissectValues(); } }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("4", dissectDefaultSize == 4)) { dissectDefaultSize = 4; if (!dissectRows.empty()) { regenerateDissectRows(); refreshDissectValues(); } }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("8", dissectDefaultSize == 8)) { dissectDefaultSize = 8; if (!dissectRows.empty()) { regenerateDissectRows(); refreshDissectValues(); } }
-
-    ImGui::SameLine();
-    ImGui::Text("  显示大小:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputInt("##dissect_total", &dissectTotalSize, 0, 0);
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-        if (dissectTotalSize < 16) dissectTotalSize = 16;
-        if (dissectTotalSize > 65536) dissectTotalSize = 65536;
-        if (structBaseAddress != 0) {
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            regenerateDissectRows();
-            refreshDissectValues();
-        }
-    }
-
-    // --- 工具栏第三行：自动刷新 ---
-    ImGui::Checkbox("自动刷新", &dissectAutoRefresh);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(60);
-    ImGui::InputFloat("##dissect_interval", &dissectRefreshInterval, 0, 0, "%.1f");
-    ImGui::SameLine();
-    ImGui::Text("秒");
-    // 自动刷新逻辑
-    if (dissectAutoRefresh && structBaseAddress != 0 && !dissectRows.empty()) {
-        timeSinceDissectRefresh += ImGui::GetIO().DeltaTime;
-        if (timeSinceDissectRefresh >= dissectRefreshInterval) {
-            timeSinceDissectRefresh = 0.0f;
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            refreshDissectValues();
-        }
-    }
-
+    drawDissectorToolbar();
     ImGui::Separator();
 
     // --- 分割布局：左侧模板列表，右侧 Dissector 表格 ---
@@ -157,7 +92,7 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
     // 右侧：Dissector 表格
     ImGui::BeginChild("DissectorView", ImVec2(0, 0), true);
     {
-        if (!dissectRows.empty() && structBaseAddress != 0) {
+        if (!dissectNodes.empty() && structBaseAddress != 0) {
             drawDissectorTable();
         } else {
             ImGui::TextDisabled("输入地址并点击 [解析] 开始分析内存");
@@ -182,19 +117,101 @@ void MemoryViewerWindow::drawStructAnalyzerPanel()
         }
         ImGui::EndPopup();
     }
+
+    // 节点编辑弹窗
+    drawNodeEditPopup();
 }
 
 // ============================================================
-// drawDissectorTable — CE 风格表格
+// drawDissectorToolbar — 工具栏
+// ============================================================
+void MemoryViewerWindow::drawDissectorToolbar()
+{
+    // --- 第一行：地址 + 导航 ---
+    ImGui::Text("地址:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    ImGui::InputScalar("##struct_addr", ImGuiDataType_U64, &structBaseAddress,
+                        nullptr, nullptr, "%llX", ImGuiInputTextFlags_CharsHexadecimal);
+
+    ImGui::SameLine();
+    if (ImGui::Button("解析")) {
+        if (structBaseAddress != 0) {
+            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+            autoAnalyzeNodes(structBuffer);
+            dissectAddrHistory.clear();
+            dissectAddrHistory.push_back(structBaseAddress);
+            dissectHistoryIdx = 0;
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(dissectHistoryIdx <= 0);
+    if (ImGui::Button("<< 后退")) {
+        dissectHistoryIdx--;
+        structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
+        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+        autoAnalyzeNodes(structBuffer);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(dissectHistoryIdx < 0 || dissectHistoryIdx >= (int)dissectAddrHistory.size() - 1);
+    if (ImGui::Button("前进 >>")) {
+        dissectHistoryIdx++;
+        structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
+        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+        autoAnalyzeNodes(structBuffer);
+    }
+    ImGui::EndDisabled();
+
+    // --- 第二行：显示大小 ---
+    ImGui::Text("显示大小:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("##dissect_total", &dissectTotalSize, 0, 0);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (dissectTotalSize < 16) dissectTotalSize = 16;
+        if (dissectTotalSize > 65536) dissectTotalSize = 65536;
+        if (structBaseAddress != 0) {
+            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+            autoAnalyzeNodes(structBuffer);
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("自动分析")) {
+        if (structBaseAddress != 0 && !structBuffer.empty()) {
+            autoAnalyzeNodes(structBuffer);
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("自动检测指针/浮点/字符串/整数类型");
+
+    // --- 第三行：自动刷新 ---
+    ImGui::Checkbox("自动刷新", &dissectAutoRefresh);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(60);
+    ImGui::InputFloat("##dissect_interval", &dissectRefreshInterval, 0, 0, "%.1f");
+    ImGui::SameLine();
+    ImGui::Text("秒");
+    if (dissectAutoRefresh && structBaseAddress != 0 && !dissectNodes.empty()) {
+        timeSinceDissectRefresh += ImGui::GetIO().DeltaTime;
+        if (timeSinceDissectRefresh >= dissectRefreshInterval) {
+            timeSinceDissectRefresh = 0.0f;
+            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+            refreshDissectValues();
+        }
+    }
+}
+
+// PLACEHOLDER_REMAINING_FUNCTIONS
+
+// ============================================================
+// drawDissectorTable — 树形表格
 // ============================================================
 void MemoryViewerWindow::drawDissectorTable()
 {
-    // 延迟操作：避免在遍历 dissectRows 期间修改向量导致迭代器失效 / abort
-    int pendingTypeChangeRow = -1;
-    FieldType pendingNewType = FieldType::DWORD;
-    int pendingFollowRow = -1;
-    int pendingWriteRow = -1;
-    std::string pendingWriteValue;
+    DissectDeferredOps ops;
 
     const int colCount = 6;
     ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
@@ -202,120 +219,295 @@ void MemoryViewerWindow::drawDissectorTable()
                             ImGuiTableFlags_SizingFixedFit;
     if (ImGui::BeginTable("DissectorTable", colCount, flags)) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("偏移", ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("地址", ImGuiTableColumnFlags_WidthFixed, 120);
-        ImGui::TableSetupColumn("名称", ImGuiTableColumnFlags_WidthFixed, 140);
-        ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 100);
-        ImGui::TableSetupColumn("值", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 40);
+        ImGui::TableSetupColumn("偏移",  ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableSetupColumn("地址",  ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableSetupColumn("名称",  ImGuiTableColumnFlags_WidthFixed, 160);
+        ImGui::TableSetupColumn("类型",  ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("值",    ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("操作",  ImGuiTableColumnFlags_WidthFixed, 50);
         ImGui::TableHeadersRow();
 
-        ImGuiListClipper clipper;
-        clipper.Begin((int)dissectRows.size());
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                if (i < 0 || i >= (int)dissectRows.size()) break;
-                auto& row = dissectRows[i];
-                ImGui::TableNextRow();
-                ImGui::PushID(i);
-
-                // 偏移列
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextColored(ColorScheme::InfoLight, "+0x%03X", row.offset);
-
-                // 地址列
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextColored(ColorScheme::Address, "%llX", structBaseAddress + row.offset);
-
-                // 名称列（可编辑）
-                ImGui::TableSetColumnIndex(2);
-                char nameBuf[128];
-                strncpy(nameBuf, row.name.c_str(), sizeof(nameBuf) - 1);
-                nameBuf[sizeof(nameBuf) - 1] = '\0';
-                ImGui::PushItemWidth(-1);
-                if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) {
-                    row.name = nameBuf;
-                }
-                ImGui::PopItemWidth();
-
-                // 类型列（下拉）— 延迟执行类型变更
-                ImGui::TableSetColumnIndex(3);
-                const char* typeNames[] = {
-                    "BYTE", "WORD", "DWORD", "QWORD",
-                    "FLOAT", "DOUBLE", "POINTER",
-                    "STRING", "UTF-8", "UTF-16"
-                };
-                int currentType = (int)row.type;
-                ImGui::PushItemWidth(-1);
-                if (ImGui::Combo("##type", &currentType, typeNames, IM_ARRAYSIZE(typeNames))) {
-                    pendingTypeChangeRow = i;
-                    pendingNewType = (FieldType)currentType;
-                }
-                ImGui::PopItemWidth();
-                // 值列（可编辑，回车写入）— 延迟执行写入
-                ImGui::TableSetColumnIndex(4);
-                char valBuf[256];
-                strncpy(valBuf, row.cachedValue.c_str(), sizeof(valBuf) - 1);
-                valBuf[sizeof(valBuf) - 1] = '\0';
-                ImGui::PushItemWidth(-1);
-                if (ImGui::InputText("##val", valBuf, sizeof(valBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    pendingWriteRow = i;
-                    pendingWriteValue = valBuf;
-                }
-                ImGui::PopItemWidth();
-
-                // 操作列 — 延迟执行指针跟踪
-                ImGui::TableSetColumnIndex(5);
-                if (row.type == FieldType::POINTER) {
-                    if (ImGui::SmallButton("->")) {
-                        pendingFollowRow = i;
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("跟踪指针");
-                }
-
-                // 右键菜单
-                if (ImGui::BeginPopupContextItem("RowCtx")) {
-                    if (ImGui::MenuItem("浏览内存")) {
-                        jumpToAddress(structBaseAddress + row.offset);
-                    }
-                    if (ImGui::MenuItem("添加到监控")) {
-                        MemoryWatchItem item;
-                        item.description = row.name;
-                        item.address = structBaseAddress + row.offset;
-                        item.type = row.type;
-                        item.enabled = true;
-                        watchItems.push_back(item);
-                        if (AppContext::Get().hasProcess()) {
-                            watchItems.back().cachedValue = readWatchItemValue(watchItems.back());
-                        }
-                    }
-                    ImGui::EndPopup();
-                }
-
-                ImGui::PopID();
-            }
+        int flatIndex = 0;
+        std::vector<int> path;
+        for (int i = 0; i < (int)dissectNodes.size(); i++) {
+            path.clear();
+            path.push_back(i);
+            drawNodeRow(dissectNodes[i], structBaseAddress, flatIndex, path, ops);
         }
         ImGui::EndTable();
     }
 
-    // 表格绘制完毕后，安全地执行延迟操作
-    if (pendingTypeChangeRow >= 0) {
-        onDissectRowTypeChanged(pendingTypeChangeRow, pendingNewType);
+    // 延迟执行类型变更
+    if (ops.pendingTypeChangeFlat >= 0) {
+        auto* parentVec = &dissectNodes;
+        for (int p = 0; p < (int)ops.pendingTypeChangePath.size() - 1; p++)
+            parentVec = &(*parentVec)[ops.pendingTypeChangePath[p]].children;
+        int idx = ops.pendingTypeChangePath.back();
+        onDissectNodeTypeChanged(*parentVec, idx, ops.pendingNewType);
     }
-    if (pendingWriteRow >= 0) {
-        writeDissectRowValue(pendingWriteRow, pendingWriteValue);
+    // 延迟执行写入
+    if (ops.pendingWriteFlat >= 0) {
+        DissectNode* node = resolveNodeByPath(ops.pendingWritePath);
+        if (node) {
+            uint64_t baseAddr = structBaseAddress;
+            auto* parentVec = &dissectNodes;
+            for (int p = 0; p < (int)ops.pendingWritePath.size() - 1; p++) {
+                baseAddr = (*parentVec)[ops.pendingWritePath[p]].pointerTarget;
+                parentVec = &(*parentVec)[ops.pendingWritePath[p]].children;
+            }
+            writeDissectNodeValue(*node, baseAddr, ops.pendingWriteValue);
+        }
     }
-    if (pendingFollowRow >= 0) {
-        followPointerInDissector(pendingFollowRow);
+    // 延迟执行展开/折叠
+    if (ops.pendingExpandFlat >= 0) {
+        DissectNode* node = resolveNodeByPath(ops.pendingExpandPath);
+        if (node) {
+            uint64_t baseAddr = structBaseAddress;
+            auto* parentVec = &dissectNodes;
+            for (int p = 0; p < (int)ops.pendingExpandPath.size() - 1; p++) {
+                baseAddr = (*parentVec)[ops.pendingExpandPath[p]].pointerTarget;
+                parentVec = &(*parentVec)[ops.pendingExpandPath[p]].children;
+            }
+            if (node->expanded)
+                collapsePointerNode(*node);
+            else
+                expandPointerNode(*node, baseAddr);
+        }
     }
 }
 
+// PLACEHOLDER_DRAW_NODE_ROW
+
 // ============================================================
-// regenerateDissectRows — 按默认大小切分
+// drawNodeRow — 递归渲染单个节点行
 // ============================================================
-void MemoryViewerWindow::regenerateDissectRows()
+void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
+                                     int& flatIndex, std::vector<int>& path,
+                                     DissectDeferredOps& ops)
 {
-    dissectRows.clear();
+    int myFlat = flatIndex++;
+    ImGui::TableNextRow();
+    ImGui::PushID(myFlat);
+
+    // --- 偏移列：TreeNodeEx 实现缩进 ---
+    ImGui::TableSetColumnIndex(0);
+    bool isPointer = (node.type == FieldType::POINTER);
+    ImGuiTreeNodeFlags treeFlags = ImGuiTreeNodeFlags_SpanAvailWidth
+                                 | ImGuiTreeNodeFlags_OpenOnArrow;
+    if (!isPointer)
+        treeFlags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (node.expanded)
+        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+    else if (isPointer)
+        ImGui::SetNextItemOpen(false, ImGuiCond_Always);
+
+    char offsetLabel[64];
+    snprintf(offsetLabel, sizeof(offsetLabel), "+0x%03X", node.offset);
+    bool treeOpen = ImGui::TreeNodeEx(offsetLabel, treeFlags);
+
+    // 右键菜单
+    char ctxId[64];
+    snprintf(ctxId, sizeof(ctxId), "NodeCtx_%d", myFlat);
+    if (ImGui::BeginPopupContextItem(ctxId)) {
+        if (ImGui::MenuItem("编辑属性...")) {
+            dissectEditPath = path;
+            showNodeEditPopup = true;
+            strncpy(editNodeName, node.name.c_str(), sizeof(editNodeName) - 1);
+            editNodeName[sizeof(editNodeName) - 1] = '\0';
+            strncpy(editNodeDesc, node.description.c_str(), sizeof(editNodeDesc) - 1);
+            editNodeDesc[sizeof(editNodeDesc) - 1] = '\0';
+            editNodeTypeIdx = (int)node.type;
+            editNodeStringSize = node.storedSize > 0 ? node.storedSize : 32;
+        }
+        if (ImGui::MenuItem("浏览内存")) {
+            jumpToAddress(baseAddr + node.offset);
+        }
+        if (ImGui::MenuItem("添加到监控")) {
+            MemoryWatchItem item;
+            item.description = node.name;
+            item.address = baseAddr + node.offset;
+            item.type = node.type;
+            item.enabled = true;
+            watchItems.push_back(item);
+            if (AppContext::Get().hasProcess())
+                watchItems.back().cachedValue = readWatchItemValue(watchItems.back());
+        }
+        if (isPointer && node.pointerTarget != 0) {
+            if (ImGui::MenuItem("在新地址解析指针目标")) {
+                uint64_t target = node.pointerTarget;
+                if (dissectHistoryIdx >= 0 &&
+                    dissectHistoryIdx < (int)dissectAddrHistory.size() - 1)
+                    dissectAddrHistory.resize(dissectHistoryIdx + 1);
+                dissectAddrHistory.push_back(target);
+                dissectHistoryIdx = (int)dissectAddrHistory.size() - 1;
+                structBaseAddress = target;
+                ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+                regenerateDissectNodes();
+                refreshDissectValues();
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // 指针展开/折叠状态同步
+    if (isPointer && treeOpen && !node.expanded) {
+        ops.pendingExpandFlat = myFlat;
+        ops.pendingExpandPath = path;
+    } else if (isPointer && !treeOpen && node.expanded) {
+        ops.pendingExpandFlat = myFlat;
+        ops.pendingExpandPath = path;
+    }
+
+    // --- 地址列 ---
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextColored(ColorScheme::Address, "%llX", (unsigned long long)(baseAddr + node.offset));
+
+    // --- 名称列（可编辑）---
+    ImGui::TableSetColumnIndex(2);
+    char nameBuf[128];
+    strncpy(nameBuf, node.name.c_str(), sizeof(nameBuf) - 1);
+    nameBuf[sizeof(nameBuf) - 1] = '\0';
+    ImGui::PushItemWidth(-1);
+    if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf)))
+        node.name = nameBuf;
+    ImGui::PopItemWidth();
+
+    // --- 类型列（下拉）---
+    ImGui::TableSetColumnIndex(3);
+    const char* typeNames[] = {
+        "BYTE", "WORD", "DWORD", "QWORD",
+        "FLOAT", "DOUBLE", "POINTER",
+        "STRING", "UTF-8", "UTF-16"
+    };
+    int currentType = (int)node.type;
+    ImGui::PushItemWidth(-1);
+    if (ImGui::Combo("##type", &currentType, typeNames, IM_ARRAYSIZE(typeNames))) {
+        ops.pendingTypeChangeFlat = myFlat;
+        ops.pendingNewType = (FieldType)currentType;
+        ops.pendingTypeChangePath = path;
+    }
+    ImGui::PopItemWidth();
+
+    // --- 值列（可编辑，回车写入）---
+    ImGui::TableSetColumnIndex(4);
+    char valBuf[256];
+    strncpy(valBuf, node.cachedValue.c_str(), sizeof(valBuf) - 1);
+    valBuf[sizeof(valBuf) - 1] = '\0';
+    ImGui::PushItemWidth(-1);
+    if (ImGui::InputText("##val", valBuf, sizeof(valBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        ops.pendingWriteFlat = myFlat;
+        ops.pendingWriteValue = valBuf;
+        ops.pendingWritePath = path;
+    }
+    ImGui::PopItemWidth();
+
+    // --- 操作列 ---
+    ImGui::TableSetColumnIndex(5);
+    if (isPointer && node.pointerTarget != 0) {
+        if (ImGui::SmallButton("->")) {
+            ops.pendingExpandFlat = myFlat;
+            ops.pendingExpandPath = path;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("展开/折叠指针 (0x%llX)", (unsigned long long)node.pointerTarget);
+    }
+
+    ImGui::PopID();
+
+    // 递归渲染子节点
+    // 注意：只要 treeOpen 为 true 且是指针节点，就必须调用 TreePop()
+    if (isPointer && treeOpen) {
+        if (node.expanded) {
+            for (int c = 0; c < (int)node.children.size(); c++) {
+                path.push_back(c);
+                drawNodeRow(node.children[c], node.pointerTarget, flatIndex, path, ops);
+                path.pop_back();
+            }
+        }
+        ImGui::TreePop();
+    }
+}
+
+// PLACEHOLDER_NODE_EDIT_POPUP
+
+// ============================================================
+// drawNodeEditPopup — 节点属性编辑弹窗
+// ============================================================
+void MemoryViewerWindow::drawNodeEditPopup()
+{
+    if (showNodeEditPopup) {
+        ImGui::OpenPopup("编辑字段属性");
+        showNodeEditPopup = false;
+    }
+
+    if (ImGui::BeginPopupModal("编辑字段属性", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        DissectNode* node = resolveNodeByPath(dissectEditPath);
+        if (!node) {
+            ImGui::Text("节点不存在");
+            if (ImGui::Button("关闭")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            return;
+        }
+
+        ImGui::Text("偏移: +0x%03X", node->offset);
+        ImGui::Separator();
+
+        ImGui::InputText("名称", editNodeName, sizeof(editNodeName));
+
+        const char* typeNames[] = {
+            "BYTE", "WORD", "DWORD", "QWORD",
+            "FLOAT", "DOUBLE", "POINTER",
+            "STRING", "UTF-8", "UTF-16"
+        };
+        ImGui::Combo("类型", &editNodeTypeIdx, typeNames, IM_ARRAYSIZE(typeNames));
+
+        FieldType editType = (FieldType)editNodeTypeIdx;
+        if (editType == FieldType::STRING || editType == FieldType::STRING_UTF8 ||
+            editType == FieldType::STRING_UTF16) {
+            ImGui::InputInt("字符串长度", &editNodeStringSize);
+            if (editNodeStringSize < 1) editNodeStringSize = 1;
+            if (editNodeStringSize > 4096) editNodeStringSize = 4096;
+        }
+
+        ImGui::InputTextMultiline("备注", editNodeDesc, sizeof(editNodeDesc),
+                                  ImVec2(300, 60));
+
+        ImGui::Separator();
+        if (ImGui::Button("确定", ImVec2(120, 0))) {
+            node->name = editNodeName;
+            node->description = editNodeDesc;
+            FieldType newType = (FieldType)editNodeTypeIdx;
+            if (newType != node->type) {
+                // 延迟处理类型变更（需要 merge/split）
+                auto* parentVec = &dissectNodes;
+                for (int p = 0; p < (int)dissectEditPath.size() - 1; p++)
+                    parentVec = &(*parentVec)[dissectEditPath[p]].children;
+                int idx = dissectEditPath.back();
+                onDissectNodeTypeChanged(*parentVec, idx, newType);
+            }
+            if (newType == FieldType::STRING || newType == FieldType::STRING_UTF8 ||
+                newType == FieldType::STRING_UTF16) {
+                node->storedSize = editNodeStringSize;
+            }
+            refreshDissectValues();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// PLACEHOLDER_CORE_LOGIC
+
+// ============================================================
+// regenerateDissectNodes — 按默认大小切分
+// ============================================================
+void MemoryViewerWindow::regenerateDissectNodes()
+{
+    dissectNodes.clear();
     int totalBytes = (int)structBuffer.size();
     if (totalBytes <= 0) return;
 
@@ -327,70 +519,200 @@ void MemoryViewerWindow::regenerateDissectRows()
         default: defaultType = FieldType::DWORD; break;
     }
     int offset = 0;
-    int idx = 0;
     while (offset + dissectDefaultSize <= totalBytes) {
-        DissectRow row;
-        row.offset = offset;
-        row.type = defaultType;
-        char nameBuf[32];
-        snprintf(nameBuf, sizeof(nameBuf), "field_%04X", offset);
-        row.name = nameBuf;
-        row.storedSize = dissectDefaultSize;
-        dissectRows.push_back(row);
+        DissectNode node;
+        node.offset = offset;
+        node.type = defaultType;
+        node.depth = 0;
+        char nb[32];
+        snprintf(nb, sizeof(nb), "field_%04X", offset);
+        node.name = nb;
+        node.storedSize = dissectDefaultSize;
+        dissectNodes.push_back(std::move(node));
         offset += dissectDefaultSize;
-        idx++;
     }
 }
 
 // ============================================================
-// refreshDissectValues — 更新所有行的缓存值
+// refreshDissectValues / refreshNodeValues — 递归刷新值
 // ============================================================
 void MemoryViewerWindow::refreshDissectValues()
 {
-    for (auto& row : dissectRows) {
-        int sz = row.getSize();
-        if (row.offset + sz > (int)structBuffer.size()) {
-            row.cachedValue = "??";
+    refreshNodeValues(dissectNodes, structBuffer, structBaseAddress);
+}
+
+void MemoryViewerWindow::refreshNodeValues(std::vector<DissectNode>& nodes,
+                                           const std::vector<unsigned char>& buffer,
+                                           uint64_t baseAddr)
+{
+    for (auto& node : nodes) {
+        int sz = node.getSize();
+        if (node.offset + sz > (int)buffer.size()) {
+            node.cachedValue = "??";
             continue;
         }
-        row.cachedValue = readSingleFieldValue(structBuffer, row.type, row.offset, sz);
+        node.cachedValue = readSingleFieldValue(buffer, node.type, node.offset, sz);
+
+        // POINTER 类型提取目标地址
+        if (node.type == FieldType::POINTER && node.offset + 8 <= (int)buffer.size()) {
+            node.pointerTarget = *(uint64_t*)&buffer[node.offset];
+        }
+
+        // 递归刷新已展开的子节点
+        if (node.expanded && !node.children.empty() && node.pointerTarget != 0) {
+            ReadProcessMemoryBytes(node.pointerTarget, dissectTotalSize, node.childBuffer);
+            refreshNodeValues(node.children, node.childBuffer, node.pointerTarget);
+        }
     }
 }
 
+// PLACEHOLDER_EXPAND_AND_TYPE_CHANGE
+
 // ============================================================
-// onDissectRowTypeChanged — 行类型变更，处理合并/拆分
+// expandPointerNode / collapsePointerNode — 指针展开/折叠
 // ============================================================
-void MemoryViewerWindow::onDissectRowTypeChanged(int rowIndex, FieldType newType)
+void MemoryViewerWindow::expandPointerNode(DissectNode& node, uint64_t baseAddr)
 {
-    if (rowIndex < 0 || rowIndex >= (int)dissectRows.size()) return;
-
-    auto& row = dissectRows[rowIndex];
-    int oldSize = row.getSize();
-    row.type = newType;
-
-    // STRING 类型默认给 32 字节
-    if (newType == FieldType::STRING || newType == FieldType::STRING_UTF8 || newType == FieldType::STRING_UTF16) {
-        row.storedSize = 32;
-    } else {
-        row.storedSize = 0; // 固定类型不需要 storedSize
+    if (node.type != FieldType::POINTER) return;
+    if (node.pointerTarget == 0) {
+        Gui::log("指针值为 NULL，无法展开");
+        return;
     }
 
-    int newSize = row.getSize();
+    node.childBuffer.clear();
+    if (!ReadProcessMemoryBytes(node.pointerTarget, dissectTotalSize, node.childBuffer)) {
+        Gui::log("读取指针目标内存失败: 0x%llX", (unsigned long long)node.pointerTarget);
+        return;
+    }
 
-    if (newSize == oldSize) {
-        // 大小不变，仅重新解释
-    } else if (newSize > oldSize) {
+    // 对子节点内存执行自动分析
+    node.children.clear();
+    int offset = 0;
+    int fieldIndex = 1;
+    int childDepth = node.depth + 1;
+    const auto& data = node.childBuffer;
+
+    while (offset < (int)data.size() - 8) {
+        DissectNode child;
+        child.offset = offset;
+        child.depth = childDepth;
+
+        // 检查指针
+        if (offset + 7 < (int)data.size()) {
+            uint64_t val64 = *(uint64_t*)&data[offset];
+            uint64_t tmp = val64;
+            if ((val64 & 0xffff00000000) == 0xb40000000000)
+                tmp = val64 & 0xffffffffffff;
+            if (tmp > 0x4FFFFFFFFF && tmp < 0x7FFFFFFFFFFF) {
+                child.type = FieldType::POINTER;
+                child.storedSize = 8;
+                child.pointerTarget = val64;
+                char nb[32]; snprintf(nb, sizeof(nb), "ptr_%d", fieldIndex++);
+                child.name = nb;
+                node.children.push_back(std::move(child));
+                offset += 8;
+                continue;
+            }
+        }
+
+        // 检查浮点
+        if (offset + 3 < (int)data.size()) {
+            float fval = *(float*)&data[offset];
+            if (!std::isnan(fval) && !std::isinf(fval) && fval > -1000000 && fval < 1000000) {
+                uint32_t ival = *(uint32_t*)&data[offset];
+                if (ival > 0x1000 && (ival & 0xFF) != 0) {
+                    child.type = FieldType::FLOAT;
+                    child.storedSize = 4;
+                    char nb[32]; snprintf(nb, sizeof(nb), "float_%d", fieldIndex++);
+                    child.name = nb;
+                    node.children.push_back(std::move(child));
+                    offset += 4;
+                    continue;
+                }
+            }
+        }
+
+        // 检查字符串
+        bool isString = true;
+        int strLen = 0;
+        for (int i = offset; i < (int)data.size() && i < offset + 32; i++) {
+            unsigned char c = data[i];
+            if (c == 0) { strLen = i - offset; break; }
+            if (c < 32 || c > 126) { isString = false; break; }
+            strLen++;
+        }
+        if (isString && strLen >= 4) {
+            child.type = FieldType::STRING;
+            child.storedSize = strLen + 1;
+            char nb[32]; snprintf(nb, sizeof(nb), "str_%d", fieldIndex++);
+            child.name = nb;
+            node.children.push_back(std::move(child));
+            offset += strLen + 1;
+            continue;
+        }
+
+        // 默认 DWORD
+        if (offset + 3 < (int)data.size()) {
+            child.type = FieldType::DWORD;
+            child.storedSize = 4;
+            char nb[32]; snprintf(nb, sizeof(nb), "dword_%d", fieldIndex++);
+            child.name = nb;
+            node.children.push_back(std::move(child));
+            offset += 4;
+        } else {
+            break;
+        }
+    }
+
+    refreshNodeValues(node.children, node.childBuffer, node.pointerTarget);
+    node.expanded = true;
+    Gui::log("展开指针 -> 0x%llX (%d 子字段)", (unsigned long long)node.pointerTarget, (int)node.children.size());
+}
+
+void MemoryViewerWindow::collapsePointerNode(DissectNode& node)
+{
+    node.expanded = false;
+    node.children.clear();
+    node.childBuffer.clear();
+}
+
+// ============================================================
+// onDissectNodeTypeChanged — 类型变更，处理合并/拆分
+// ============================================================
+void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& nodes,
+                                                  int nodeIndex, FieldType newType)
+{
+    if (nodeIndex < 0 || nodeIndex >= (int)nodes.size()) return;
+    auto& node = nodes[nodeIndex];
+
+    // 从 POINTER 切换走时折叠子节点
+    if (node.type == FieldType::POINTER && newType != FieldType::POINTER)
+        collapsePointerNode(node);
+
+    int oldSize = node.getSize();
+    node.type = newType;
+
+    if (newType == FieldType::STRING || newType == FieldType::STRING_UTF8 ||
+        newType == FieldType::STRING_UTF16) {
+        node.storedSize = 32;
+    } else {
+        node.storedSize = 0;
+    }
+
+    int newSize = node.getSize();
+
+    if (newSize > oldSize) {
         // 吸收后续行
         int need = newSize - oldSize;
-        while (need > 0 && rowIndex + 1 < (int)dissectRows.size()) {
-            int nextSize = dissectRows[rowIndex + 1].getSize();
-            dissectRows.erase(dissectRows.begin() + rowIndex + 1);
+        while (need > 0 && nodeIndex + 1 < (int)nodes.size()) {
+            int nextSize = nodes[nodeIndex + 1].getSize();
+            nodes.erase(nodes.begin() + nodeIndex + 1);
             need -= nextSize;
         }
-    } else {
+    } else if (newSize < oldSize) {
         // 释放空间，用默认大小填充
         int freed = oldSize - newSize;
-        int fillOffset = row.offset + newSize;
+        int fillOffset = node.offset + newSize;
         FieldType fillType;
         switch (dissectDefaultSize) {
             case 1: fillType = FieldType::BYTE; break;
@@ -398,16 +720,17 @@ void MemoryViewerWindow::onDissectRowTypeChanged(int rowIndex, FieldType newType
             case 8: fillType = FieldType::QWORD; break;
             default: fillType = FieldType::DWORD; break;
         }
-        int insertPos = rowIndex + 1;
+        int insertPos = nodeIndex + 1;
         while (freed >= dissectDefaultSize) {
-            DissectRow nr;
+            DissectNode nr;
             nr.offset = fillOffset;
             nr.type = fillType;
+            nr.depth = node.depth;
             char nb[32];
             snprintf(nb, sizeof(nb), "field_%04X", fillOffset);
             nr.name = nb;
             nr.storedSize = dissectDefaultSize;
-            dissectRows.insert(dissectRows.begin() + insertPos, nr);
+            nodes.insert(nodes.begin() + insertPos, std::move(nr));
             fillOffset += dissectDefaultSize;
             freed -= dissectDefaultSize;
             insertPos++;
@@ -417,42 +740,18 @@ void MemoryViewerWindow::onDissectRowTypeChanged(int rowIndex, FieldType newType
     refreshDissectValues();
 }
 
+// PLACEHOLDER_WRITE_AND_TEMPLATE
+
 // ============================================================
-// followPointerInDissector — 跟踪指针
+// writeDissectNodeValue — 写入值到内存
 // ============================================================
-void MemoryViewerWindow::followPointerInDissector(int rowIndex)
+bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseAddr,
+                                               const std::string& valueStr)
 {
-    if (rowIndex < 0 || rowIndex >= (int)dissectRows.size()) return;
-    auto& row = dissectRows[rowIndex];
-    if (row.offset + 8 > (int)structBuffer.size()) return;
-
-    uint64_t ptrVal = *(uint64_t*)&structBuffer[row.offset];
-    if (ptrVal == 0) return;
-
-    // 截断历史（如果在中间位置前进过）
-    if (dissectHistoryIdx >= 0 && dissectHistoryIdx < (int)dissectAddrHistory.size() - 1) {
-        dissectAddrHistory.resize(dissectHistoryIdx + 1);
-    }
-    dissectAddrHistory.push_back(ptrVal);
-    dissectHistoryIdx = (int)dissectAddrHistory.size() - 1;
-
-    structBaseAddress = ptrVal;
-    ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-    regenerateDissectRows();
-    refreshDissectValues();
-}
-
-// ============================================================
-// writeDissectRowValue — 写入值到内存
-// ============================================================
-bool MemoryViewerWindow::writeDissectRowValue(int rowIndex, const std::string& valueStr)
-{
-    if (rowIndex < 0 || rowIndex >= (int)dissectRows.size()) return false;
-    auto& row = dissectRows[rowIndex];
-    uint64_t addr = structBaseAddress + row.offset;
+    uint64_t addr = baseAddr + node.offset;
     std::vector<unsigned char> data;
     try {
-        switch (row.type) {
+        switch (node.type) {
             case FieldType::BYTE: {
                 int val = std::stoi(valueStr);
                 data.push_back((unsigned char)val);
@@ -494,11 +793,10 @@ bool MemoryViewerWindow::writeDissectRowValue(int rowIndex, const std::string& v
         }
 
         if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
-            if (row.offset + (int)data.size() <= (int)structBuffer.size()) {
-                memcpy(&structBuffer[row.offset], data.data(), data.size());
-            }
-            row.cachedValue = readSingleFieldValue(structBuffer, row.type, row.offset, row.getSize());
-            Gui::log("写入 %s @ 0x%llX: %s", row.name.c_str(), addr, valueStr.c_str());
+            Gui::log("写入 %s @ 0x%llX: %s", node.name.c_str(), (unsigned long long)addr, valueStr.c_str());
+            // 刷新整棵树的值
+            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
+            refreshDissectValues();
             return true;
         }
     } catch (const std::exception& e) {
@@ -514,12 +812,13 @@ void MemoryViewerWindow::saveDissectAsTemplate(const std::string& name)
 {
     StructDefinition def;
     def.name = name;
-    for (auto& row : dissectRows) {
+    for (auto& node : dissectNodes) {
         StructField f;
-        f.name = row.name;
-        f.type = row.type;
-        f.offset = row.offset;
-        f.size = row.getSize();
+        f.name = node.name;
+        f.type = node.type;
+        f.offset = node.offset;
+        f.size = node.getSize();
+        f.description = node.description;
         def.fields.push_back(f);
     }
     def.calculateSize();
@@ -533,24 +832,116 @@ void MemoryViewerWindow::loadTemplateIntoDissector(int index)
     if (index < 0 || index >= (int)structDefinitions.size()) return;
     auto& def = structDefinitions[index];
 
-    // 确保有足够的内存数据
     if (structBaseAddress != 0) {
         int needed = def.totalSize > dissectTotalSize ? def.totalSize : dissectTotalSize;
         ReadProcessMemoryBytes(structBaseAddress, needed, structBuffer);
     }
 
-    dissectRows.clear();
+    dissectNodes.clear();
     for (auto& f : def.fields) {
-        DissectRow row;
-        row.offset = f.offset;
-        row.type = f.type;
-        row.name = f.name;
-        row.storedSize = f.size;
-        dissectRows.push_back(row);
+        DissectNode node;
+        node.offset = f.offset;
+        node.type = f.type;
+        node.name = f.name;
+        node.storedSize = f.size;
+        node.description = f.description;
+        node.depth = 0;
+        dissectNodes.push_back(std::move(node));
     }
     refreshDissectValues();
     Gui::log("已加载模板: %s", def.name.c_str());
 }
+
+// PLACEHOLDER_AUTO_ANALYZE
+
+// ============================================================
+// autoAnalyzeNodes — 自动推导数据类型
+// ============================================================
+void MemoryViewerWindow::autoAnalyzeNodes(const std::vector<unsigned char>& data)
+{
+    if (data.empty()) return;
+
+    dissectNodes.clear();
+    int offset = 0;
+    int fieldIndex = 1;
+
+    while (offset < (int)data.size() - 8) {
+        DissectNode node;
+        node.offset = offset;
+        node.depth = 0;
+
+        // 检查指针（ARM64 用户空间地址范围）
+        if (offset + 7 < (int)data.size()) {
+            uint64_t val64 = *(uint64_t*)&data[offset];
+            uint64_t tmp = val64;
+            if ((val64 & 0xffff00000000) == 0xb40000000000)
+                tmp = val64 & 0xffffffffffff;
+            if (tmp > 0x4FFFFFFFFF && tmp < 0x7FFFFFFFFFFF) {
+                node.type = FieldType::POINTER;
+                node.storedSize = 8;
+                node.pointerTarget = val64;
+                char nb[32]; snprintf(nb, sizeof(nb), "ptr_%d", fieldIndex++);
+                node.name = nb;
+                dissectNodes.push_back(std::move(node));
+                offset += 8;
+                continue;
+            }
+        }
+
+        // 检查浮点
+        if (offset + 3 < (int)data.size()) {
+            float fval = *(float*)&data[offset];
+            if (!std::isnan(fval) && !std::isinf(fval) && fval > -1000000 && fval < 1000000) {
+                uint32_t ival = *(uint32_t*)&data[offset];
+                if (ival > 0x1000 && (ival & 0xFF) != 0) {
+                    node.type = FieldType::FLOAT;
+                    node.storedSize = 4;
+                    char nb[32]; snprintf(nb, sizeof(nb), "float_%d", fieldIndex++);
+                    node.name = nb;
+                    dissectNodes.push_back(std::move(node));
+                    offset += 4;
+                    continue;
+                }
+            }
+        }
+
+        // 检查字符串
+        bool isString = true;
+        int strLen = 0;
+        for (int i = offset; i < (int)data.size() && i < offset + 32; i++) {
+            unsigned char c = data[i];
+            if (c == 0) { strLen = i - offset; break; }
+            if (c < 32 || c > 126) { isString = false; break; }
+            strLen++;
+        }
+        if (isString && strLen >= 4) {
+            node.type = FieldType::STRING;
+            node.storedSize = strLen + 1;
+            char nb[32]; snprintf(nb, sizeof(nb), "str_%d", fieldIndex++);
+            node.name = nb;
+            dissectNodes.push_back(std::move(node));
+            offset += strLen + 1;
+            continue;
+        }
+
+        // 默认 DWORD
+        if (offset + 3 < (int)data.size()) {
+            node.type = FieldType::DWORD;
+            node.storedSize = 4;
+            char nb[32]; snprintf(nb, sizeof(nb), "dword_%d", fieldIndex++);
+            node.name = nb;
+            dissectNodes.push_back(std::move(node));
+            offset += 4;
+        } else {
+            break;
+        }
+    }
+
+    refreshDissectValues();
+    Gui::log("自动分析发现 %d 个字段", (int)dissectNodes.size());
+}
+
+// PLACEHOLDER_UTILITY_FUNCTIONS
 
 // ============================================================
 // 保留的辅助函数
@@ -592,20 +983,19 @@ int MemoryViewerWindow::getFieldTypeSize(FieldType type)
     }
 }
 
-std::string MemoryViewerWindow::readFieldValue(const std::vector<unsigned char>& data, const StructField& field, uint64_t baseAddr)
+std::string MemoryViewerWindow::readFieldValue(const std::vector<unsigned char>& data,
+                                               const StructField& field, uint64_t baseAddr)
 {
-    if (field.offset + field.size * field.arrayCount > (int)data.size()) {
+    if (field.offset + field.size * field.arrayCount > (int)data.size())
         return "超出范围";
-    }
     std::stringstream ss;
     if (field.arrayCount > 1) {
         ss << "{ ";
         for (int i = 0; i < field.arrayCount && i < 10; i++) {
             if (i > 0) ss << ", ";
             int elemOffset = field.offset + i * field.size;
-            if (elemOffset + field.size <= (int)data.size()) {
+            if (elemOffset + field.size <= (int)data.size())
                 ss << readSingleFieldValue(data, field.type, elemOffset, field.size);
-            }
         }
         if (field.arrayCount > 10) ss << ", ...";
         ss << " }";
@@ -615,27 +1005,33 @@ std::string MemoryViewerWindow::readFieldValue(const std::vector<unsigned char>&
     }
 }
 
-std::string MemoryViewerWindow::readSingleFieldValue(const std::vector<unsigned char>& data, FieldType type, int offset, int size)
+// PLACEHOLDER_READ_SINGLE_FIELD
+
+std::string MemoryViewerWindow::readSingleFieldValue(const std::vector<unsigned char>& data,
+                                                     FieldType type, int offset, int size)
 {
     std::stringstream ss;
     switch (type) {
         case FieldType::BYTE: {
             if (offset < (int)data.size()) {
-                ss << "0x" << std::hex << std::uppercase << (int)data[offset] << " (" << (int)data[offset] << ")";
+                ss << "0x" << std::hex << std::uppercase << (int)data[offset]
+                   << " (" << std::dec << (int)data[offset] << ")";
             }
             break;
         }
         case FieldType::WORD: {
             if (offset + 1 < (int)data.size()) {
                 uint16_t val = *(uint16_t*)&data[offset];
-                ss << "0x" << std::hex << std::uppercase << val << " (" << val << ")";
+                ss << "0x" << std::hex << std::uppercase << val
+                   << " (" << std::dec << val << ")";
             }
             break;
         }
         case FieldType::DWORD: {
             if (offset + 3 < (int)data.size()) {
                 uint32_t val = *(uint32_t*)&data[offset];
-                ss << "0x" << std::hex << std::uppercase << val << " (" << val << ")";
+                ss << "0x" << std::hex << std::uppercase << val
+                   << " (" << std::dec << val << ")";
             }
             break;
         }
@@ -684,6 +1080,8 @@ std::string MemoryViewerWindow::readSingleFieldValue(const std::vector<unsigned 
     }
     return ss.str();
 }
+
+// PLACEHOLDER_SAVE_LOAD_DEFS
 
 void MemoryViewerWindow::saveStructDefinitions()
 {
@@ -759,7 +1157,10 @@ void MemoryViewerWindow::loadStructDefinitions()
     }
 }
 
-std::string MemoryViewerWindow::readUTF8String(const std::vector<unsigned char>& data, size_t offset, size_t maxLength)
+// PLACEHOLDER_STRING_UTILS
+
+std::string MemoryViewerWindow::readUTF8String(const std::vector<unsigned char>& data,
+                                               size_t offset, size_t maxLength)
 {
     std::string result;
     size_t i = offset;
@@ -810,7 +1211,8 @@ std::string MemoryViewerWindow::utf16ToUtf8(const uint16_t* utf16Str, size_t len
     return result;
 }
 
-std::string MemoryViewerWindow::readUTF16String(const std::vector<unsigned char>& data, size_t offset, size_t maxLength)
+std::string MemoryViewerWindow::readUTF16String(const std::vector<unsigned char>& data,
+                                                size_t offset, size_t maxLength)
 {
     size_t maxChars = maxLength / 2;
     if (offset + 1 >= data.size()) return "";
@@ -825,86 +1227,7 @@ std::string MemoryViewerWindow::readUTF16String(const std::vector<unsigned char>
     return utf16Chars.empty() ? "" : utf16ToUtf8(utf16Chars.data(), utf16Chars.size());
 }
 
-void MemoryViewerWindow::autoAnalyzeStructure(const std::vector<unsigned char>& data)
-{
-    if (data.empty()) return;
-
-    dissectRows.clear();
-    int offset = 0;
-    int fieldIndex = 1;
-
-    while (offset < (int)data.size() - 8) {
-        DissectRow row;
-        row.offset = offset;
-
-        // 检查指针
-        if (offset + 7 < (int)data.size()) {
-            uint64_t val64 = *(uint64_t*)&data[offset];
-            uint64_t tmp = val64;
-            if ((val64 & 0xffff00000000) == 0xb40000000000)
-                tmp = val64 & 0xffffffffffff;
-            if (tmp > 0x4FFFFFFFFF && tmp < 0x7FFFFFFFFFFF) {
-                row.type = FieldType::POINTER;
-                row.storedSize = 8;
-                char nb[32]; snprintf(nb, sizeof(nb), "ptr_%d", fieldIndex++);
-                row.name = nb;
-                dissectRows.push_back(row);
-                offset += 8;
-                continue;
-            }
-        }
-
-        // 检查浮点
-        if (offset + 3 < (int)data.size()) {
-            float fval = *(float*)&data[offset];
-            if (!std::isnan(fval) && !std::isinf(fval) && fval > -1000000 && fval < 1000000) {
-                uint32_t ival = *(uint32_t*)&data[offset];
-                if (ival > 0x1000 && (ival & 0xFF) != 0) {
-                    row.type = FieldType::FLOAT;
-                    row.storedSize = 4;
-                    char nb[32]; snprintf(nb, sizeof(nb), "float_%d", fieldIndex++);
-                    row.name = nb;
-                    dissectRows.push_back(row);
-                    offset += 4;
-                    continue;
-                }
-            }
-        }
-        // 检查字符串
-        bool isString = true;
-        int strLen = 0;
-        for (int i = offset; i < (int)data.size() && i < offset + 32; i++) {
-            unsigned char c = data[i];
-            if (c == 0) { strLen = i - offset; break; }
-            if (c < 32 || c > 126) { isString = false; break; }
-            strLen++;
-        }
-        if (isString && strLen >= 4) {
-            row.type = FieldType::STRING;
-            row.storedSize = strLen + 1;
-            char nb[32]; snprintf(nb, sizeof(nb), "str_%d", fieldIndex++);
-            row.name = nb;
-            dissectRows.push_back(row);
-            offset += strLen + 1;
-            continue;
-        }
-
-        // 默认 DWORD
-        if (offset + 3 < (int)data.size()) {
-            row.type = FieldType::DWORD;
-            row.storedSize = 4;
-            char nb[32]; snprintf(nb, sizeof(nb), "dword_%d", fieldIndex++);
-            row.name = nb;
-            dissectRows.push_back(row);
-            offset += 4;
-        } else {
-            break;
-        }
-    }
-
-    refreshDissectValues();
-    Gui::log("自动分析发现 %d 个字段", (int)dissectRows.size());
-}
+// PLACEHOLDER_WATCH_STRUCT
 
 void MemoryViewerWindow::addStructToWatchList(const StructDefinition& structDef)
 {
@@ -917,15 +1240,13 @@ void MemoryViewerWindow::addStructToWatchList(const StructDefinition& structDef)
         item.type = field.type;
         item.enabled = true;
         watchItems.push_back(item);
-        if (AppContext::Get().hasProcess()) {
+        if (AppContext::Get().hasProcess())
             watchItems.back().cachedValue = readWatchItemValue(watchItems.back());
-        }
         addedCount++;
     }
     Gui::log("已添加 %d 个字段到监控列表", addedCount);
-    if (AppContext::Get().hasProcess() && addedCount > 0) {
+    if (AppContext::Get().hasProcess() && addedCount > 0)
         timeSinceWatchUpdate = 0.0f;
-    }
 }
 
 bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string& value)
@@ -956,18 +1277,3 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
     }
     return false;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

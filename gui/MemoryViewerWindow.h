@@ -80,13 +80,21 @@ struct StructDefinition {
     }
 };
 
-// Dissector 行（CE 风格）
-struct DissectRow {
-    int offset;              // 相对基址的字节偏移
+// Dissector 树节点（CE 风格，支持指针展开）
+struct DissectNode {
+    int offset;              // 相对父级基址的字节偏移
     FieldType type;          // 当前解释类型
-    std::string name;        // 用户命名（空则自动生成 field_XXXX）
+    std::string name;        // 用户命名
     std::string cachedValue; // 缓存的显示值
+    std::string description; // 用户备注
     int storedSize = 0;      // 该行占用字节数（STRING 等变长类型用）
+
+    // 树结构
+    bool expanded = false;               // 指针是否展开
+    uint64_t pointerTarget = 0;          // 指针目标地址
+    std::vector<unsigned char> childBuffer; // 子节点内存缓冲
+    std::vector<DissectNode> children;   // 子节点
+    int depth = 0;                       // 嵌套深度
 
     int getSize() const {
         switch (type) {
@@ -173,18 +181,37 @@ private:
     void loadWatchList();     // 加载监控列表
     
     // 结构体分析相关
-    void autoAnalyzeStructure(const std::vector<unsigned char>& data);  // 自动分析结构体
-    void addStructToWatchList(const StructDefinition& structDef);  // 将结构体添加到监控列表
-    bool writeStructFieldValue(int fieldIndex, const std::string& value);  // 写入结构体字段值
+    void addStructToWatchList(const StructDefinition& structDef);
+    bool writeStructFieldValue(int fieldIndex, const std::string& value);
 
-    // Dissector 相关
-    void regenerateDissectRows();
+    // Dissector 相关（树形结构）
+    void drawDissectorToolbar();
+    void drawNodeEditPopup();
+    void regenerateDissectNodes();
     void refreshDissectValues();
-    void onDissectRowTypeChanged(int rowIndex, FieldType newType);
-    void followPointerInDissector(int rowIndex);
-    bool writeDissectRowValue(int rowIndex, const std::string& valueStr);
+    void refreshNodeValues(std::vector<DissectNode>& nodes, const std::vector<unsigned char>& buffer, uint64_t baseAddr);
+    void onDissectNodeTypeChanged(std::vector<DissectNode>& nodes, int nodeIndex, FieldType newType);
+    void expandPointerNode(DissectNode& node, uint64_t baseAddr);
+    void collapsePointerNode(DissectNode& node);
+    bool writeDissectNodeValue(DissectNode& node, uint64_t baseAddr, const std::string& valueStr);
     void saveDissectAsTemplate(const std::string& name);
     void loadTemplateIntoDissector(int index);
+    void autoAnalyzeNodes(const std::vector<unsigned char>& data);
+    DissectNode* resolveNodeByPath(const std::vector<int>& path);
+
+    // drawNodeRow 延迟操作参数结构
+    struct DissectDeferredOps {
+        int pendingTypeChangeFlat = -1;
+        FieldType pendingNewType = FieldType::DWORD;
+        std::vector<int> pendingTypeChangePath;
+        int pendingExpandFlat = -1;
+        std::vector<int> pendingExpandPath;
+        int pendingWriteFlat = -1;
+        std::string pendingWriteValue;
+        std::vector<int> pendingWritePath;
+    };
+    void drawNodeRow(DissectNode& node, uint64_t baseAddr, int& flatIndex,
+                     std::vector<int>& path, DissectDeferredOps& ops);
     
     // 反汇编相关
     std::string formatAddressWithOffset(uint64_t address);  // 格式化地址显示：地址[偏移量]
@@ -242,7 +269,7 @@ private:
     char newStructName[128] = "";
 
     // Dissector 状态
-    std::vector<DissectRow> dissectRows;
+    std::vector<DissectNode> dissectNodes;
     int dissectDefaultSize = 4;          // 默认元素大小 1/2/4/8
     int dissectTotalSize = 256;          // 显示区域总字节数
     bool dissectAutoRefresh = false;
@@ -256,6 +283,14 @@ private:
     // 保存模板对话框
     bool showSaveTemplateDialog = false;
     char saveTemplateName[128] = "";
+
+    // 节点编辑弹窗
+    bool showNodeEditPopup = false;
+    std::vector<int> dissectEditPath;
+    char editNodeName[128] = "";
+    char editNodeDesc[256] = "";
+    int editNodeTypeIdx = 0;
+    int editNodeStringSize = 32;
     
     // 地址列表（监控项）
     std::vector<MemoryWatchItem> watchItems;
