@@ -440,8 +440,8 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                     }
                     
                     ImGui::TableSetColumnIndex(1);
-                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatWithModule(stat.pc_address);
-                    char pcAddrStr[256];
+                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(stat.pc_address);
+                    char pcAddrStr[512];
                     snprintf(pcAddrStr, sizeof(pcAddrStr), "%s", pcAddrDisplayStr.c_str());
                     if (ImGui::Selectable(pcAddrStr, isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
                         detailWindow.selectedPCAddress = stat.pc_address;
@@ -501,7 +501,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                 bool foundHit = false;
                 for (int i = (int)bp.hitHistory.size() - 1; i >= 0; i--) {
                     if (bp.hitHistory[i].regs_info.pc == detailWindow.selectedPCAddress) {
-                        std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatWithModule(detailWindow.selectedPCAddress);
+                        std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(detailWindow.selectedPCAddress);
                         ImGui::Text("PC地址: %s 的详细信息", pcAddrDisplayStr.c_str());
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("原始地址: 0x%llX", detailWindow.selectedPCAddress);
@@ -517,7 +517,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                             
                             if (detailWindow.showDisassembly && ImGui::BeginTabItem("反汇编")) {
                                 if (disassemblyInitialized && disassemblyHelper) {
-                                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatWithModule(detailWindow.selectedPCAddress);
+                                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(detailWindow.selectedPCAddress);
                                     ImGui::TextColored(ColorScheme::SuccessLight, "PC: %s 的反汇编", pcAddrDisplayStr.c_str());
                                     ImGui::Separator();
                                     
@@ -1540,22 +1540,23 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
             
             // 地址列
             ImGui::TableSetColumnIndex(1);
-            char addrStr[32];
-            snprintf(addrStr, sizeof(addrStr), "0x%llX", instr.address);
+            std::string addrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(instr.address);
+            char rawAddrStr[32];
+            snprintf(rawAddrStr, sizeof(rawAddrStr), "0x%llX", instr.address);
             
             // 当前PC用不同颜色显示
             if (isCurrentPC) {
-                ImGui::TextColored(ColorScheme::DisassemblyPC, "%s", addrStr);
+                ImGui::TextColored(ColorScheme::DisassemblyPC, "%s", addrDisplayStr.c_str());
             } else {
-                if (ImGui::Selectable(addrStr, false, ImGuiSelectableFlags_SpanAllColumns)) {
+                if (ImGui::Selectable(addrDisplayStr.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
                     navigateToAddress(instr.address);
                     Gui::log("跳转到地址: 0x%llX", instr.address);
                 }
             }
             
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("地址: 0x%llX\n大小: %u 字节%s", 
-                                 instr.address, instr.size,
+                ImGui::SetTooltip("地址: 0x%llX\n解析: %s\n大小: %u 字节%s", 
+                                 instr.address, addrDisplayStr.c_str(), instr.size,
                                  isCurrentPC ? "\n[当前PC]" : "");
             }
             
@@ -1564,7 +1565,7 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
             snprintf(popup_id, sizeof(popup_id), "DisasmPCPopup_%llX", instr.address);
             if (ImGui::BeginPopupContextItem(popup_id)) {
                 if (ImGui::MenuItem("复制地址")) {
-                    ImGui::SetClipboardText(addrStr);
+                    ImGui::SetClipboardText(rawAddrStr);
                 }
                 if (ImGui::MenuItem("复制指令")) {
                     ImGui::SetClipboardText(instr.fullInstruction.c_str());

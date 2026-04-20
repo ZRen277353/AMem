@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -231,3 +232,13 @@ bool FreezeGetList(std::vector<CeFreezeItem> &outList, bool &isPaused,
 bool FreezeUpdate(uint64_t address, const uint8_t data[8],
                   PortType type = PORT_MAIN);
 bool FreezeSetInterval(uint32_t interval_ms, PortType type = PORT_MAIN);
+
+// ELF 符号接口
+bool SymbolInit(uint64_t moduleBase, int &outTotalCount,
+                PortType type = PORT_MAIN);
+bool SymbolGetList(int offset, int count,
+                   std::vector<std::pair<uint64_t, std::string>> &outSymbols,
+                   int *outTotalCount = nullptr,
+                   PortType type = PORT_MAIN);
+bool SymbolFind(uint64_t moduleBase, const std::string &name,
+                uint64_t &outAddress, PortType type = PORT_MAIN);

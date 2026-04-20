@@ -1,6 +1,7 @@
 #pragma once
 #include "imgui.h"
 #include <string>
+#include <cstdint>
 
 class Window {
 public:

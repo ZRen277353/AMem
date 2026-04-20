@@ -6,24 +6,15 @@
 #include "../../imgui/imgui.h"
 #include "../../socket/client_singleton.h"
 #include <cstdint>
-#include <sstream>
-#include <iomanip>
 #include <cstring>
-#include <cmath>
 #include <memory>
 
 std::string MemoryViewerWindow::formatAddressWithOffset(uint64_t address)
 {
-    ModuleInfoItem module = AppContext::Get().moduleCache.findByAddress(address);
+    std::string baseText = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(address);
 
-    char buffer[256];
-    if (!module.name.empty()) {
-        uint64_t offset = address - module.base;
-        snprintf(buffer, sizeof(buffer), "0x%llX[+0x%llX]", address, offset);
-    } else {
-        snprintf(buffer, sizeof(buffer), "0x%llX", address);
-    }
-
+    char buffer[768];
+    snprintf(buffer, sizeof(buffer), "0x%llX [%s]", address, baseText.c_str());
     return std::string(buffer);
 }
 
@@ -363,7 +354,7 @@ void MemoryViewerWindow::drawDisassemblyPanel()
                 bool isHighlightAddress = (insn.address == disassemblyAddress);
                 if (isHighlightAddress) {
                     // 高亮地址：模块名+偏移量=地址
-                    addrStr = AppContext::Get().moduleCache.formatWithModule(insn.address);
+                    addrStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(insn.address);
                     // 使用更明显的颜色高亮显示
                     ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::WarningBright);
                     ImGui::Text("%s", addrStr.c_str());

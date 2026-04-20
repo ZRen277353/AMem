@@ -4,7 +4,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <iomanip>
+
 #include <cstring>
 #include <cstdint>
 #include <windows.h>
@@ -74,6 +74,10 @@
 #define CMD_FREEZE_UPDATE 219
 #define CMD_FREEZE_SETINTERVAL 218
 
+// ELF 符号相关命令
+#define CMD_SYMBOL_INIT 217
+#define CMD_SYMBOL_GETLIST 216
+#define CMD_SYMBOL_FIND 215
 
 
 #pragma pack(1)
@@ -192,6 +196,42 @@ struct CeFreezeListOutput {
 	int count;
 	uint8_t isPaused;
 	uint32_t interval_ms;
+};
+
+struct CeSymbolInitInput {
+    uint32_t hProcess;
+    uint64_t moduleBase;
+};
+
+struct CeSymbolInitOutput {
+    int result;
+    int totalCount;
+};
+
+struct CeGetSymbolListInput {
+    int offset;
+    int count;
+};
+
+struct CeGetSymbolListOutput {
+    int totalCount;
+    int actualCount;
+};
+
+struct CeSymbolEntry {
+    uint64_t address;
+    int nameSize;
+};
+
+struct CeFindSymbolInput {
+    uint32_t hProcess;
+    uint64_t moduleBase;
+    int nameSize;
+};
+
+struct CeFindSymbolOutput {
+    int result;
+    uint64_t address;
 };
 
 #pragma pack()

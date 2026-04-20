@@ -30,30 +30,23 @@ jobs:
     - name: Setup Ninja
       uses: seanmiddleditch/gha-setup-ninja@v4
 
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgGitCommitId: 'c8696863d371ab7f46e213d8f5ca923c4aef2a00'
-
-    - name: Install Capstone and Keystone
-      run: |
-        vcpkg install capstone:x64-windows keystone:x64-windows
-      shell: bash
-
-    - name: Configure CMake
+    - name: Configure CMake (without optional dependencies)
       run: |
         cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
           -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE \
           -DCMAKE_C_COMPILER="${{ runner.temp }}/llvm/bin/clang.exe" \
           -DCMAKE_CXX_COMPILER="${{ runner.temp }}/llvm/bin/clang++.exe" \
-          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-          -Dcapstone_ROOT="${{ github.workspace }}/vcpkg/installed/x64-windows" \
-          -Dkeystone_ROOT="${{ github.workspace }}/vcpkg/installed/x64-windows" \
           -S . -B build -G Ninja
       shell: bash
 
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }}
+      shell: bash
+
+    - name: Copy runtime DLLs
+      run: |
+        # 项目中已有预编译的 DLL，确保它们在输出目录
+        ls -la bin/
       shell: bash
 
     - name: Upload artifacts

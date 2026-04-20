@@ -2,7 +2,9 @@
 
 #include "../socket/client_singleton.h"
 #include <atomic>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <mutex>
 #include <cstdint>
@@ -31,8 +33,20 @@ public:
     const std::string& selectedName = selectedName_;
 
     // 模块缓存
+    struct SymbolInfoItem {
+        uint64_t address = 0;
+        std::string name;
+    };
+
     struct ModuleCache {
+        struct SymbolListCacheEntry {
+            std::vector<SymbolInfoItem> symbols;
+            size_t lastMatchedIndex = 0;
+            bool valid = false;
+        };
+
         std::vector<ModuleInfoItem> modules;
+        std::unordered_map<uint64_t, SymbolListCacheEntry> symbolCacheByModuleBase;
         bool valid = false;
         double lastRefreshTime = 0.0;
         std::mutex mutex;
@@ -41,9 +55,14 @@ public:
         void refresh();
         ModuleInfoItem findByAddress(uint64_t addr);  // 返回值拷贝，避免悬空指针
         std::string formatWithModule(uint64_t addr);
+        std::string formatWithSymbol(uint64_t addr);
+        std::string formatAddressWithModuleAndSymbol(uint64_t addr);
+        bool tryFindContainingSymbol(uint64_t addr, SymbolInfoItem& outSymbol, uint64_t& outOffset);
+        bool ensureSymbolListCached(const ModuleInfoItem& module, std::vector<SymbolInfoItem>& outSymbols);
         void invalidate() {
             std::lock_guard<std::mutex> lock(mutex);
             valid = false;
+            symbolCacheByModuleBase.clear();
         }
     } moduleCache;
 

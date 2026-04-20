@@ -1,7 +1,5 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
-#include "../gui/AppContext.h"
-#include <iostream>
 #include <ctime>
 
 bool GetMemType(int &outType, PortType type) {
@@ -127,24 +125,25 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             return false;
         CeModuleListEntry entry{};
         outList.clear();
-        while (len > 0) {
+        for (int i = 0; i < len; ++i) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
-                break;
-            std::vector<char> name(entry.modulenamesize);
-            if (!client->Receive(name.data(), entry.modulenamesize))
-                break;
+                return false;
+            std::vector<char> name;
+            if (entry.modulenamesize > 0) {
+                name.resize(entry.modulenamesize);
+                if (!client->Receive(name.data(), entry.modulenamesize))
+                    return false;
+            }
             ModuleInfoItem mi{};
             mi.base = entry.modulebase;
             mi.size = entry.modulesize;
             mi.type = entry.result;
             mi.flag = entry.flag;
-            mi.name = "";
             if (entry.modulenamesize > 0) {
                 mi.name.assign(name.data(), entry.modulenamesize);
             }
             outList.push_back(std::move(mi));
-            len--;
         }
         return true;
     });

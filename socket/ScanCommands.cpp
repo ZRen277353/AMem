@@ -86,11 +86,12 @@ bool GetScanResult(int offset, int count,
         input.offset = offset; input.count = count;
         if (!client->Send(&input, sizeof(input)))
             return false;
-        CeGetScanResultOutput output;
+        CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        if (output.actual_count == 0)
-            return false;
+        results.clear();
+        if (output.actual_count <= 0)
+            return true;
         results.resize(output.actual_count);
         if (!client->Receive(results.data(), output.actual_count * sizeof(uint64_t) * 2))
             return false;
@@ -245,17 +246,23 @@ bool GetTypedScanResult(int offset, int count,
         input.offset = offset; input.count = count;
         if (!client->Send(&input, sizeof(input)))
             return false;
-        CeGetScanResultOutput output;
+        CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        if (output.actual_count == 0)
-            return false;
+        results.clear();
+        if (output.actual_count <= 0)
+            return true;
         for (int i = 0; i < output.actual_count; i++) {
-            uint64_t addr, value; short type;
-            client->Receive(&addr, sizeof(addr));
-            client->Receive(&value, sizeof(value));
-            client->Receive(&type, sizeof(type));
-            results.push_back(std::make_tuple(addr, value, type));
+            uint64_t addr = 0;
+            uint64_t value = 0;
+            short valueType = 0;
+            if (!client->Receive(&addr, sizeof(addr)))
+                return false;
+            if (!client->Receive(&value, sizeof(value)))
+                return false;
+            if (!client->Receive(&valueType, sizeof(valueType)))
+                return false;
+            results.push_back(std::make_tuple(addr, value, valueType));
         }
         return true;
     });

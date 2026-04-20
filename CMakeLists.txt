@@ -161,6 +161,7 @@ set(SOCKET_SOURCES
     socket/ScanCommands.cpp
     socket/BreakpointCommands.cpp
     socket/FreezeCommands.cpp
+    socket/SymbolCommands.cpp
 )
 
 set(RENDERER_SOURCES
