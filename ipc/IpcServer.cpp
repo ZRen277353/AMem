@@ -597,4 +597,55 @@ void IpcServer::RegisterBuiltinMethods() {
         return {{"success", true}, {"result", {{"address", oss.str()}}}};
     });
 
+    // ── symbol_init ────────────────────────────────────────────────
+    RegisterMethod("symbol_init", [](const json& p) -> json {
+        uint64_t moduleBase = ParseAddress(p, "module_base");
+        int totalCount = 0;
+        if (!SymbolInit(moduleBase, totalCount))
+            return {{"success", false}, {"error", "初始化符号表失败"}};
+        return {{"success", true}, {"result", {{"total_count", totalCount}}}};
+    });
+
+    // ── symbol_list ────────────────────────────────────────────────
+    RegisterMethod("symbol_list", [](const json& p) -> json {
+        int offset = p.value("offset", 0);
+        int count = p.value("count", 100);
+        if (offset < 0) offset = 0;
+        if (count < 0) count = 0;
+        if (count > 1000) count = 1000;
+
+        int totalCount = 0;
+        std::vector<std::pair<uint64_t, std::string>> symbols;
+        if (!SymbolGetList(offset, count, symbols, &totalCount))
+            return {{"success", false}, {"error", "获取符号列表失败，请先初始化符号表"}};
+
+        json arr = json::array();
+        for (const auto& [address, name] : symbols) {
+            std::ostringstream addrStr;
+            addrStr << "0x" << std::hex << address;
+            arr.push_back({
+                {"address", addrStr.str()},
+                {"name", name}
+            });
+        }
+        return {{"success", true}, {"result", {
+            {"total", totalCount},
+            {"offset", offset},
+            {"symbols", arr}
+        }}};
+    });
+
+    // ── symbol_find ────────────────────────────────────────────────
+    RegisterMethod("symbol_find", [](const json& p) -> json {
+        uint64_t moduleBase = ParseAddress(p, "module_base");
+        std::string name = p.at("name").get<std::string>();
+        uint64_t address = 0;
+        if (!SymbolFind(moduleBase, name, address) || address == 0)
+            return {{"success", false}, {"error", "查找符号失败"}};
+
+        std::ostringstream oss;
+        oss << "0x" << std::hex << address;
+        return {{"success", true}, {"result", {{"address", oss.str()}}}};
+    });
+
 } // RegisterBuiltinMethods

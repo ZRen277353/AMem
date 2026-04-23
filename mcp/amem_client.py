@@ -41,6 +41,9 @@ CMD_GETPROCESSLIST       = 247
 CMD_SETRANGE             = 248
 CMD_SCANNEXTVALUE        = 249
 CMD_SCANVALUE            = 250
+CMD_SYMBOL_FIND          = 215
+CMD_SYMBOL_GETLIST       = 216
+CMD_SYMBOL_INIT          = 217
 CMD_INITRWDRIVER         = 251
 
 # ── 数据类型 (MemoryTypes.h TYPE enum) ───────────────────────────
@@ -147,6 +150,12 @@ class BreakpointHit:
     sp: int = 0
     pc: int = 0
     pstate: int = 0
+
+
+@dataclass
+class SymbolInfo:
+    address: int = 0
+    name: str = ""
 
 
 # ── TCP 客户端 ───────────────────────────────────────────────────
@@ -269,17 +278,54 @@ class AMemClient:
         with self._lock:
             self._send_cmd_handle(CMD_GETMODULELIST)
             count = struct.unpack("<i", self._recv_all(4))[0]
+            if count < 0:
+                raise RuntimeError(f"模块列表数量非法: {count}")
             result = []
             for _ in range(count):
-                magic = struct.unpack("<i", self._recv_all(4))[0]
-                if magic != 0x1145:
-                    raise RuntimeError(f"模块列表 magic 错误: {magic:#x}")
-                # CeModuleListEntry: result(4) + flag(4) + base(8) + size(4) + namesize(4) = 24
                 data = self._recv_all(24)
                 mtype, mflag, mbase, msize, nlen = struct.unpack("<iiQii", data)
+                if nlen < 0:
+                    raise RuntimeError(f"模块名长度非法: {nlen}")
                 name = self._recv_all(nlen).decode("utf-8", errors="replace") if nlen > 0 else ""
                 result.append(ModuleInfo(mbase, msize, mtype, mflag, name))
             return result
+
+    def symbol_init(self, module_base: int) -> int:
+        with self._lock:
+            self._send_cmd(CMD_SYMBOL_INIT)
+            self._send_all(struct.pack("<IQ", self._handle, module_base))
+            result, total_count = struct.unpack("<ii", self._recv_all(8))
+            if result != 0:
+                raise RuntimeError(f"符号初始化失败: result={result}")
+            return total_count
+
+    def symbol_get_list(self, offset: int = 0, count: int = 100) -> tuple[int, list[SymbolInfo]]:
+        with self._lock:
+            self._send_cmd(CMD_SYMBOL_GETLIST)
+            self._send_all(struct.pack("<ii", offset, count))
+            total_count, actual_count = struct.unpack("<ii", self._recv_all(8))
+            if actual_count < 0:
+                raise RuntimeError(f"符号数量非法: {actual_count}")
+            result: list[SymbolInfo] = []
+            for _ in range(actual_count):
+                address, name_size = struct.unpack("<Qi", self._recv_all(12))
+                if name_size < 0:
+                    raise RuntimeError(f"符号名长度非法: {name_size}")
+                name = self._recv_all(name_size).decode("utf-8", errors="replace") if name_size > 0 else ""
+                result.append(SymbolInfo(address, name))
+            return total_count, result
+
+    def symbol_find(self, module_base: int, name: str) -> int:
+        with self._lock:
+            name_bytes = name.encode("utf-8")
+            self._send_cmd(CMD_SYMBOL_FIND)
+            self._send_all(struct.pack("<IQi", self._handle, module_base, len(name_bytes)))
+            if name_bytes:
+                self._send_all(name_bytes)
+            result, address = struct.unpack("<iQ", self._recv_all(12))
+            if result != 0:
+                return 0
+            return address
 
     # ── 内存命令 ──────────────────────────────────────────────────
 
