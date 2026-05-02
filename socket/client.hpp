@@ -4,6 +4,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 #include <cstring>
 #include <cstdint>
@@ -327,6 +328,37 @@ public:
             totalReceived += received;
         }
         return true;
+    }
+
+    size_t DrainPending(size_t maxBytes = 16 * 1024 * 1024) {
+        if (!connected_ || sock_ == INVALID_SOCKET) return 0;
+
+        std::vector<char> buffer(4096);
+        size_t totalDrained = 0;
+        while (totalDrained < maxBytes) {
+            u_long pending = 0;
+            if (ioctlsocket(sock_, FIONREAD, &pending) == SOCKET_ERROR || pending == 0) {
+                break;
+            }
+
+            const size_t toRead = std::min<size_t>(
+                {buffer.size(), static_cast<size_t>(pending), maxBytes - totalDrained});
+            int received = ::recv(sock_, buffer.data(), static_cast<int>(toRead), 0);
+            if (received == SOCKET_ERROR) {
+                std::cerr << "drain recv() failed: " << WSAGetLastError() << std::endl;
+                break;
+            }
+            if (received == 0) {
+                connected_ = false;
+                break;
+            }
+            totalDrained += static_cast<size_t>(received);
+        }
+
+        if (totalDrained > 0) {
+            std::cerr << "Drained " << totalDrained << " stale socket bytes before request" << std::endl;
+        }
+        return totalDrained;
     }
 
     void Close() {

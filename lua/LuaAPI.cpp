@@ -309,10 +309,16 @@ int LuaAPI::SetBreakpoint(lua_State* L) {
     uint32_t bpSize = static_cast<uint32_t>(luaL_optinteger(L, 3, 4));
 
     uint32_t typeFlag = 0;
-    if (strcmp(bpType, "execute") == 0) typeFlag = 0;
-    else if (strcmp(bpType, "write") == 0) typeFlag = 1;
-    else if (strcmp(bpType, "read") == 0) typeFlag = 2;
-    else if (strcmp(bpType, "access") == 0) typeFlag = 3;
+    if (strcmp(bpType, "execute") == 0) typeFlag = 4;
+    else if (strcmp(bpType, "write") == 0) typeFlag = 2;
+    else if (strcmp(bpType, "read") == 0) typeFlag = 1;
+    else if (strcmp(bpType, "access") == 0 || strcmp(bpType, "readwrite") == 0) typeFlag = 3;
+    else {
+        LuaAPI::PushError(L, "Invalid breakpoint type");
+        return 2;
+    }
+
+    if (typeFlag == 4) bpSize = 4;
 
     bool success = SetKernelBreakpoint(address, typeFlag, bpSize);
     lua_pushboolean(L, success ? 1 : 0);

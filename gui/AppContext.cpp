@@ -6,6 +6,7 @@
 
 void AppContext::selectProcess(int pid, const std::string& name) {
     selectedPid.store(pid, std::memory_order_relaxed);
+    processHandle.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(nameMutex_);
         selectedName_ = name;

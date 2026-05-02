@@ -21,6 +21,7 @@ bool execute(PortType port, Func&& fn) {
     auto* portMutex = GetSocketMgr().GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
+            client->DrainPending();
             return fn(client, handle);
         });
 }
@@ -35,6 +36,7 @@ bool executeNoHandle(PortType port, Func&& fn) {
     auto* portMutex = GetSocketMgr().GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
+            client->DrainPending();
             return fn(client);
         });
 }
@@ -52,6 +54,7 @@ int executeWithResult(PortType port, Func&& fn) {
     auto* portMutex = GetSocketMgr().GetMutex(port);
     bool success = SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
+            client->DrainPending();
             return fn(client, handle, result);
         });
     return success ? result : 0;

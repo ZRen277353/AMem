@@ -249,6 +249,13 @@ void BreakpointWindow::addBreakpoint(uint64_t address, BreakpointType type, Brea
         return;
     }
 
+    auto existing = std::find_if(breakpoints.begin(), breakpoints.end(),
+        [address](const BreakpointInfo& bp) { return bp.address == address; });
+    if (existing != breakpoints.end()) {
+        Gui::log("断点已存在: 0x%llX", address);
+        return;
+    }
+
     if (SetKernelBreakpoint(address, (uint32_t)type, (uint32_t)size)) {
         BreakpointInfo bp;
         bp.address = address;
@@ -276,6 +283,7 @@ void BreakpointWindow::removeBreakpoint(int index)
             Gui::log("断点已移除: 0x%llX", bp.address);
         } else {
             Gui::log("移除断点失败: 0x%llX", bp.address);
+            return;
         }
     }
 

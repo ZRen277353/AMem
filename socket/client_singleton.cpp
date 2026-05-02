@@ -28,6 +28,7 @@ std::mutex *WinSocketClientMgr::GetMutex(PortType type) {
 bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port) {
   std::cout << "[MultiPort] Connecting to server..." << std::endl;
   std::cout << "  Main:  " << host << ":" << Port << std::endl;
+  AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
 
   if (!m_main_client.Connect(host, Port)) {
     std::cerr << "[MultiPort] Failed to connect MAIN port" << std::endl;
@@ -56,6 +57,7 @@ void WinSocketClientMgr::DisconnectMultiPort() {
   m_main_client.Close();
   m_debug_client.Close();
   m_error_client.Close();
+  AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
   m_connected.store(false, std::memory_order_release);
   std::cout << "[MultiPort] All ports disconnected" << std::endl;
 }
@@ -85,6 +87,7 @@ bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
   auto portMutex = GetSocketMgr().GetMutex(type);
   return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
       portMutex, [&]() -> bool {
+        client->DrainPending();
 #pragma pack(1)
         struct { unsigned char command; int pid; } op;
 #pragma pack()

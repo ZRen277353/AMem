@@ -370,7 +370,10 @@ def set_breakpoint(address: str, bp_type: int = 1, bp_size: int = 4) -> str:
         bp_type: 断点类型 (1=执行, 2=写入, 3=读写)
         bp_size: 监控大小 (1/2/4/8 字节)
     """
-    ipc.call_or_raise("set_breakpoint", {"address": address, "bp_type": bp_type, "bp_size": bp_size})
+    bp_type_map = {1: 4, 2: 2, 3: 3}
+    wire_type = bp_type_map.get(bp_type, bp_type)
+    wire_size = 4 if wire_type == 4 else bp_size
+    ipc.call_or_raise("set_breakpoint", {"address": address, "bp_type": wire_type, "bp_size": wire_size})
     return f"断点 {address} 设置成功"
 
 
