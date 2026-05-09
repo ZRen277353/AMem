@@ -13,6 +13,9 @@
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
 #endif
+#ifdef HAVE_AI_CHAT
+#include "ai/ChatWindow.h"
+#endif
 #include "ServerConnectWindow.h"
 #include <algorithm>
 #include <sstream>
@@ -64,6 +67,11 @@ void CEWindow::drawMenuBar()
                 openServerConnectWindow();
             if (ImGui::MenuItem("日志"))
                 openLogWindow();
+#ifdef HAVE_AI_CHAT
+            ImGui::Separator();
+            if (ImGui::MenuItem("AI 聊天"))
+                openAIChatWindow();
+#endif
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -255,3 +263,10 @@ void CEWindow::openLogWindow()
 {
     Gui::getOrCreate<LogWindow>();
 }
+
+#ifdef HAVE_AI_CHAT
+void CEWindow::openAIChatWindow()
+{
+    Gui::getOrCreate<AI::ChatWindow>();
+}
+#endif

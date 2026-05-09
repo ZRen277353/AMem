@@ -21,6 +21,9 @@ set(CMAKE_CXX_STANDARD 17)
 option(USE_DX11 "Use DirectX 11 backend" OFF)
 option(USE_DX12 "Use DirectX 12 backend" ON)
 
+# AI 聊天集成选项（Requirement 13.4）
+option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
+
 # 生成版本信息头文件
 string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
 string(TIMESTAMP BUILD_TIME "%H:%M:%S")
@@ -85,6 +88,62 @@ else()
     set(HAVE_KEYSTONE FALSE)
     message(WARNING "Keystone not found! Assembly features will be disabled.")
 endif()
+
+# ==================== AI Chat Integration ====================
+# Requirements: 13.1, 13.2, 13.3, 13.4, 13.5
+set(HAVE_AI_CHAT FALSE)
+if(ENABLE_AI_CHAT)
+    set(HTTPLIB_HEADER "${CMAKE_SOURCE_DIR}/third_party/httplib/httplib.h")
+    set(NLOHMANN_JSON_HEADER "${CMAKE_SOURCE_DIR}/third_party/nlohmann/json.hpp")
+
+    if(EXISTS "${HTTPLIB_HEADER}" AND EXISTS "${NLOHMANN_JSON_HEADER}")
+        # cpp-httplib 需要 OpenSSL 才能支持 HTTPS（CPPHTTPLIB_OPENSSL_SUPPORT）
+        if(NOT OPENSSL_ROOT_DIR AND EXISTS "C:/vcpkg/installed/x64-windows/include/openssl/ssl.h")
+            set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows")
+        endif()
+        find_package(OpenSSL QUIET)
+
+        if(OPENSSL_FOUND)
+            set(HAVE_AI_CHAT TRUE)
+            message(STATUS "AI chat enabled: cpp-httplib + nlohmann/json + OpenSSL found")
+        else()
+            message(WARNING "AI chat features will be disabled: OpenSSL not found (required for HTTPS). Install via 'vcpkg install openssl:x64-windows'.")
+        endif()
+    else()
+        if(NOT EXISTS "${HTTPLIB_HEADER}")
+            message(WARNING "AI chat features will be disabled: cpp-httplib header not found at ${HTTPLIB_HEADER}")
+        endif()
+        if(NOT EXISTS "${NLOHMANN_JSON_HEADER}")
+            message(WARNING "AI chat features will be disabled: nlohmann/json header not found at ${NLOHMANN_JSON_HEADER}")
+        endif()
+    endif()
+else()
+    message(WARNING "AI chat features explicitly disabled via ENABLE_AI_CHAT=OFF")
+endif()
+
+# AI 聊天模块源文件列表（部分文件由后续任务实现，使用 EXISTS 过滤以避免配置期错误）
+set(AI_CHAT_SOURCES_CANDIDATES
+    gui/ai/ProviderRegistry.cpp
+    gui/ai/HttpClient.cpp
+    gui/ai/UIMessageQueue.cpp
+    gui/ai/OpenAIProvider.cpp
+    gui/ai/ClaudeProvider.cpp
+    gui/ai/DeepSeekProvider.cpp
+    gui/ai/ToolExecutor.cpp
+    gui/ai/ToolDefinitions.cpp
+    gui/ai/ChatSession.cpp
+    gui/ai/ApiKeyStore.cpp
+    gui/ai/AiSettings.cpp
+    gui/ai/SessionManager.cpp
+    gui/ai/ChatWindow.cpp
+    gui/ai/ChatWindowSettings.cpp
+)
+set(AI_CHAT_SOURCES "")
+foreach(_ai_src IN LISTS AI_CHAT_SOURCES_CANDIDATES)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/${_ai_src}")
+        list(APPEND AI_CHAT_SOURCES "${_ai_src}")
+    endif()
+endforeach()
 
 set(IMGUI_SOURCES
     imgui/imgui.cpp
@@ -152,6 +211,10 @@ endif()
 
 if(HAVE_LUAJIT)
     list(APPEND GUI_SOURCES gui/LuaScriptWindow.cpp gui/LuaImGuiWindow.cpp)
+endif()
+
+if(HAVE_AI_CHAT)
+    list(APPEND GUI_SOURCES ${AI_CHAT_SOURCES})
 endif()
 
 set(SOCKET_SOURCES
@@ -267,4 +330,18 @@ if(HAVE_KEYSTONE)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${_keystone_bin_dir}/keystone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/keystone.dll")
     endif()
+endif()
+
+# 链接 AI 聊天依赖（Requirements 13.1, 13.3）
+if(HAVE_AI_CHAT)
+    target_compile_definitions(ImGuiProject PRIVATE
+        HAVE_AI_CHAT
+        CPPHTTPLIB_OPENSSL_SUPPORT
+    )
+    target_include_directories(ImGuiProject PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/httplib
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    # crypt32 for Windows DPAPI (CryptProtectData/CryptUnprotectData in ApiKeyStore)
+    target_link_libraries(ImGuiProject OpenSSL::SSL OpenSSL::Crypto crypt32)
 endif()

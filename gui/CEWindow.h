@@ -34,6 +34,9 @@ private:
     void openLuaScriptWindow();
     void openServerConnectWindow();
     void openLogWindow();
+#ifdef HAVE_AI_CHAT
+    void openAIChatWindow();
+#endif
 
     // 状态变量
     bool openProcessModal = false;

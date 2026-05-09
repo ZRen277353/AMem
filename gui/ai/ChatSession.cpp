@@ -1,0 +1,456 @@
+#ifdef HAVE_AI_CHAT
+
+#include "ChatSession.h"
+
+#include "../Gui.h"
+#include "../../third_party/nlohmann/json.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdio>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <system_error>
+
+namespace AI {
+
+namespace {
+
+// ---- Role <-> string helpers -----------------------------------------------
+
+const char* roleToString(Role r) {
+    switch (r) {
+        case Role::System:    return "system";
+        case Role::User:      return "user";
+        case Role::Assistant: return "assistant";
+        case Role::Tool:      return "tool";
+    }
+    return "user";
+}
+
+Role stringToRole(const std::string& s, Role fallback = Role::User) {
+    if (s == "system")    return Role::System;
+    if (s == "user")      return Role::User;
+    if (s == "assistant") return Role::Assistant;
+    if (s == "tool")      return Role::Tool;
+    return fallback;
+}
+
+// ---- JSON (de)serialization of a single message ----------------------------
+
+nlohmann::json messageToJson(const ChatMessage& msg) {
+    nlohmann::json j;
+    j["role"]    = roleToString(msg.role);
+    j["content"] = msg.content;
+    if (!msg.toolCalls.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& tc : msg.toolCalls) {
+            nlohmann::json tj;
+            tj["id"]        = tc.id;
+            tj["name"]      = tc.name;
+            tj["arguments"] = tc.arguments;
+            arr.push_back(std::move(tj));
+        }
+        j["toolCalls"] = std::move(arr);
+    }
+    if (!msg.toolCallId.empty()) j["toolCallId"] = msg.toolCallId;
+    if (!msg.name.empty())       j["name"]       = msg.name;
+    if (msg.timestamp != 0)      j["timestamp"]  = msg.timestamp;
+    if (msg.durationMs != 0)     j["durationMs"] = msg.durationMs;
+    return j;
+}
+
+ChatMessage messageFromJson(const nlohmann::json& j) {
+    ChatMessage msg;
+    if (j.contains("role") && j["role"].is_string()) {
+        msg.role = stringToRole(j["role"].get<std::string>());
+    }
+    if (j.contains("content") && j["content"].is_string()) {
+        msg.content = j["content"].get<std::string>();
+    }
+    if (j.contains("toolCalls") && j["toolCalls"].is_array()) {
+        for (const auto& tj : j["toolCalls"]) {
+            ToolCall tc;
+            if (tj.contains("id") && tj["id"].is_string())
+                tc.id = tj["id"].get<std::string>();
+            if (tj.contains("name") && tj["name"].is_string())
+                tc.name = tj["name"].get<std::string>();
+            if (tj.contains("arguments") && tj["arguments"].is_string())
+                tc.arguments = tj["arguments"].get<std::string>();
+            msg.toolCalls.push_back(std::move(tc));
+        }
+    }
+    if (j.contains("toolCallId") && j["toolCallId"].is_string())
+        msg.toolCallId = j["toolCallId"].get<std::string>();
+    if (j.contains("name") && j["name"].is_string())
+        msg.name = j["name"].get<std::string>();
+    if (j.contains("timestamp") && j["timestamp"].is_number_integer())
+        msg.timestamp = j["timestamp"].get<long long>();
+    if (j.contains("durationMs") && j["durationMs"].is_number_integer())
+        msg.durationMs = j["durationMs"].get<long long>();
+    return msg;
+}
+
+} // namespace
+
+// ---- ChatSession -----------------------------------------------------------
+
+ChatSession::ChatSession() = default;
+
+void ChatSession::addMessage(ChatMessage msg) {
+    std::string persistPath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        messages_.push_back(std::move(msg));
+
+        // Enforce hard message cap (AC 8.1) by dropping the oldest entries.
+        if (messages_.size() > static_cast<size_t>(kMaxMessages)) {
+            const size_t excess = messages_.size() - static_cast<size_t>(kMaxMessages);
+            messages_.erase(messages_.begin(),
+                            messages_.begin() + static_cast<std::ptrdiff_t>(excess));
+        }
+
+        // Enforce token-limit truncation (AC 8.3).
+        truncateIfNeededUnlocked();
+
+        persistPath = sessionFilePath_;
+    }
+
+    // Auto-persist outside the lock to avoid holding it during file I/O.
+    // We grab the path under the lock, then re-lock inside save() for the
+    // actual serialization snapshot.
+    if (!persistPath.empty()) {
+        save(persistPath);
+    }
+}
+
+const std::vector<ChatMessage>& ChatSession::getMessages() const {
+    // NOTE: returns a reference; callers are expected to read from the UI
+    // thread only. The mutex exists for robustness against background writes
+    // but cannot protect lifetime of the returned reference. This matches
+    // the design's "ChatWindow owns ChatSession on the main thread" model.
+    return messages_;
+}
+
+void ChatSession::clearHistory() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clearHistoryUnlocked();
+}
+
+void ChatSession::resetInMemory() {
+    // Drop in-memory content but leave both the persisted file and the
+    // sessionFilePath_ binding alone — the caller is about to load a
+    // different session's file and we must not clobber the previous
+    // session's on-disk history.
+    std::lock_guard<std::mutex> lock(mutex_);
+    messages_.clear();
+}
+
+void ChatSession::setSessionFilePath(const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sessionFilePath_ = filepath;
+}
+
+void ChatSession::clearHistoryUnlocked() {
+    messages_.clear();
+
+    // Delete the persisted session file so history truly goes away (AC 8.4).
+    if (!sessionFilePath_.empty()) {
+        std::error_code ec;
+        std::filesystem::path p(sessionFilePath_);
+        if (std::filesystem::exists(p, ec)) {
+            std::filesystem::remove(p, ec);
+            if (ec) {
+                Gui::log("[ChatSession] failed to delete session file '%s': %s",
+                         sessionFilePath_.c_str(), ec.message().c_str());
+            }
+        }
+    }
+}
+
+void ChatSession::setSystemPrompt(const std::string& prompt) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Silently clamp to kMaxSystemPromptChars per AC 8.2 ("maximum 4000 chars").
+    if (prompt.size() > static_cast<size_t>(kMaxSystemPromptChars)) {
+        systemPrompt_ = prompt.substr(0, static_cast<size_t>(kMaxSystemPromptChars));
+    } else {
+        systemPrompt_ = prompt;
+    }
+}
+
+const std::string& ChatSession::getSystemPrompt() const {
+    return systemPrompt_;
+}
+
+void ChatSession::setTokenLimit(int limit) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Clamp to [kMinTokenLimit, kMaxTokenLimit]. Ceiling was raised to
+    // 1,000,000 so the UI knob can target long-context models; the
+    // original 200,000 cap predated the 1M-token providers.
+    if (limit < kMinTokenLimit)      limit = kMinTokenLimit;
+    else if (limit > kMaxTokenLimit) limit = kMaxTokenLimit;
+    tokenLimit_ = limit;
+    truncateIfNeededUnlocked();
+}
+
+int ChatSession::getTokenLimit() const {
+    return tokenLimit_;
+}
+
+int ChatSession::estimateTokenCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return estimateTokenCountUnlocked();
+}
+
+int ChatSession::estimateTokenCountUnlocked() const {
+    // AC 8.8: total character count / 4.
+    // We include the system prompt because it is prepended to every request
+    // and therefore consumes context tokens, and include tool_call fields
+    // because they are serialized into the outgoing payload.
+    std::size_t chars = systemPrompt_.size();
+    for (const auto& m : messages_) {
+        chars += m.content.size();
+        chars += m.toolCallId.size();
+        chars += m.name.size();
+        for (const auto& tc : m.toolCalls) {
+            chars += tc.id.size();
+            chars += tc.name.size();
+            chars += tc.arguments.size();
+        }
+    }
+    const std::size_t tokens = chars / 4;
+    if (tokens > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(tokens);
+}
+
+void ChatSession::truncateIfNeeded() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    truncateIfNeededUnlocked();
+}
+
+void ChatSession::truncateIfNeededUnlocked() {
+    // AC 8.3: remove oldest messages one at a time until within the limit,
+    // preserving the most recent user message. The system prompt is stored
+    // outside messages_ so it is inherently preserved.
+    if (messages_.empty()) return;
+
+    // Locate the most recent user message (by index from the front). If no
+    // user message exists, we still truncate from the front.
+    auto findLatestUserIndex = [&]() -> std::size_t {
+        for (std::size_t i = messages_.size(); i > 0; --i) {
+            if (messages_[i - 1].role == Role::User) return i - 1;
+        }
+        return static_cast<std::size_t>(-1);
+    };
+
+    std::size_t latestUserIdx = findLatestUserIndex();
+
+    while (messages_.size() > 1 && estimateTokenCountUnlocked() > tokenLimit_) {
+        // Never drop the most recent user message: if it sits at index 0
+        // there is nothing else we can remove without violating AC 8.3.
+        if (latestUserIdx == 0) break;
+
+        messages_.erase(messages_.begin());
+        if (latestUserIdx != static_cast<std::size_t>(-1)) {
+            --latestUserIdx;
+        }
+    }
+}
+
+std::vector<ChatMessage> ChatSession::getMessagesForRequest() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ChatMessage> out;
+    out.reserve(messages_.size() + (systemPrompt_.empty() ? 0 : 1));
+
+    if (!systemPrompt_.empty()) {
+        ChatMessage sys;
+        sys.role = Role::System;
+        sys.content = systemPrompt_;
+        out.push_back(std::move(sys));
+    }
+    for (const auto& m : messages_) {
+        out.push_back(m);
+    }
+    return out;
+}
+
+// ---- Persistence -----------------------------------------------------------
+
+bool ChatSession::save(const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool ok = saveUnlocked(filepath);
+    if (ok) {
+        sessionFilePath_ = filepath;
+    }
+    return ok;
+}
+
+bool ChatSession::saveUnlocked(const std::string& filepath) const {
+    nlohmann::json root;
+    root["version"]      = 1;
+    root["systemPrompt"] = systemPrompt_;
+    root["tokenLimit"]   = tokenLimit_;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& m : messages_) {
+        arr.push_back(messageToJson(m));
+    }
+    root["messages"] = std::move(arr);
+
+    // Write atomically: serialize to `<filepath>.tmp`, then rename over the
+    // target. This prevents a crash mid-write from leaving a truncated JSON
+    // file that would later be rejected by load().
+    const std::filesystem::path targetPath(filepath);
+    std::filesystem::path tmpPath = targetPath;
+    tmpPath += ".tmp";
+
+    try {
+        std::error_code mkec;
+        if (targetPath.has_parent_path()) {
+            std::filesystem::create_directories(targetPath.parent_path(), mkec);
+            // create_directories failing is non-fatal here; the subsequent
+            // ofstream open will report the real error if the dir is missing.
+        }
+
+        {
+            std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!ofs.is_open()) {
+                Gui::log("[ChatSession] failed to open '%s' for writing",
+                         tmpPath.string().c_str());
+                return false;
+            }
+            ofs << root.dump(2);
+            if (!ofs.good()) {
+                Gui::log("[ChatSession] write failed for '%s'",
+                         tmpPath.string().c_str());
+                return false;
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::rename(tmpPath, targetPath, ec);
+        if (ec) {
+            // Rename across volumes or when destination exists+locked may fail;
+            // fall back to copy+remove.
+            std::filesystem::copy_file(
+                tmpPath, targetPath,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                Gui::log("[ChatSession] failed to persist '%s': %s",
+                         targetPath.string().c_str(), ec.message().c_str());
+                std::error_code rmec;
+                std::filesystem::remove(tmpPath, rmec);
+                return false;
+            }
+            std::error_code rmec;
+            std::filesystem::remove(tmpPath, rmec);
+        }
+    } catch (const std::exception& e) {
+        Gui::log("[ChatSession] exception while saving '%s': %s",
+                 filepath.c_str(), e.what());
+        std::error_code rmec;
+        std::filesystem::remove(tmpPath, rmec);
+        return false;
+    }
+
+    return true;
+}
+
+bool ChatSession::load(const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Always remember the target path so future addMessage() calls auto-persist
+    // even when the initial file is missing or corrupt.
+    sessionFilePath_ = filepath;
+    return loadUnlocked(filepath);
+}
+
+bool ChatSession::loadUnlocked(const std::string& filepath) {
+    std::error_code ec;
+    if (!std::filesystem::exists(filepath, ec)) {
+        // Missing file is a legitimate state — a session may have been
+        // freshly created via SessionManager::create() and simply not
+        // persisted any messages yet. Silently clear in-memory state and
+        // return false; the caller still gets the "nothing was loaded"
+        // signal via the return value, and auto-persistence via
+        // addMessage() will create the file on first append.
+        messages_.clear();
+        return false;
+    }
+
+    std::ifstream ifs(filepath, std::ios::binary);
+    if (!ifs.is_open()) {
+        Gui::log("[ChatSession] could not open '%s' for reading; starting empty",
+                 filepath.c_str());
+        messages_.clear();
+        return false;
+    }
+
+    nlohmann::json root;
+    try {
+        ifs >> root;
+    } catch (const std::exception& e) {
+        // AC 8.7: invalid JSON -> start empty and log a warning.
+        Gui::log("[ChatSession] invalid JSON in '%s' (%s); starting empty",
+                 filepath.c_str(), e.what());
+        messages_.clear();
+        return false;
+    }
+
+    try {
+        if (!root.is_object()) {
+            throw std::runtime_error("root is not a JSON object");
+        }
+
+        if (root.contains("systemPrompt") && root["systemPrompt"].is_string()) {
+            std::string prompt = root["systemPrompt"].get<std::string>();
+            if (prompt.size() > static_cast<size_t>(kMaxSystemPromptChars)) {
+                prompt.resize(static_cast<size_t>(kMaxSystemPromptChars));
+            }
+            systemPrompt_ = std::move(prompt);
+        }
+
+        if (root.contains("tokenLimit") && root["tokenLimit"].is_number_integer()) {
+            int limit = root["tokenLimit"].get<int>();
+            if (limit < kMinTokenLimit)      limit = kMinTokenLimit;
+            else if (limit > kMaxTokenLimit) limit = kMaxTokenLimit;
+            tokenLimit_ = limit;
+        }
+
+        messages_.clear();
+        if (root.contains("messages") && root["messages"].is_array()) {
+            const auto& arr = root["messages"];
+            messages_.reserve(arr.size());
+            for (const auto& mj : arr) {
+                if (mj.is_object()) {
+                    messages_.push_back(messageFromJson(mj));
+                }
+            }
+            // Enforce retention cap in case the persisted file pre-dates the
+            // limit or was edited externally.
+            if (messages_.size() > static_cast<size_t>(kMaxMessages)) {
+                const size_t excess =
+                    messages_.size() - static_cast<size_t>(kMaxMessages);
+                messages_.erase(
+                    messages_.begin(),
+                    messages_.begin() + static_cast<std::ptrdiff_t>(excess));
+            }
+        }
+    } catch (const std::exception& e) {
+        Gui::log("[ChatSession] malformed session in '%s' (%s); starting empty",
+                 filepath.c_str(), e.what());
+        messages_.clear();
+        return false;
+    }
+
+    return true;
+}
+
+} // namespace AI
+
+#endif // HAVE_AI_CHAT
