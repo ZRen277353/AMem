@@ -3,3 +3,6 @@ build
 bin/CrashDumps
 .claude
 nul
+.vscode
+bin/imgui.ini
+bin/ImGuiProject.pdb
