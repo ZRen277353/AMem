@@ -8,14 +8,14 @@ namespace AI {
 // OpenAI Chat Completions Provider.
 //
 // Default base URL is overridden by user request to point at a proxy
-// ("https://superapi.buzz/v1") rather than the public OpenAI endpoint.
+// ("https://ai.ikik.net/v1") rather than the public OpenAI endpoint.
 // The provider name remains "openai" for compatibility with the
 // ProviderRegistry and existing configs.
 class OpenAIProvider : public AIProvider {
 public:
     std::string getName() const override { return "openai"; }
     std::string getDefaultBaseUrl() const override {
-        return "https://superapi.buzz/v1";
+        return "https://ai.ikik.net/v1";
     }
     ProviderCapabilities getCapabilities() const override {
         return { true, true, 128000 };

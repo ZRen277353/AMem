@@ -282,8 +282,8 @@ void ApiKeyStore::seedDefaultsIfEmpty() {
     // so a fresh install can start chatting without first walking through
     // the settings panel. The user can override any field via the UI.
     ProviderConfig seed;
-    seed.apiKey = "sk-FOcDSNqqKdWsyOQ0lrv4A4q97tKvHmulyOjTVcyuyEgTV8oQ";
-    seed.baseUrl = "https://superapi.buzz/v1";
+    seed.apiKey = "sk-mnVq3ahItPaRyRGbtFEdIZTH4JBGFeS0vgf3Y6k1POCB5Kpb";
+    seed.baseUrl = "https://ai.ikik.net/v1";
     seed.model = "gpt-5.4";
     seed.apiVersion = "";
     storeConfigLocked("openai", seed);
