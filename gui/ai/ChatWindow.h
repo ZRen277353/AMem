@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "../Window.h"
+#include "AgentRunner.h"
 #include "AIProvider.h"
 #include "ChatSession.h"
 
@@ -67,6 +68,7 @@ private:
     // ---- per-frame UI drawing ------------------------------------------
     void drawToolbar();
     void drawMessageArea();
+    void drawAgentActivityPanel();
     void drawInputArea();
     void drawToolConfirmationModal();
 
@@ -82,7 +84,15 @@ private:
 
     // ---- tool-execution flow (task 8.3 fleshes these out) --------------
     void processToolCalls(const std::vector<ToolCall>& calls);
-    void executeNextToolCall();
+    void handleAgentOutcome(AgentRunner::Outcome outcome);
+    void sendFollowUpAfterTools();
+    AgentRunner::Config makeAgentConfig() const;
+    void addAgentTraceEvent(AgentTraceType type,
+                            const std::string& detail = {},
+                            const std::string& tool = {},
+                            long long durationMs = 0);
+    void appendAgentTraceEvents(std::vector<AgentTraceEvent> events);
+    void clearAgentTrace();
 
     // ---- session switching --------------------------------------------
     // Load the session identified by `id` into session_, replacing the
@@ -146,18 +156,14 @@ private:
     size_t lastRenderedMessageCount_ = 0;
     size_t lastStreamingContentLen_ = 0;
 
-    // Pending tool_call pipeline. When a Completion message arrives with
-    // tool_calls, processToolCalls() copies them here and
-    // executeNextToolCall() consumes them one at a time.
-    std::vector<ToolCall> pendingToolCalls_;
-    int currentToolCallIndex_ = 0;
-    int agentStepCount_ = 0;
+    AgentRunner agentRunner_;
+    std::vector<AgentTraceEvent> agentTrace_;
     int maxAgentSteps_ = 12;
     int maxToolCallsPerTurn_ = 16;
 
     // Request-timing state. `requestStartMs_` is a steady_clock epoch in
-    // milliseconds captured when a request is dispatched (sendMessage /
-    // executeNextToolCall follow-up); the completion handler uses it to
+    // milliseconds captured when a request is dispatched. The completion
+    // handler uses it to
     // compute durationMs on the assistant message. 0 means "no request
     // in flight" so the live "thinking for Xs" indicator can hide.
     long long requestStartMs_ = 0;

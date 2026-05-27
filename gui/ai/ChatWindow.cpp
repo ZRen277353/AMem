@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -147,39 +148,59 @@ const char* stateLabel(ChatWindow* /*unused*/, int stateValue) {
     }
 }
 
-ChatMessage makeToolMessage(const ToolCall& tc, const ToolResult& result, long long durationMs) {
-    ChatMessage toolMsg;
-    toolMsg.role = Role::Tool;
-    toolMsg.toolCallId = tc.id;
-    toolMsg.name = tc.name;
-    toolMsg.timestamp = nowUnixSeconds();
-    toolMsg.durationMs = durationMs;
-
-    nlohmann::json audit;
-    audit["tool"] = tc.name;
-    audit["success"] = result.success;
-    audit["duration_ms"] = durationMs;
-    try {
-        audit["arguments"] = tc.arguments.empty()
-                                 ? nlohmann::json::object()
-                                 : nlohmann::json::parse(tc.arguments);
-    } catch (const nlohmann::json::exception&) {
-        audit["arguments_raw"] = tc.arguments;
+const char* traceTypeLabel(AgentTraceType type) {
+    switch (type) {
+        case AgentTraceType::Started:            return "started";
+        case AgentTraceType::CallLimitTruncated: return "limited";
+        case AgentTraceType::StepLimitReached:   return "stopped";
+        case AgentTraceType::AwaitingApproval:   return "approval";
+        case AgentTraceType::Approved:           return "approved";
+        case AgentTraceType::Denied:             return "denied";
+        case AgentTraceType::AutoApproved:       return "auto-approved";
+        case AgentTraceType::ToolStarted:        return "tool";
+        case AgentTraceType::ToolSucceeded:      return "ok";
+        case AgentTraceType::ToolFailed:         return "failed";
+        case AgentTraceType::ToolBatchComplete:  return "tools done";
+        case AgentTraceType::FollowUpRequested:  return "follow-up";
+        case AgentTraceType::Completed:          return "completed";
+        case AgentTraceType::Cancelled:          return "cancelled";
+        case AgentTraceType::ProviderError:      return "error";
+        default:                                 return "event";
     }
+}
 
-    if (result.success) {
-        try {
-            audit["result"] = result.resultJson.empty()
-                                  ? nlohmann::json::object()
-                                  : nlohmann::json::parse(result.resultJson);
-        } catch (const nlohmann::json::exception&) {
-            audit["result_raw"] = result.resultJson;
-        }
-    } else {
-        audit["error"] = result.errorMessage;
+ImVec4 traceTypeColor(AgentTraceType type) {
+    switch (type) {
+        case AgentTraceType::ToolSucceeded:
+        case AgentTraceType::ToolBatchComplete:
+        case AgentTraceType::Completed:
+            return ColorScheme::Success;
+        case AgentTraceType::AwaitingApproval:
+        case AgentTraceType::CallLimitTruncated:
+        case AgentTraceType::AutoApproved:
+        case AgentTraceType::FollowUpRequested:
+            return ColorScheme::Warning;
+        case AgentTraceType::Denied:
+        case AgentTraceType::ToolFailed:
+        case AgentTraceType::StepLimitReached:
+        case AgentTraceType::Cancelled:
+        case AgentTraceType::ProviderError:
+            return ColorScheme::Error;
+        case AgentTraceType::Started:
+        case AgentTraceType::Approved:
+        case AgentTraceType::ToolStarted:
+        default:
+            return ColorScheme::Info;
     }
-    toolMsg.content = audit.dump();
-    return toolMsg;
+}
+
+void trimTraceEvents(std::vector<AgentTraceEvent>& events) {
+    constexpr size_t kMaxTraceEvents = 128;
+    if (events.size() > kMaxTraceEvents) {
+        events.erase(events.begin(),
+                     events.begin() +
+                         static_cast<std::ptrdiff_t>(events.size() - kMaxTraceEvents));
+    }
 }
 
 } // namespace
@@ -339,6 +360,7 @@ void ChatWindow::onDraw() {
 
     drawToolbar();
     drawSessionControls();
+    drawAgentActivityPanel();
     ImGui::Separator();
     drawMessageArea();
     drawInputArea();
@@ -495,9 +517,8 @@ void ChatWindow::switchToSession(const std::string& id) {
     // the newly-loaded session and corrupt it.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    pendingToolCalls_.clear();
-    currentToolCallIndex_ = 0;
-    agentStepCount_ = 0;
+    agentRunner_.reset();
+    clearAgentTrace();
     requestStartMs_ = 0;
     state_ = State::Idle;
 
@@ -536,9 +557,8 @@ void ChatWindow::createNewSession() {
     // touching the previous session's file on disk.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    pendingToolCalls_.clear();
-    currentToolCallIndex_ = 0;
-    agentStepCount_ = 0;
+    agentRunner_.reset();
+    clearAgentTrace();
     requestStartMs_ = 0;
     state_ = State::Idle;
     session_.resetInMemory();
@@ -559,9 +579,8 @@ void ChatWindow::deleteSession(const std::string& id) {
         // Clear in-memory state before switching; if sessions remain the
         // manager already picked a new active id, otherwise create one.
         streamingContent_.clear();
-        pendingToolCalls_.clear();
-        currentToolCallIndex_ = 0;
-        agentStepCount_ = 0;
+        agentRunner_.reset();
+        clearAgentTrace();
         requestStartMs_ = 0;
         state_ = State::Idle;
         session_.resetInMemory();
@@ -589,6 +608,32 @@ void ChatWindow::touchActiveSession() {
     SessionManager::getInstance().touch(activeSessionId_,
                                         static_cast<int>(msgs.size()),
                                         firstUser);
+}
+
+void ChatWindow::addAgentTraceEvent(AgentTraceType type,
+                                    const std::string& detail,
+                                    const std::string& tool,
+                                    long long durationMs) {
+    AgentTraceEvent ev;
+    ev.type = type;
+    ev.timestamp = nowUnixSeconds();
+    ev.step = agentRunner_.stepCount();
+    ev.tool = tool;
+    ev.detail = detail;
+    ev.durationMs = durationMs;
+    agentTrace_.push_back(std::move(ev));
+    trimTraceEvents(agentTrace_);
+}
+
+void ChatWindow::appendAgentTraceEvents(std::vector<AgentTraceEvent> events) {
+    for (auto& ev : events) {
+        agentTrace_.push_back(std::move(ev));
+    }
+    trimTraceEvents(agentTrace_);
+}
+
+void ChatWindow::clearAgentTrace() {
+    agentTrace_.clear();
 }
 
 void ChatWindow::drawToolbar() {
@@ -687,6 +732,70 @@ void ChatWindow::drawToolbar() {
         ImGui::TextUnformatted("[YOLO: writes auto-approved]");
         ImGui::PopStyleColor();
     }
+}
+
+void ChatWindow::drawAgentActivityPanel() {
+    if (agentTrace_.empty()) {
+        return;
+    }
+
+    const AgentTraceEvent& latest = agentTrace_.back();
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Agent");
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text, traceTypeColor(latest.type));
+    ImGui::TextUnformatted(traceTypeLabel(latest.type));
+    ImGui::PopStyleColor();
+
+    if (latest.step > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("step %d/%d", latest.step, maxAgentSteps_);
+    }
+    if (!latest.tool.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("tool: %s", latest.tool.c_str());
+    }
+    if (!latest.detail.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", latest.detail.c_str());
+    }
+
+    if (ImGui::BeginChild("##agent_activity", ImVec2(0.0f, 76.0f), true,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        const size_t visible =
+            agentTrace_.size() > 6 ? agentTrace_.size() - 6 : 0;
+        for (size_t i = visible; i < agentTrace_.size(); ++i) {
+            const AgentTraceEvent& ev = agentTrace_[i];
+            const std::string ts = formatLocalTime(ev.timestamp);
+            ImGui::TextDisabled("%s", ts.empty() ? "--:--:--" : ts.c_str());
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, traceTypeColor(ev.type));
+            ImGui::TextUnformatted(traceTypeLabel(ev.type));
+            ImGui::PopStyleColor();
+
+            if (ev.step > 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("s%d", ev.step);
+            }
+            if (ev.total > 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%d/%d", ev.index, ev.total);
+            }
+            if (!ev.tool.empty()) {
+                ImGui::SameLine();
+                ImGui::TextUnformatted(ev.tool.c_str());
+            }
+            if (ev.durationMs > 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", formatDuration(ev.durationMs).c_str());
+            }
+            if (!ev.detail.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", ev.detail.c_str());
+            }
+        }
+    }
+    ImGui::EndChild();
 }
 
 void ChatWindow::drawInputArea() {
@@ -818,9 +927,11 @@ void ChatWindow::sendMessage() {
     ++inputGeneration_;
     refocusInput_ = true;
     streamingContent_.clear();
-    pendingToolCalls_.clear();
-    currentToolCallIndex_ = 0;
-    agentStepCount_ = 0;
+    agentRunner_.reset();
+    clearAgentTrace();
+    addAgentTraceEvent(AgentTraceType::Started,
+                       "model request dispatched",
+                       currentProvider_);
     cancelFlag_.store(false);
     // Start the latency timer; pollMessages will stamp the assistant
     // response with the elapsed delta when Completion arrives.
@@ -864,7 +975,8 @@ void ChatWindow::cancelRequest() {
     session_.addMessage(std::move(notice));
 
     requestStartMs_ = 0;
-    agentStepCount_ = 0;
+    addAgentTraceEvent(AgentTraceType::Cancelled, "request cancelled");
+    agentRunner_.reset();
     state_ = State::Idle;
 }
 
@@ -873,9 +985,8 @@ void ChatWindow::clearHistory() {
     // doesn't re-add a stale assistant message after the clear.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    pendingToolCalls_.clear();
-    currentToolCallIndex_ = 0;
-    agentStepCount_ = 0;
+    agentRunner_.reset();
+    clearAgentTrace();
     state_ = State::Idle;
     session_.clearHistory();
     touchActiveSession();
@@ -930,7 +1041,9 @@ void ChatWindow::pollMessages() {
                     processToolCalls(calls);
                 } else {
                     requestStartMs_ = 0;
-                    agentStepCount_ = 0;
+                    addAgentTraceEvent(AgentTraceType::Completed,
+                                       "assistant response completed");
+                    agentRunner_.reset();
                     state_ = State::Idle;
                 }
                 break;
@@ -944,7 +1057,8 @@ void ChatWindow::pollMessages() {
                 Gui::log("[AI Chat] error: %s", msg.data.c_str());
                 streamingContent_.clear();
                 requestStartMs_ = 0;
-                agentStepCount_ = 0;
+                addAgentTraceEvent(AgentTraceType::ProviderError, msg.data);
+                agentRunner_.reset();
                 state_ = State::Idle;
                 break;
             }
@@ -1024,11 +1138,13 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
     // Log every error (AC 12.8).
     Gui::log("[AI Chat] error (category=%d): %s",
              static_cast<int>(err.category), err.message.c_str());
+    addAgentTraceEvent(AgentTraceType::ProviderError, err.message);
 
     // Restore idle state so the input field re-enables and the loading
     // indicator disappears (AC 12.6).
     streamingContent_.clear();
     requestStartMs_ = 0;
+    agentRunner_.reset();
     state_ = State::Idle;
 }
 
@@ -1248,6 +1364,7 @@ void ChatWindow::drawToolConfirmationModal() {
                 ImGui::CloseCurrentPopup();
             }
         } else {
+            agentRunner_.reset();
             // Pending call went away — recover gracefully.
             state_ = State::Idle;
             ImGui::CloseCurrentPopup();
@@ -1258,138 +1375,61 @@ void ChatWindow::drawToolConfirmationModal() {
     // Drive the state machine based on the user's choice.
     const auto confirmState = ToolExecutor::getInstance().getConfirmationState();
     if (confirmState == ToolExecutor::ConfirmationState::Approved) {
-        // Reset the shared flag first so repeated draws don't re-enter
-        // this branch while we dispatch the tool.
         ToolExecutor::getInstance().setConfirmationState(
             ToolExecutor::ConfirmationState::Pending);
-
-        // Run the approved write tool synchronously and append its
-        // result as a tool-role message. Without this block the main
-        // executeNextToolCall() loop below would see the same write
-        // tool at currentToolCallIndex_, decide it needs confirmation
-        // again, and re-open the modal — an infinite confirmation loop.
-        if (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
-            const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
-            const long long toolStartMs = nowSteadyMs();
-            ToolResult result = ToolExecutor::getInstance().execute(tc);
-            ChatMessage toolMsg =
-                makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
-            session_.addMessage(std::move(toolMsg));
-            touchActiveSession();
-        }
         ToolExecutor::getInstance().setPendingToolCall(nullptr);
-        ++currentToolCallIndex_;
 
         state_ = State::ToolExecuting;
-        // Drain any remaining tool calls in this batch (or close the loop
-        // with a follow-up completion when the queue is empty).
-        executeNextToolCall();
+        handleAgentOutcome(agentRunner_.resumeApproved(makeAgentConfig()));
     } else if (confirmState == ToolExecutor::ConfirmationState::Denied) {
         ToolExecutor::getInstance().setConfirmationState(
             ToolExecutor::ConfirmationState::Pending);
-        // Record denial as a tool message so the AI learns about the
-        // refusal (AC 6.4), then advance past this call.
-        if (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
-            const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
-            ChatMessage denied;
-            denied.role = Role::Tool;
-            denied.toolCallId = tc.id;
-            denied.name = tc.name;
-            denied.content = "{\"error\":\"tool execution denied by user\"}";
-            denied.timestamp = nowUnixSeconds();
-            session_.addMessage(std::move(denied));
-            touchActiveSession();
-        }
         ToolExecutor::getInstance().setPendingToolCall(nullptr);
-        ++currentToolCallIndex_;
         state_ = State::ToolExecuting;
-        executeNextToolCall();
+        handleAgentOutcome(agentRunner_.resumeDenied(makeAgentConfig()));
     }
 }
 
 void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
-    if (agentStepCount_ >= maxAgentSteps_) {
-        ChatMessage limitMsg;
-        limitMsg.role = Role::System;
-        limitMsg.content =
-            "[error] Agent step limit reached before executing more tools. "
-            "Review the current results or raise the limit in Settings.";
-        limitMsg.timestamp = nowUnixSeconds();
-        session_.addMessage(std::move(limitMsg));
-        touchActiveSession();
-        pendingToolCalls_.clear();
-        currentToolCallIndex_ = 0;
-        requestStartMs_ = 0;
-        agentStepCount_ = 0;
-        state_ = State::Idle;
-        return;
-    }
-
-    ++agentStepCount_;
-    pendingToolCalls_ = calls;
-    if (static_cast<int>(pendingToolCalls_.size()) > maxToolCallsPerTurn_) {
-        ChatMessage limitMsg;
-        limitMsg.role = Role::System;
-        limitMsg.content =
-            "[error] Too many tool calls in one assistant turn; executing only the configured limit.";
-        limitMsg.timestamp = nowUnixSeconds();
-        session_.addMessage(std::move(limitMsg));
-        touchActiveSession();
-        pendingToolCalls_.resize(static_cast<size_t>(maxToolCallsPerTurn_));
-    }
-    currentToolCallIndex_ = 0;
     state_ = State::ToolExecuting;
-    executeNextToolCall();
+    handleAgentOutcome(agentRunner_.beginToolCalls(calls, makeAgentConfig()));
 }
 
-void ChatWindow::executeNextToolCall() {
-    // Walk the queue, dispatching read-only calls immediately and
-    // pausing for user confirmation on write-classified calls.
-    while (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
-        const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
-        const ToolSafety safety =
-            ToolExecutor::getInstance().getToolSafety(tc.name);
-
-        if (safety == ToolSafety::Write) {
-            // YOLO mode bypasses the confirmation modal for write tools.
-            // The toggle is off by default; flipping it in the settings
-            // panel is a deliberate "I trust this AI enough" decision.
-            // We still log every auto-approved execution so the user can
-            // audit after the fact via the log window.
-            if (AiSettings::getInstance().get().autoApproveWrites) {
-                Gui::log("[AI Chat] auto-approving write tool '%s'",
-                         tc.name.c_str());
-                const long long toolStartMs = nowSteadyMs();
-                ToolResult result = ToolExecutor::getInstance().execute(tc);
-                ChatMessage toolMsg =
-                    makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
-                session_.addMessage(std::move(toolMsg));
-                touchActiveSession();
-                ++currentToolCallIndex_;
-                continue;
-            }
-
-            ToolExecutor::getInstance().setPendingToolCall(&tc);
-            ToolExecutor::getInstance().setConfirmationState(
-                ToolExecutor::ConfirmationState::Pending);
-            state_ = State::ToolConfirmation;
-            return; // drawToolConfirmationModal() resumes us
-        }
-
-        // Read-only: execute synchronously and append a tool message.
-        const long long toolStartMs = nowSteadyMs();
-        ToolResult result = ToolExecutor::getInstance().execute(tc);
-        ChatMessage toolMsg =
-            makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
-        session_.addMessage(std::move(toolMsg));
+void ChatWindow::handleAgentOutcome(AgentRunner::Outcome outcome) {
+    for (const std::string& line : outcome.logs) {
+        Gui::log("%s", line.c_str());
+    }
+    appendAgentTraceEvents(std::move(outcome.traceEvents));
+    for (auto& msg : outcome.messages) {
+        session_.addMessage(std::move(msg));
         touchActiveSession();
-        ++currentToolCallIndex_;
     }
 
-    // All tool calls processed. Close the loop by re-sending the updated
-    // message list (now including every tool result) back to the AI so it
-    // can produce its next assistant turn. Without this step the AI never
-    // sees the tool output and the conversation stalls.
+    switch (outcome.kind) {
+        case AgentRunner::OutcomeKind::NeedsConfirmation:
+            if (outcome.pendingToolCall) {
+                ToolExecutor::getInstance().setPendingToolCall(&*outcome.pendingToolCall);
+                ToolExecutor::getInstance().setConfirmationState(
+                    ToolExecutor::ConfirmationState::Pending);
+                state_ = State::ToolConfirmation;
+            } else {
+                state_ = State::Idle;
+            }
+            break;
+        case AgentRunner::OutcomeKind::ReadyForFollowUp:
+            sendFollowUpAfterTools();
+            break;
+        case AgentRunner::OutcomeKind::Stopped:
+        case AgentRunner::OutcomeKind::Idle:
+        default:
+            requestStartMs_ = 0;
+            agentRunner_.reset();
+            state_ = State::Idle;
+            break;
+    }
+}
+
+void ChatWindow::sendFollowUpAfterTools() {
     if (AIProvider* provider =
             ProviderRegistry::getInstance().getProvider(currentProvider_)) {
         CompletionRequest followUp;
@@ -1400,23 +1440,27 @@ void ChatWindow::executeNextToolCall() {
         followUp.stream = true;
         cancelFlag_.store(false);
         streamingContent_.clear();
-        // Reset the timer so the follow-up duration reflects just the
-        // provider's post-tool latency, not the tool execution time.
         requestStartMs_ = nowSteadyMs();
+        addAgentTraceEvent(AgentTraceType::FollowUpRequested,
+                           "tool results sent back to model");
         state_ = State::WaitingResponse;
         provider->sendCompletion(followUp, cancelFlag_);
-        pendingToolCalls_.clear();
-        currentToolCallIndex_ = 0;
         return;
     }
 
-    // No provider available (shouldn't normally happen mid-conversation).
-    // Fall back to Idle so the UI is usable again.
-    pendingToolCalls_.clear();
-    currentToolCallIndex_ = 0;
     requestStartMs_ = 0;
-    agentStepCount_ = 0;
+    agentRunner_.reset();
+    addAgentTraceEvent(AgentTraceType::ProviderError,
+                       "active provider unavailable for tool follow-up");
     state_ = State::Idle;
+}
+
+AgentRunner::Config ChatWindow::makeAgentConfig() const {
+    AgentRunner::Config cfg;
+    cfg.maxAgentSteps = maxAgentSteps_;
+    cfg.maxToolCallsPerTurn = maxToolCallsPerTurn_;
+    cfg.autoApproveWrites = AiSettings::getInstance().get().autoApproveWrites;
+    return cfg;
 }
 
 // drawSettingsPanel / drawProviderSettings / validateSettings are defined in ChatWindowSettings.cpp (task 8.4)

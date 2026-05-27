@@ -135,6 +135,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/ApiKeyStore.cpp
     gui/ai/AiSettings.cpp
     gui/ai/SessionManager.cpp
+    gui/ai/AgentRunner.cpp
     gui/ai/ChatWindow.cpp
     gui/ai/ChatWindowSettings.cpp
 )
