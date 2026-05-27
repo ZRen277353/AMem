@@ -49,6 +49,8 @@ bool AiSettings::loadFromFile(const std::string& filepath) {
     AiSettingsData loaded;
     loaded.activeProvider     = root.value("activeProvider", loaded.activeProvider);
     loaded.executionTimeout   = clamp(root.value("executionTimeout", loaded.executionTimeout), 1, 300);
+    loaded.maxAgentSteps      = clamp(root.value("maxAgentSteps", loaded.maxAgentSteps), 1, 64);
+    loaded.maxToolCallsPerTurn = clamp(root.value("maxToolCallsPerTurn", loaded.maxToolCallsPerTurn), 1, 64);
     loaded.tokenLimit         = clamp(root.value("tokenLimit", loaded.tokenLimit), 1000, 1000000);
     loaded.systemPrompt       = root.value("systemPrompt", loaded.systemPrompt);
     loaded.autoApproveWrites  = root.value("autoApproveWrites", loaded.autoApproveWrites);
@@ -72,6 +74,8 @@ bool AiSettings::saveToFile(const std::string& filepath) {
     root["version"]            = kConfigVersion;
     root["activeProvider"]     = data_.activeProvider;
     root["executionTimeout"]   = data_.executionTimeout;
+    root["maxAgentSteps"]      = data_.maxAgentSteps;
+    root["maxToolCallsPerTurn"] = data_.maxToolCallsPerTurn;
     root["tokenLimit"]         = data_.tokenLimit;
     root["systemPrompt"]       = data_.systemPrompt;
     root["autoApproveWrites"]  = data_.autoApproveWrites;
@@ -123,6 +127,8 @@ void AiSettings::set(const AiSettingsData& data) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_ = data;
         data_.executionTimeout = clamp(data_.executionTimeout, 1, 300);
+        data_.maxAgentSteps = clamp(data_.maxAgentSteps, 1, 64);
+        data_.maxToolCallsPerTurn = clamp(data_.maxToolCallsPerTurn, 1, 64);
         data_.tokenLimit       = clamp(data_.tokenLimit, 1000, 1000000);
     }
     saveToFile(lastPath_);

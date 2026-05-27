@@ -63,11 +63,9 @@ public:
     std::vector<std::string> getDecryptionFailures() const;
     void clearDecryptionFailures();
 
-    // USER-REQUESTED: seed a default "openai" provider config if no
-    // configuration has been loaded. Used by ChatWindow on first run to
-    // pre-populate provider settings so the user can start chatting
-    // immediately. Does NOT persist to disk – the caller decides when
-    // to saveToFile().
+    // Seed non-secret defaults if no configuration has been loaded.
+    // Intentionally does not create a provider entry with a bundled API key:
+    // users must explicitly enter their own key in the settings panel.
     void seedDefaultsIfEmpty();
 
 private:

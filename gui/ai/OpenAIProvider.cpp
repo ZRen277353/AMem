@@ -192,6 +192,12 @@ json messageToJson(const ChatMessage& m) {
 
 void OpenAIProvider::configure(const ProviderConfig& config) {
     config_ = config;
+    if (config_.baseUrl.empty()) {
+        config_.baseUrl = getDefaultBaseUrl();
+    }
+    if (config_.model.empty()) {
+        config_.model = "gpt-5.4";
+    }
 }
 
 const ProviderConfig& OpenAIProvider::getConfig() const {

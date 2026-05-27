@@ -20,6 +20,8 @@ namespace AI {
 //       "version": 1,
 //       "activeProvider": "openai",
 //       "executionTimeout": 30,
+//       "maxAgentSteps": 12,
+//       "maxToolCallsPerTurn": 16,
 //       "tokenLimit": 16000,
 //       "systemPrompt": "...",
 //       "proxy": { "enabled": false, "host": "", "port": 0 }
@@ -27,6 +29,8 @@ namespace AI {
 struct AiSettingsData {
     std::string activeProvider = "openai";
     int executionTimeout = 30;   // seconds, clamped to [1, 300]
+    int maxAgentSteps = 12;      // model/tool loop iterations, clamped to [1, 64]
+    int maxToolCallsPerTurn = 16;// tool calls in one assistant turn, clamped to [1, 64]
     int tokenLimit = 16000;      // clamped to [1000, 200000]
     std::string systemPrompt;    // prepended to every request
     ProxyConfig proxy;           // host / port / enabled

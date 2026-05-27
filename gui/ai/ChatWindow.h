@@ -151,6 +151,9 @@ private:
     // executeNextToolCall() consumes them one at a time.
     std::vector<ToolCall> pendingToolCalls_;
     int currentToolCallIndex_ = 0;
+    int agentStepCount_ = 0;
+    int maxAgentSteps_ = 12;
+    int maxToolCallsPerTurn_ = 16;
 
     // Request-timing state. `requestStartMs_` is a steady_clock epoch in
     // milliseconds captured when a request is dispatched (sendMessage /

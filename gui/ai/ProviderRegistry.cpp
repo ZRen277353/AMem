@@ -66,13 +66,28 @@ void ProviderRegistry::initBuiltinProviders() {
     // The __has_include guards above let this method light up automatically
     // as each provider header is added, without needing further edits here.
 #ifdef AI_HAS_OPENAI_PROVIDER
-    registerProvider(std::make_unique<OpenAIProvider>());
+    {
+        auto provider = std::make_unique<OpenAIProvider>();
+        ProviderConfig cfg;
+        provider->configure(cfg);
+        registerProvider(std::move(provider));
+    }
 #endif
 #ifdef AI_HAS_CLAUDE_PROVIDER
-    registerProvider(std::make_unique<ClaudeProvider>());
+    {
+        auto provider = std::make_unique<ClaudeProvider>();
+        ProviderConfig cfg;
+        provider->configure(cfg);
+        registerProvider(std::move(provider));
+    }
 #endif
 #ifdef AI_HAS_DEEPSEEK_PROVIDER
-    registerProvider(std::make_unique<DeepSeekProvider>());
+    {
+        auto provider = std::make_unique<DeepSeekProvider>();
+        ProviderConfig cfg;
+        provider->configure(cfg);
+        registerProvider(std::move(provider));
+    }
 #endif
 }
 

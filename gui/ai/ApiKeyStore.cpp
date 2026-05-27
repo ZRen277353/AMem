@@ -278,15 +278,9 @@ void ApiKeyStore::seedDefaultsIfEmpty() {
     if (!configs_.empty()) {
         return;
     }
-    // USER-REQUESTED default – a working OpenAI-compatible configuration
-    // so a fresh install can start chatting without first walking through
-    // the settings panel. The user can override any field via the UI.
-    ProviderConfig seed;
-    seed.apiKey = "sk-mnVq3ahItPaRyRGbtFEdIZTH4JBGFeS0vgf3Y6k1POCB5Kpb";
-    seed.baseUrl = "https://ai.ikik.net/v1";
-    seed.model = "gpt-5.4";
-    seed.apiVersion = "";
-    storeConfigLocked("openai", seed);
+    // Deliberately leave the store empty. The provider registry supplies
+    // non-secret defaults such as endpoint URLs, while API keys must be
+    // entered by the user and stored through storeConfig().
 }
 
 // --------------------------------------------------------------------------

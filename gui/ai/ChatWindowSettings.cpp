@@ -81,6 +81,7 @@ void ChatWindow::drawSettingsPanel() {
                 copyIntoBuf(buf.baseUrl, cfg.baseUrl);
                 copyIntoBuf(buf.model, cfg.model);
                 copyIntoBuf(buf.apiVersion, cfg.apiVersion);
+                buf.dirty = false;
             }
             // If no baseUrl was stored (or no config existed), seed the
             // field with the provider's default so the user sees a
@@ -151,6 +152,8 @@ void ChatWindow::drawSettingsPanel() {
     static bool systemPromptLoaded = false;
     static int tokenLimitBuf = 0;
     static int executionTimeoutBuf = 0;
+    static int maxAgentStepsBuf = 0;
+    static int maxToolCallsPerTurnBuf = 0;
     static bool autoApproveWritesBuf = false;
     static bool numericSettingsLoaded = false;
     if (!systemPromptLoaded) {
@@ -163,6 +166,8 @@ void ChatWindow::drawSettingsPanel() {
     if (!numericSettingsLoaded) {
         tokenLimitBuf = settings.tokenLimit;
         executionTimeoutBuf = settings.executionTimeout;
+        maxAgentStepsBuf = settings.maxAgentSteps;
+        maxToolCallsPerTurnBuf = settings.maxToolCallsPerTurn;
         autoApproveWritesBuf = settings.autoApproveWrites;
         numericSettingsLoaded = true;
     }
@@ -247,6 +252,46 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::TextDisabled("(%d..%d)", kMinTimeout, kMaxTimeout);
     }
 
+    {
+        constexpr int kMinSteps = 1;
+        constexpr int kMaxSteps = 64;
+        ImGui::Text("Agent step limit");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::InputInt("##agentsteps_input", &maxAgentStepsBuf, 0, 0);
+        maxAgentStepsBuf = std::clamp(maxAgentStepsBuf, kMinSteps, kMaxSteps);
+        ImGui::SameLine();
+        if (ImGui::Button("-##agentsteps")) {
+            maxAgentStepsBuf = std::max(kMinSteps, maxAgentStepsBuf - 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("+##agentsteps")) {
+            maxAgentStepsBuf = std::min(kMaxSteps, maxAgentStepsBuf + 1);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d..%d)", kMinSteps, kMaxSteps);
+    }
+
+    {
+        constexpr int kMinCalls = 1;
+        constexpr int kMaxCalls = 64;
+        ImGui::Text("Tool calls per turn");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::InputInt("##toolcalls_input", &maxToolCallsPerTurnBuf, 0, 0);
+        maxToolCallsPerTurnBuf = std::clamp(maxToolCallsPerTurnBuf, kMinCalls, kMaxCalls);
+        ImGui::SameLine();
+        if (ImGui::Button("-##toolcalls")) {
+            maxToolCallsPerTurnBuf = std::max(kMinCalls, maxToolCallsPerTurnBuf - 1);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("+##toolcalls")) {
+            maxToolCallsPerTurnBuf = std::min(kMaxCalls, maxToolCallsPerTurnBuf + 1);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d..%d)", kMinCalls, kMaxCalls);
+    }
+
     // ---- Write-permission policy --------------------------------------
     // Off by default: every AI-requested write pops the modal. Turning
     // this on lets the AI execute memory_write / set_breakpoint /
@@ -282,8 +327,7 @@ void ChatWindow::drawSettingsPanel() {
                 // "user never filled this provider in"; leaving them
                 // untouched preserves any key set in a previous session
                 // or via hand-editing ai_config.json.
-                if (std::string(buf.apiKey).empty() &&
-                    std::string(buf.baseUrl).empty()) {
+                if (std::string(buf.apiKey).empty()) {
                     continue;
                 }
                 ProviderConfig cfg;
@@ -311,6 +355,8 @@ void ChatWindow::drawSettingsPanel() {
             settings.systemPrompt = systemPromptBuf;
             settings.tokenLimit = tokenLimitBuf;
             settings.executionTimeout = executionTimeoutBuf;
+            settings.maxAgentSteps = maxAgentStepsBuf;
+            settings.maxToolCallsPerTurn = maxToolCallsPerTurnBuf;
             settings.autoApproveWrites = autoApproveWritesBuf;
             // Guard against an accidentally-cleared prompt: saving an
             // empty string would leave the AI without guidance, so fall
@@ -329,6 +375,8 @@ void ChatWindow::drawSettingsPanel() {
             // was saved to disk but session_ kept its original values.
             session_.setSystemPrompt(settings.systemPrompt);
             session_.setTokenLimit(settings.tokenLimit);
+            maxAgentSteps_ = settings.maxAgentSteps;
+            maxToolCallsPerTurn_ = settings.maxToolCallsPerTurn;
 
             Gui::log("[AI Chat] settings saved");
             showSettings_ = false;
@@ -360,33 +408,42 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
     const ImGuiInputTextFlags keyFlags =
         buf.showApiKey ? 0 : ImGuiInputTextFlags_Password;
     ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputText(("##" + providerName + "_apikey").c_str(),
-                     buf.apiKey, sizeof(buf.apiKey), keyFlags);
+    if (ImGui::InputText(("##" + providerName + "_apikey").c_str(),
+                         buf.apiKey, sizeof(buf.apiKey), keyFlags)) {
+        buf.dirty = true;
+    }
 
     // ---- Endpoint URL + reset (AC 11.1, 11.3, 11.4) -------------------
     ImGui::Text("Endpoint URL:");
     ImGui::SetNextItemWidth(-100.0f);
-    ImGui::InputText(("##" + providerName + "_url").c_str(),
-                     buf.baseUrl, sizeof(buf.baseUrl));
+    if (ImGui::InputText(("##" + providerName + "_url").c_str(),
+                         buf.baseUrl, sizeof(buf.baseUrl))) {
+        buf.dirty = true;
+    }
     ImGui::SameLine();
     if (ImGui::Button(("Reset##" + providerName).c_str())) {
         if (AIProvider* p = ProviderRegistry::getInstance().getProvider(providerName)) {
             copyIntoBuf(buf.baseUrl, p->getDefaultBaseUrl());
+            buf.dirty = true;
         }
     }
 
     // ---- Model name ----------------------------------------------------
     ImGui::Text("Model:");
     ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputText(("##" + providerName + "_model").c_str(),
-                     buf.model, sizeof(buf.model));
+    if (ImGui::InputText(("##" + providerName + "_model").c_str(),
+                         buf.model, sizeof(buf.model))) {
+        buf.dirty = true;
+    }
 
     // ---- API version (Anthropic only) ---------------------------------
     if (providerName == "anthropic" || providerName == "claude") {
         ImGui::Text("API Version:");
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText(("##" + providerName + "_ver").c_str(),
-                         buf.apiVersion, sizeof(buf.apiVersion));
+        if (ImGui::InputText(("##" + providerName + "_ver").c_str(),
+                             buf.apiVersion, sizeof(buf.apiVersion))) {
+            buf.dirty = true;
+        }
     }
 
     // ---- Inline validation (AC 10.7, 11.5) ----------------------------
@@ -400,7 +457,9 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
     const bool keyEmpty = apiKeyStr.empty();
     const bool urlEmpty = urlStr.empty();
     buf.validationError.clear();
-    if (keyEmpty && urlEmpty) {
+    if (keyEmpty && !buf.dirty) {
+        // Unedited provider rows with a default URL are still unconfigured.
+    } else if (keyEmpty && urlEmpty) {
         // Fully blank → treated as "not configured"; no error.
     } else if (keyEmpty) {
         buf.validationError = "API key is required when an endpoint URL is set.";
@@ -428,6 +487,7 @@ bool ChatWindow::validateSettings() {
         // partially-filled row (one field empty) is still an error.
         const bool keyEmpty = apiKeyStr.empty();
         const bool urlEmpty = urlStr.empty();
+        if (keyEmpty && !buf.dirty) continue;
         if (keyEmpty && urlEmpty) continue;
         if (keyEmpty) {
             Gui::log("[AI Chat] cannot save: provider '%s' has empty API key",

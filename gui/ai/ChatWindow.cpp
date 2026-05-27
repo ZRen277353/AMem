@@ -46,6 +46,40 @@ std::string trimWhitespace(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
+bool startsWithICase(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    if (s.size() < n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char a = static_cast<unsigned char>(s[i]);
+        const unsigned char b = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
+}
+
+bool getProviderConfigProblem(const AIProvider* provider, const std::string& model, std::string& out) {
+    if (!provider) {
+        out = "Configure a provider in Settings before sending";
+        return true;
+    }
+
+    const ProviderConfig& cfg = provider->getConfig();
+    if (cfg.apiKey.empty()) {
+        out = "Enter an API key in Settings before sending";
+        return true;
+    }
+    if (cfg.baseUrl.empty() || !startsWithICase(cfg.baseUrl, "https://")) {
+        out = "Configure a valid https:// endpoint in Settings before sending";
+        return true;
+    }
+    if (model.empty() && cfg.model.empty()) {
+        out = "Enter a model name before sending";
+        return true;
+    }
+    out.clear();
+    return false;
+}
+
 // Current wall-clock time as seconds since the Unix epoch. Used as the
 // ChatMessage.timestamp value so rendered times reflect real calendar
 // time rather than an arbitrary monotonic baseline.
@@ -113,6 +147,41 @@ const char* stateLabel(ChatWindow* /*unused*/, int stateValue) {
     }
 }
 
+ChatMessage makeToolMessage(const ToolCall& tc, const ToolResult& result, long long durationMs) {
+    ChatMessage toolMsg;
+    toolMsg.role = Role::Tool;
+    toolMsg.toolCallId = tc.id;
+    toolMsg.name = tc.name;
+    toolMsg.timestamp = nowUnixSeconds();
+    toolMsg.durationMs = durationMs;
+
+    nlohmann::json audit;
+    audit["tool"] = tc.name;
+    audit["success"] = result.success;
+    audit["duration_ms"] = durationMs;
+    try {
+        audit["arguments"] = tc.arguments.empty()
+                                 ? nlohmann::json::object()
+                                 : nlohmann::json::parse(tc.arguments);
+    } catch (const nlohmann::json::exception&) {
+        audit["arguments_raw"] = tc.arguments;
+    }
+
+    if (result.success) {
+        try {
+            audit["result"] = result.resultJson.empty()
+                                  ? nlohmann::json::object()
+                                  : nlohmann::json::parse(result.resultJson);
+        } catch (const nlohmann::json::exception&) {
+            audit["result_raw"] = result.resultJson;
+        }
+    } else {
+        audit["error"] = result.errorMessage;
+    }
+    toolMsg.content = audit.dump();
+    return toolMsg;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -129,10 +198,9 @@ ChatWindow::ChatWindow() {
     ProviderRegistry::getInstance().initBuiltinProviders();
     ToolExecutor::getInstance().initBuiltinTools();
 
-    // Load persisted API keys. Missing file is not an error (AC 10.6);
-    // seedDefaultsIfEmpty() installs a working OpenAI-compatible
-    // configuration on first run so the user can start chatting without
-    // walking through the settings panel first.
+    // Load persisted API keys. Missing file is not an error (AC 10.6).
+    // Providers supply non-secret endpoint/model defaults, but API keys
+    // are never bundled; users must enter their own key in Settings.
     auto& keyStore = ApiKeyStore::getInstance();
     // One-time migration: if the user has an old `ai_config.dat` sitting
     // next to the exe but no `ai_config.json`, rename it in place so the
@@ -150,7 +218,6 @@ ChatWindow::ChatWindow() {
     }
     keyStore.loadFromFile(kConfigFile);
     keyStore.seedDefaultsIfEmpty();
-    // Persist so the seeded defaults survive across runs.
     keyStore.saveToFile(kConfigFile);
 
     // Load (or create with defaults) the plain-JSON user settings file.
@@ -175,6 +242,8 @@ ChatWindow::ChatWindow() {
     HttpClient::getInstance().setProxy(settingsSnapshot.proxy);
     session_.setTokenLimit(settingsSnapshot.tokenLimit);
     session_.setSystemPrompt(settingsSnapshot.systemPrompt);
+    maxAgentSteps_ = settingsSnapshot.maxAgentSteps;
+    maxToolCallsPerTurn_ = settingsSnapshot.maxToolCallsPerTurn;
     proxyEnabled_ = settingsSnapshot.proxy.enabled;
     proxyPort_    = settingsSnapshot.proxy.port;
     {
@@ -428,6 +497,7 @@ void ChatWindow::switchToSession(const std::string& id) {
     streamingContent_.clear();
     pendingToolCalls_.clear();
     currentToolCallIndex_ = 0;
+    agentStepCount_ = 0;
     requestStartMs_ = 0;
     state_ = State::Idle;
 
@@ -468,6 +538,7 @@ void ChatWindow::createNewSession() {
     streamingContent_.clear();
     pendingToolCalls_.clear();
     currentToolCallIndex_ = 0;
+    agentStepCount_ = 0;
     requestStartMs_ = 0;
     state_ = State::Idle;
     session_.resetInMemory();
@@ -490,6 +561,7 @@ void ChatWindow::deleteSession(const std::string& id) {
         streamingContent_.clear();
         pendingToolCalls_.clear();
         currentToolCallIndex_ = 0;
+        agentStepCount_ = 0;
         requestStartMs_ = 0;
         state_ = State::Idle;
         session_.resetInMemory();
@@ -618,14 +690,21 @@ void ChatWindow::drawToolbar() {
 }
 
 void ChatWindow::drawInputArea() {
-    const bool hasProvider =
-        !currentProvider_.empty() &&
-        ProviderRegistry::getInstance().getProvider(currentProvider_) != nullptr;
+    AIProvider* activeProvider = nullptr;
+    if (!currentProvider_.empty()) {
+        activeProvider = ProviderRegistry::getInstance().getProvider(currentProvider_);
+    }
+    std::string configProblem;
+    const bool hasProvider = activeProvider != nullptr;
+    const bool providerReady =
+        hasProvider && !getProviderConfigProblem(activeProvider, currentModel_, configProblem);
 
     // Show a warning line above the input when the user can't send yet.
-    if (!hasProvider) {
+    if (!providerReady) {
         ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::Warning);
-        ImGui::TextUnformatted("Configure a provider in Settings before sending");
+        ImGui::TextUnformatted(configProblem.empty()
+                                   ? "Configure a provider in Settings before sending"
+                                   : configProblem.c_str());
         ImGui::PopStyleColor();
     }
 
@@ -654,7 +733,7 @@ void ChatWindow::drawInputArea() {
 
     // Send is enabled only when we have a provider and aren't already
     // waiting on one.
-    const bool canSend = hasProvider && state_ == State::Idle;
+    const bool canSend = providerReady && state_ == State::Idle;
     if (!canSend) {
         ImGui::BeginDisabled();
     }
@@ -710,6 +789,17 @@ void ChatWindow::sendMessage() {
     if (!provider) {
         return;
     }
+    std::string configProblem;
+    if (getProviderConfigProblem(provider, currentModel_, configProblem)) {
+        ChatMessage errMsg;
+        errMsg.role = Role::System;
+        errMsg.content = std::string("[error] ") + configProblem;
+        errMsg.timestamp = nowUnixSeconds();
+        session_.addMessage(std::move(errMsg));
+        showSettings_ = true;
+        state_ = State::Idle;
+        return;
+    }
 
     // Append the user message, clear the composer, reset streaming state.
     ChatMessage userMsg;
@@ -728,6 +818,9 @@ void ChatWindow::sendMessage() {
     ++inputGeneration_;
     refocusInput_ = true;
     streamingContent_.clear();
+    pendingToolCalls_.clear();
+    currentToolCallIndex_ = 0;
+    agentStepCount_ = 0;
     cancelFlag_.store(false);
     // Start the latency timer; pollMessages will stamp the assistant
     // response with the elapsed delta when Completion arrives.
@@ -771,6 +864,7 @@ void ChatWindow::cancelRequest() {
     session_.addMessage(std::move(notice));
 
     requestStartMs_ = 0;
+    agentStepCount_ = 0;
     state_ = State::Idle;
 }
 
@@ -781,6 +875,7 @@ void ChatWindow::clearHistory() {
     streamingContent_.clear();
     pendingToolCalls_.clear();
     currentToolCallIndex_ = 0;
+    agentStepCount_ = 0;
     state_ = State::Idle;
     session_.clearHistory();
     touchActiveSession();
@@ -835,6 +930,7 @@ void ChatWindow::pollMessages() {
                     processToolCalls(calls);
                 } else {
                     requestStartMs_ = 0;
+                    agentStepCount_ = 0;
                     state_ = State::Idle;
                 }
                 break;
@@ -848,6 +944,7 @@ void ChatWindow::pollMessages() {
                 Gui::log("[AI Chat] error: %s", msg.data.c_str());
                 streamingContent_.clear();
                 requestStartMs_ = 0;
+                agentStepCount_ = 0;
                 state_ = State::Idle;
                 break;
             }
@@ -1173,18 +1270,10 @@ void ChatWindow::drawToolConfirmationModal() {
         // again, and re-open the modal — an infinite confirmation loop.
         if (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
             const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
+            const long long toolStartMs = nowSteadyMs();
             ToolResult result = ToolExecutor::getInstance().execute(tc);
-            ChatMessage toolMsg;
-            toolMsg.role = Role::Tool;
-            toolMsg.toolCallId = tc.id;
-            toolMsg.name = tc.name;
-            toolMsg.timestamp = nowUnixSeconds();
-            if (result.success) {
-                toolMsg.content = result.resultJson;
-            } else {
-                toolMsg.content =
-                    std::string("{\"error\":\"") + result.errorMessage + "\"}";
-            }
+            ChatMessage toolMsg =
+                makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
             session_.addMessage(std::move(toolMsg));
             touchActiveSession();
         }
@@ -1219,7 +1308,35 @@ void ChatWindow::drawToolConfirmationModal() {
 }
 
 void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
+    if (agentStepCount_ >= maxAgentSteps_) {
+        ChatMessage limitMsg;
+        limitMsg.role = Role::System;
+        limitMsg.content =
+            "[error] Agent step limit reached before executing more tools. "
+            "Review the current results or raise the limit in Settings.";
+        limitMsg.timestamp = nowUnixSeconds();
+        session_.addMessage(std::move(limitMsg));
+        touchActiveSession();
+        pendingToolCalls_.clear();
+        currentToolCallIndex_ = 0;
+        requestStartMs_ = 0;
+        agentStepCount_ = 0;
+        state_ = State::Idle;
+        return;
+    }
+
+    ++agentStepCount_;
     pendingToolCalls_ = calls;
+    if (static_cast<int>(pendingToolCalls_.size()) > maxToolCallsPerTurn_) {
+        ChatMessage limitMsg;
+        limitMsg.role = Role::System;
+        limitMsg.content =
+            "[error] Too many tool calls in one assistant turn; executing only the configured limit.";
+        limitMsg.timestamp = nowUnixSeconds();
+        session_.addMessage(std::move(limitMsg));
+        touchActiveSession();
+        pendingToolCalls_.resize(static_cast<size_t>(maxToolCallsPerTurn_));
+    }
     currentToolCallIndex_ = 0;
     state_ = State::ToolExecuting;
     executeNextToolCall();
@@ -1242,18 +1359,10 @@ void ChatWindow::executeNextToolCall() {
             if (AiSettings::getInstance().get().autoApproveWrites) {
                 Gui::log("[AI Chat] auto-approving write tool '%s'",
                          tc.name.c_str());
+                const long long toolStartMs = nowSteadyMs();
                 ToolResult result = ToolExecutor::getInstance().execute(tc);
-                ChatMessage toolMsg;
-                toolMsg.role = Role::Tool;
-                toolMsg.toolCallId = tc.id;
-                toolMsg.name = tc.name;
-                toolMsg.timestamp = nowUnixSeconds();
-                if (result.success) {
-                    toolMsg.content = result.resultJson;
-                } else {
-                    toolMsg.content =
-                        std::string("{\"error\":\"") + result.errorMessage + "\"}";
-                }
+                ChatMessage toolMsg =
+                    makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
                 session_.addMessage(std::move(toolMsg));
                 touchActiveSession();
                 ++currentToolCallIndex_;
@@ -1268,19 +1377,12 @@ void ChatWindow::executeNextToolCall() {
         }
 
         // Read-only: execute synchronously and append a tool message.
+        const long long toolStartMs = nowSteadyMs();
         ToolResult result = ToolExecutor::getInstance().execute(tc);
-        ChatMessage toolMsg;
-        toolMsg.role = Role::Tool;
-        toolMsg.toolCallId = tc.id;
-        toolMsg.name = tc.name;
-        toolMsg.timestamp = nowUnixSeconds();
-        if (result.success) {
-            toolMsg.content = result.resultJson;
-        } else {
-            toolMsg.content =
-                std::string("{\"error\":\"") + result.errorMessage + "\"}";
-        }
+        ChatMessage toolMsg =
+            makeToolMessage(tc, result, nowSteadyMs() - toolStartMs);
         session_.addMessage(std::move(toolMsg));
+        touchActiveSession();
         ++currentToolCallIndex_;
     }
 
@@ -1313,6 +1415,7 @@ void ChatWindow::executeNextToolCall() {
     pendingToolCalls_.clear();
     currentToolCallIndex_ = 0;
     requestStartMs_ = 0;
+    agentStepCount_ = 0;
     state_ = State::Idle;
 }
 

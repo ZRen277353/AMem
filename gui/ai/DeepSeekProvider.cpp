@@ -82,6 +82,9 @@ void DeepSeekProvider::configure(const ProviderConfig& config) {
     if (config_.baseUrl.empty()) {
         config_.baseUrl = getDefaultBaseUrl();
     }
+    if (config_.model.empty()) {
+        config_.model = "deepseek-chat";
+    }
 }
 
 const ProviderConfig& DeepSeekProvider::getConfig() const {
@@ -209,6 +212,10 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
             const std::string token = delta["content"].get<std::string>();
             if (!token.empty()) {
                 outMessage.content += token;
+                UIMessage msg;
+                msg.type = UIMessageType::Token;
+                msg.data = token;
+                UIMessageQueue::getInstance().push(std::move(msg));
                 if (request.onToken) {
                     request.onToken(token);
                 }
@@ -439,6 +446,11 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
                 // Success + non-streaming: parse the full JSON body.
                 resp = parseFullResponse(http.body);
             }
+
+            UIMessage msg;
+            msg.type = UIMessageType::Completion;
+            msg.response = resp;
+            UIMessageQueue::getInstance().push(std::move(msg));
 
             if (request.onComplete) {
                 request.onComplete(std::move(resp));

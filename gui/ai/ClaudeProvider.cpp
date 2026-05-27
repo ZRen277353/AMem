@@ -285,6 +285,9 @@ void ClaudeProvider::configure(const ProviderConfig& config) {
     if (config_.baseUrl.empty()) {
         config_.baseUrl = getDefaultBaseUrl();
     }
+    if (config_.model.empty()) {
+        config_.model = "claude-sonnet-4-5";
+    }
     if (config_.apiVersion.empty()) {
         config_.apiVersion = kDefaultApiVersion;
     }

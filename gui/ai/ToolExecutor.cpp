@@ -4,9 +4,11 @@
 
 #include "../../third_party/nlohmann/json.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <future>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -255,19 +257,26 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
     // work finish on its own rather than introducing a stuck join.
     ToolResult result;
     try {
-        auto fut = std::async(std::launch::async,
-                              [executor = registration.executor, argsJson = call.arguments]() {
-                                  return executor(argsJson);
-                              });
+        std::shared_future<std::string> fut =
+            std::async(std::launch::async,
+                       [executor = registration.executor, argsJson = call.arguments]() {
+                           return executor(argsJson);
+                       }).share();
         if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {
             result.success = false;
             result.errorMessage = "Tool '" + call.name + "' execution timed out after " +
                                   std::to_string(timeoutSeconds) + " seconds";
-            // NOTE: we do not block on fut.get(); the std::future destructor
-            // will wait, but since this result is returned to the caller the
-            // lifetime is brief in practice. A fully cooperative cancellation
-            // model would require per-tool cancel flags, which is out of
-            // scope for task 5.1.
+            {
+                std::lock_guard<std::mutex> lock(activeFuturesMutex_);
+                activeFutures_.erase(
+                    std::remove_if(activeFutures_.begin(), activeFutures_.end(),
+                                   [](const std::shared_future<std::string>& f) {
+                                       return f.wait_for(std::chrono::seconds(0)) ==
+                                              std::future_status::ready;
+                                   }),
+                    activeFutures_.end());
+                activeFutures_.push_back(fut);
+            }
             return result;
         }
         result.resultJson = fut.get();
