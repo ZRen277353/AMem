@@ -197,12 +197,21 @@ ImVec4 traceTypeColor(AgentTraceType type) {
     }
 }
 
-void trimTraceEvents(std::vector<AgentTraceEvent>& events) {
-    constexpr size_t kMaxTraceEvents = 128;
-    if (events.size() > kMaxTraceEvents) {
-        events.erase(events.begin(),
-                     events.begin() +
-                         static_cast<std::ptrdiff_t>(events.size() - kMaxTraceEvents));
+ImVec4 agentRunStateColor(AgentRunState state) {
+    switch (state) {
+        case AgentRunState::Completed:
+            return ColorScheme::Success;
+        case AgentRunState::WaitingApproval:
+        case AgentRunState::ExecutingTools:
+            return ColorScheme::Warning;
+        case AgentRunState::Failed:
+        case AgentRunState::Cancelled:
+            return ColorScheme::Error;
+        case AgentRunState::WaitingModel:
+            return ColorScheme::Info;
+        case AgentRunState::Idle:
+        default:
+            return ColorScheme::TextSecondary;
     }
 }
 
@@ -520,9 +529,7 @@ void ChatWindow::switchToSession(const std::string& id) {
     // the newly-loaded session and corrupt it.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    agentRunner_.reset();
-    agentController_.reset();
-    clearAgentTrace();
+    agentController_.resetForNewRun();
     requestStartMs_ = 0;
     state_ = State::Idle;
 
@@ -561,9 +568,7 @@ void ChatWindow::createNewSession() {
     // touching the previous session's file on disk.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    agentRunner_.reset();
-    agentController_.reset();
-    clearAgentTrace();
+    agentController_.resetForNewRun();
     requestStartMs_ = 0;
     state_ = State::Idle;
     session_.resetInMemory();
@@ -584,9 +589,7 @@ void ChatWindow::deleteSession(const std::string& id) {
         // Clear in-memory state before switching; if sessions remain the
         // manager already picked a new active id, otherwise create one.
         streamingContent_.clear();
-        agentRunner_.reset();
-        agentController_.reset();
-        clearAgentTrace();
+        agentController_.resetForNewRun();
         requestStartMs_ = 0;
         state_ = State::Idle;
         session_.resetInMemory();
@@ -614,32 +617,6 @@ void ChatWindow::touchActiveSession() {
     SessionManager::getInstance().touch(activeSessionId_,
                                         static_cast<int>(msgs.size()),
                                         firstUser);
-}
-
-void ChatWindow::addAgentTraceEvent(AgentTraceType type,
-                                    const std::string& detail,
-                                    const std::string& tool,
-                                    long long durationMs) {
-    AgentTraceEvent ev;
-    ev.type = type;
-    ev.timestamp = nowUnixSeconds();
-    ev.step = agentRunner_.stepCount();
-    ev.tool = tool;
-    ev.detail = detail;
-    ev.durationMs = durationMs;
-    agentTrace_.push_back(std::move(ev));
-    trimTraceEvents(agentTrace_);
-}
-
-void ChatWindow::appendAgentTraceEvents(std::vector<AgentTraceEvent> events) {
-    for (auto& ev : events) {
-        agentTrace_.push_back(std::move(ev));
-    }
-    trimTraceEvents(agentTrace_);
-}
-
-void ChatWindow::clearAgentTrace() {
-    agentTrace_.clear();
 }
 
 void ChatWindow::drawToolbar() {
@@ -741,37 +718,48 @@ void ChatWindow::drawToolbar() {
 }
 
 void ChatWindow::drawAgentActivityPanel() {
-    if (agentTrace_.empty()) {
+    const AgentRunSnapshot snapshot = agentController_.snapshot();
+    const auto& trace = snapshot.trace;
+    if (trace.empty() && snapshot.state == AgentRunState::Idle) {
         return;
     }
 
-    const AgentTraceEvent& latest = agentTrace_.back();
+    const AgentTraceEvent* latest = trace.empty() ? nullptr : &trace.back();
     ImGui::Spacing();
     ImGui::TextUnformatted("Agent");
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Text, traceTypeColor(latest.type));
-    ImGui::TextUnformatted(traceTypeLabel(latest.type));
+    ImGui::PushStyleColor(ImGuiCol_Text, agentRunStateColor(snapshot.state));
+    ImGui::TextUnformatted(agentRunStateLabel(snapshot.state));
     ImGui::PopStyleColor();
 
-    if (latest.step > 0) {
+    if (snapshot.modelTurns > 0) {
         ImGui::SameLine();
-        ImGui::TextDisabled("step %d/%d", latest.step, maxAgentSteps_);
+        ImGui::TextDisabled("models %d", snapshot.modelTurns);
     }
-    if (!latest.tool.empty()) {
+    if (snapshot.toolSteps > 0) {
         ImGui::SameLine();
-        ImGui::TextDisabled("tool: %s", latest.tool.c_str());
+        ImGui::TextDisabled("tools %d/%d", snapshot.toolSteps, maxAgentSteps_);
     }
-    if (!latest.detail.empty()) {
+    if (!snapshot.id.empty()) {
         ImGui::SameLine();
-        ImGui::TextDisabled("%s", latest.detail.c_str());
+        ImGui::TextDisabled("%s", snapshot.id.c_str());
+    }
+    if (snapshot.pendingApproval) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::Warning);
+        ImGui::Text("approval: %s", snapshot.pendingApproval->name.c_str());
+        ImGui::PopStyleColor();
+    } else if (latest && !latest->detail.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", latest->detail.c_str());
     }
 
     if (ImGui::BeginChild("##agent_activity", ImVec2(0.0f, 76.0f), true,
-                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        ImGuiWindowFlags_HorizontalScrollbar)) {
         const size_t visible =
-            agentTrace_.size() > 6 ? agentTrace_.size() - 6 : 0;
-        for (size_t i = visible; i < agentTrace_.size(); ++i) {
-            const AgentTraceEvent& ev = agentTrace_[i];
+            trace.size() > 6 ? trace.size() - 6 : 0;
+        for (size_t i = visible; i < trace.size(); ++i) {
+            const AgentTraceEvent& ev = trace[i];
             const std::string ts = formatLocalTime(ev.timestamp);
             ImGui::TextDisabled("%s", ts.empty() ? "--:--:--" : ts.c_str());
             ImGui::SameLine();
@@ -933,13 +921,11 @@ void ChatWindow::sendMessage() {
     ++inputGeneration_;
     refocusInput_ = true;
     streamingContent_.clear();
-    agentRunner_.reset();
-    clearAgentTrace();
+    agentController_.resetForNewRun();
 
     if (!dispatchAgentRequest(session_.getMessagesForRequest(),
                               "provider unavailable before dispatch")) {
         requestStartMs_ = 0;
-        agentRunner_.reset();
         state_ = State::Idle;
     }
 }
@@ -969,9 +955,8 @@ void ChatWindow::cancelRequest() {
     session_.addMessage(std::move(notice));
 
     requestStartMs_ = 0;
-    addAgentTraceEvent(AgentTraceType::Cancelled, "request cancelled");
-    agentRunner_.reset();
-    agentController_.markCancelled();
+    agentController_.addTraceEvent(AgentTraceType::Cancelled, "request cancelled");
+    agentController_.finishCancelled();
     state_ = State::Idle;
 }
 
@@ -980,9 +965,7 @@ void ChatWindow::clearHistory() {
     // doesn't re-add a stale assistant message after the clear.
     cancelFlag_.store(true);
     streamingContent_.clear();
-    agentRunner_.reset();
-    agentController_.reset();
-    clearAgentTrace();
+    agentController_.resetForNewRun();
     state_ = State::Idle;
     session_.clearHistory();
     touchActiveSession();
@@ -1037,10 +1020,10 @@ void ChatWindow::pollMessages() {
                     processToolCalls(calls);
                 } else {
                     requestStartMs_ = 0;
-                    addAgentTraceEvent(AgentTraceType::Completed,
-                                       "assistant response completed");
-                    agentRunner_.reset();
-                    agentController_.markCompleted();
+                    agentController_.addTraceEvent(
+                        AgentTraceType::Completed,
+                        "assistant response completed");
+                    agentController_.finishCompleted();
                     state_ = State::Idle;
                 }
                 break;
@@ -1054,9 +1037,8 @@ void ChatWindow::pollMessages() {
                 Gui::log("[AI Chat] error: %s", msg.data.c_str());
                 streamingContent_.clear();
                 requestStartMs_ = 0;
-                addAgentTraceEvent(AgentTraceType::ProviderError, msg.data);
-                agentRunner_.reset();
-                agentController_.markFailed();
+                agentController_.addTraceEvent(AgentTraceType::ProviderError, msg.data);
+                agentController_.finishFailed();
                 state_ = State::Idle;
                 break;
             }
@@ -1136,14 +1118,13 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
     // Log every error (AC 12.8).
     Gui::log("[AI Chat] error (category=%d): %s",
              static_cast<int>(err.category), err.message.c_str());
-    addAgentTraceEvent(AgentTraceType::ProviderError, err.message);
+    agentController_.addTraceEvent(AgentTraceType::ProviderError, err.message);
 
     // Restore idle state so the input field re-enables and the loading
     // indicator disappears (AC 12.6).
     streamingContent_.clear();
     requestStartMs_ = 0;
-    agentRunner_.reset();
-    agentController_.markFailed();
+    agentController_.finishFailed();
     state_ = State::Idle;
 }
 
@@ -1327,7 +1308,7 @@ void ChatWindow::drawToolConfirmationModal() {
     ImGui::OpenPopup("##tool_confirm");
     if (ImGui::BeginPopupModal("##tool_confirm", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        const ToolCall* pending = ToolExecutor::getInstance().getPendingToolCall();
+        const ToolCall* pending = agentController_.pendingApproval();
         if (pending) {
             ImGui::Text("AI wants to execute tool: %s", pending->name.c_str());
             ImGui::Separator();
@@ -1352,81 +1333,59 @@ void ChatWindow::drawToolConfirmationModal() {
 
             ImGui::Separator();
             if (ImGui::Button("Approve")) {
-                ToolExecutor::getInstance().setConfirmationState(
-                    ToolExecutor::ConfirmationState::Approved);
                 ImGui::CloseCurrentPopup();
+                state_ = State::ToolExecuting;
+                handleAgentOutcome(agentController_.approvePendingTool(makeAgentConfig()));
             }
             ImGui::SameLine();
             if (ImGui::Button("Deny")) {
-                ToolExecutor::getInstance().setConfirmationState(
-                    ToolExecutor::ConfirmationState::Denied);
                 ImGui::CloseCurrentPopup();
+                state_ = State::ToolExecuting;
+                handleAgentOutcome(agentController_.denyPendingTool(makeAgentConfig()));
             }
         } else {
-            agentRunner_.reset();
+            agentController_.addTraceEvent(AgentTraceType::ProviderError,
+                                           "pending tool confirmation disappeared");
+            agentController_.finishFailed();
             // Pending call went away — recover gracefully.
             state_ = State::Idle;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
-
-    // Drive the state machine based on the user's choice.
-    const auto confirmState = ToolExecutor::getInstance().getConfirmationState();
-    if (confirmState == ToolExecutor::ConfirmationState::Approved) {
-        ToolExecutor::getInstance().setConfirmationState(
-            ToolExecutor::ConfirmationState::Pending);
-        ToolExecutor::getInstance().setPendingToolCall(nullptr);
-
-        state_ = State::ToolExecuting;
-        handleAgentOutcome(agentRunner_.resumeApproved(makeAgentConfig()));
-    } else if (confirmState == ToolExecutor::ConfirmationState::Denied) {
-        ToolExecutor::getInstance().setConfirmationState(
-            ToolExecutor::ConfirmationState::Pending);
-        ToolExecutor::getInstance().setPendingToolCall(nullptr);
-        state_ = State::ToolExecuting;
-        handleAgentOutcome(agentRunner_.resumeDenied(makeAgentConfig()));
-    }
 }
 
 void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
     state_ = State::ToolExecuting;
-    agentController_.markExecutingTools();
-    handleAgentOutcome(agentRunner_.beginToolCalls(calls, makeAgentConfig()));
+    handleAgentOutcome(agentController_.beginToolCalls(calls, makeAgentConfig()));
 }
 
-void ChatWindow::handleAgentOutcome(AgentRunner::Outcome outcome) {
+void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
     for (const std::string& line : outcome.logs) {
         Gui::log("%s", line.c_str());
     }
-    appendAgentTraceEvents(std::move(outcome.traceEvents));
     for (auto& msg : outcome.messages) {
         session_.addMessage(std::move(msg));
         touchActiveSession();
     }
 
     switch (outcome.kind) {
-        case AgentRunner::OutcomeKind::NeedsConfirmation:
+        case AgentController::ToolOutcomeKind::NeedsConfirmation:
             if (outcome.pendingToolCall) {
-                ToolExecutor::getInstance().setPendingToolCall(&*outcome.pendingToolCall);
-                ToolExecutor::getInstance().setConfirmationState(
-                    ToolExecutor::ConfirmationState::Pending);
-                agentController_.markWaitingApproval();
                 state_ = State::ToolConfirmation;
             } else {
-                agentController_.markFailed();
+                agentController_.finishFailed();
                 state_ = State::Idle;
             }
             break;
-        case AgentRunner::OutcomeKind::ReadyForFollowUp:
+        case AgentController::ToolOutcomeKind::ReadyForFollowUp:
             sendFollowUpAfterTools();
             break;
-        case AgentRunner::OutcomeKind::Stopped:
-        case AgentRunner::OutcomeKind::Idle:
+        case AgentController::ToolOutcomeKind::Stopped:
+        case AgentController::ToolOutcomeKind::Idle:
         default:
             requestStartMs_ = 0;
-            agentRunner_.reset();
-            agentController_.markFailed();
+            agentController_.finishFailed();
             state_ = State::Idle;
             break;
     }
@@ -1435,13 +1394,13 @@ void ChatWindow::handleAgentOutcome(AgentRunner::Outcome outcome) {
 void ChatWindow::sendFollowUpAfterTools() {
     if (dispatchAgentRequest(session_.getMessagesForRequest(),
                              "active provider unavailable for tool follow-up")) {
-        addAgentTraceEvent(AgentTraceType::FollowUpRequested,
-                           "tool results sent back to model");
+        agentController_.addTraceEvent(AgentTraceType::FollowUpRequested,
+                                       "tool results sent back to model");
         return;
     }
 
     requestStartMs_ = 0;
-    agentRunner_.reset();
+    agentController_.finishFailed();
     state_ = State::Idle;
 }
 
@@ -1450,6 +1409,7 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     AgentController::ModelRequest request;
     request.providerName = currentProvider_;
     request.modelOverride = currentModel_;
+    request.failureDetail = failureDetail ? failureDetail : "";
     request.messages = messages;
     request.stream = true;
 
@@ -1458,29 +1418,22 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     AgentController::DispatchResult result =
         agentController_.dispatchModelRequest(request, cancelFlag_);
 
+    if (result.dispatched) {
+        state_ = State::WaitingResponse;
+        return true;
+    }
+
     const std::string detail =
         failureDetail && *failureDetail
             ? std::string(failureDetail)
             : (result.error.empty() ? std::string("agent dispatch failed")
                                     : result.error);
-    if (!result.dispatched) {
-        result.traceEvent.detail = detail;
-    }
-    agentTrace_.push_back(result.traceEvent);
-    trimTraceEvents(agentTrace_);
-    if (result.dispatched) {
-        agentController_.markWaitingModel();
-        state_ = State::WaitingResponse;
-        return true;
-    }
-
     Gui::log("[AI Chat] agent dispatch failed: %s", detail.c_str());
-    agentController_.markFailed();
     return false;
 }
 
-AgentRunner::Config ChatWindow::makeAgentConfig() const {
-    AgentRunner::Config cfg;
+AgentController::ToolConfig ChatWindow::makeAgentConfig() const {
+    AgentController::ToolConfig cfg;
     cfg.maxAgentSteps = maxAgentSteps_;
     cfg.maxToolCallsPerTurn = maxToolCallsPerTurn_;
     cfg.autoApproveWrites = AiSettings::getInstance().get().autoApproveWrites;

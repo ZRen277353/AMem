@@ -3,7 +3,6 @@
 
 #include "../Window.h"
 #include "AgentController.h"
-#include "AgentRunner.h"
 #include "AIProvider.h"
 #include "ChatSession.h"
 
@@ -85,17 +84,11 @@ private:
 
     // ---- tool-execution flow (task 8.3 fleshes these out) --------------
     void processToolCalls(const std::vector<ToolCall>& calls);
-    void handleAgentOutcome(AgentRunner::Outcome outcome);
+    void handleAgentOutcome(AgentController::ToolOutcome outcome);
     void sendFollowUpAfterTools();
     bool dispatchAgentRequest(const std::vector<ChatMessage>& messages,
                               const char* failureDetail);
-    AgentRunner::Config makeAgentConfig() const;
-    void addAgentTraceEvent(AgentTraceType type,
-                            const std::string& detail = {},
-                            const std::string& tool = {},
-                            long long durationMs = 0);
-    void appendAgentTraceEvents(std::vector<AgentTraceEvent> events);
-    void clearAgentTrace();
+    AgentController::ToolConfig makeAgentConfig() const;
 
     // ---- session switching --------------------------------------------
     // Load the session identified by `id` into session_, replacing the
@@ -159,9 +152,7 @@ private:
     size_t lastRenderedMessageCount_ = 0;
     size_t lastStreamingContentLen_ = 0;
 
-    AgentRunner agentRunner_;
     AgentController agentController_;
-    std::vector<AgentTraceEvent> agentTrace_;
     int maxAgentSteps_ = 12;
     int maxToolCallsPerTurn_ = 16;
 

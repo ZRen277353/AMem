@@ -5,7 +5,6 @@
 
 #include <functional>
 #include <mutex>
-#include <optional>
 #include <future>
 #include <string>
 #include <unordered_map>
@@ -37,11 +36,6 @@ struct ToolResult {
 // definitions when composing the next request.
 class ToolExecutor {
 public:
-    // User confirmation state for a pending write-classified tool call. The
-    // UI toggles this between Pending / Approved / Denied as the user
-    // interacts with the confirmation modal.
-    enum class ConfirmationState { Pending, Approved, Denied };
-
     static ToolExecutor& getInstance() {
         static ToolExecutor instance;
         return instance;
@@ -82,18 +76,6 @@ public:
     void setExecutionTimeout(int seconds);
     int getExecutionTimeout() const;
 
-    // User confirmation state plumbing used by the UI to gate write tools
-    // (AC 6.2 / 6.4). The executor itself does not block on confirmation;
-    // that is the ChatWindow's responsibility.
-    void setConfirmationState(ConfirmationState state);
-    ConfirmationState getConfirmationState() const;
-
-    // Pending tool_call awaiting user confirmation. The ChatWindow stores
-    // the call here while showing the modal; the UI reads it back to render
-    // the confirmation prompt. Passing nullptr clears the pending entry.
-    void setPendingToolCall(const ToolCall* call);
-    const ToolCall* getPendingToolCall() const;
-
 private:
     ToolExecutor() = default;
     ToolExecutor(const ToolExecutor&) = delete;
@@ -104,8 +86,6 @@ private:
     mutable std::mutex activeFuturesMutex_;
     std::vector<std::shared_future<std::string>> activeFutures_;
     int executionTimeout_ = 30; // seconds, AC 6.5 default
-    ConfirmationState confirmState_ = ConfirmationState::Pending;
-    std::optional<ToolCall> pendingCall_;
 };
 
 } // namespace AI

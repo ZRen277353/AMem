@@ -328,30 +328,6 @@ int ToolExecutor::getExecutionTimeout() const {
     return executionTimeout_;
 }
 
-void ToolExecutor::setConfirmationState(ConfirmationState state) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    confirmState_ = state;
-}
-
-ToolExecutor::ConfirmationState ToolExecutor::getConfirmationState() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return confirmState_;
-}
-
-void ToolExecutor::setPendingToolCall(const ToolCall* call) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (call) {
-        pendingCall_ = *call;
-    } else {
-        pendingCall_.reset();
-    }
-}
-
-const ToolCall* ToolExecutor::getPendingToolCall() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return pendingCall_ ? &*pendingCall_ : nullptr;
-}
-
 } // namespace AI
 
 #endif // HAVE_AI_CHAT
