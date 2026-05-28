@@ -168,6 +168,31 @@ std::string validateAgainstSchema(const json& args, const std::string& schemaStr
     return validateAgainstSchema(args, schema, "root");
 }
 
+std::string extractToolError(const std::string& resultJson) {
+    if (resultJson.empty()) return "";
+
+    try {
+        const json result = json::parse(resultJson);
+        if (!result.is_object() || !result.contains("error")) {
+            return "";
+        }
+
+        const json& err = result["error"];
+        if (err.is_null()) {
+            return "";
+        }
+        if (err.is_string()) {
+            return err.get<std::string>();
+        }
+        if (err.is_boolean() && !err.get<bool>()) {
+            return "";
+        }
+        return err.dump();
+    } catch (const std::exception&) {
+        return "";
+    }
+}
+
 } // namespace
 
 void ToolExecutor::registerTool(const std::string& name,
@@ -280,7 +305,8 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
             return result;
         }
         result.resultJson = fut.get();
-        result.success = true;
+        result.errorMessage = extractToolError(result.resultJson);
+        result.success = result.errorMessage.empty();
     } catch (const std::exception& e) {
         result.success = false;
         result.resultJson.clear();

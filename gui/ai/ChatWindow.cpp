@@ -1047,6 +1047,14 @@ void ChatWindow::pollMessages() {
                 break;
             }
             case UIMessageType::Error: {
+                if (msg.response.error) {
+                    if (streamingContent_.empty() && !msg.response.message.content.empty()) {
+                        streamingContent_ = msg.response.message.content;
+                    }
+                    displayErrorForCategory(msg.response.error);
+                    break;
+                }
+
                 ChatMessage errMsg;
                 errMsg.role = Role::System;
                 errMsg.content = std::string("[error] ") + msg.data;

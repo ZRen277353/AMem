@@ -245,6 +245,13 @@ ChatMessage AgentRunner::makeToolMessage(const ToolCall& tc,
         }
     } else {
         audit["error"] = result.errorMessage;
+        if (!result.resultJson.empty()) {
+            try {
+                audit["details"] = nlohmann::json::parse(result.resultJson);
+            } catch (const nlohmann::json::exception&) {
+                audit["details_raw"] = result.resultJson;
+            }
+        }
     }
 
     toolMsg.content = audit.dump();
