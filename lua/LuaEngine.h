@@ -74,6 +74,8 @@ private:
     ~LuaEngine();
 
     // 内部辅助方法
+    bool ExecuteFileLocked(const std::string& filepath);
+    void AddScriptPathLocked(const std::string& path);
     bool CheckLuaError(int result);
     void PushErrorHandler();
     std::string GetLuaError(lua_State* L);
