@@ -2,6 +2,14 @@
 #include "SocketCommand.h"
 #include <cstring>
 
+namespace {
+constexpr int kMaxFreezeItemCount = 100000;
+
+bool isValidCount(int value, int maxValue) {
+    return value >= 0 && value <= maxValue;
+}
+} // namespace
+
 bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
                PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
@@ -80,12 +88,14 @@ bool FreezeGetList(std::vector<CeFreezeItem> &outList, bool &isPaused,
         CeFreezeListOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (!isValidCount(output.count, kMaxFreezeItemCount))
+            return false;
         isPaused = output.isPaused != 0;
         interval_ms = output.interval_ms;
         outList.clear();
         if (output.count > 0) {
-            outList.resize(output.count);
-            if (!client->Receive(outList.data(), output.count * sizeof(CeFreezeItem)))
+            outList.resize(static_cast<size_t>(output.count));
+            if (!client->Receive(outList.data(), static_cast<size_t>(output.count) * sizeof(CeFreezeItem)))
                 return false;
         }
         return true;

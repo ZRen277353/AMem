@@ -3,6 +3,14 @@
 #include <iostream>
 #include <iomanip>
 
+namespace {
+constexpr int kMaxScanResultPageCount = 1000;
+
+bool isValidScanPageRequest(int offset, int count) {
+    return offset >= 0 && count >= 0 && count <= kMaxScanResultPageCount;
+}
+} // namespace
+
 bool ScanSetRange(int type, PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SETRANGE;
@@ -82,6 +90,9 @@ int GetScanResultCount(PortType port) {
 
 bool GetScanResult(int offset, int count,
                    std::vector<std::pair<uint64_t, uint64_t>> &results, PortType port) {
+    if (!isValidScanPageRequest(offset, count))
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_GETSCANRESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -93,11 +104,15 @@ bool GetScanResult(int offset, int count,
         CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.total_count < 0 ||
+            output.actual_count < 0 ||
+            output.actual_count > count)
+            return false;
         results.clear();
         if (output.actual_count <= 0)
             return true;
-        results.resize(output.actual_count);
-        if (!client->Receive(results.data(), output.actual_count * sizeof(uint64_t) * 2))
+        results.resize(static_cast<size_t>(output.actual_count));
+        if (!client->Receive(results.data(), static_cast<size_t>(output.actual_count) * sizeof(uint64_t) * 2))
             return false;
         return true;
     });
@@ -254,6 +269,9 @@ int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
 bool GetTypedScanResult(int offset, int count,
                         std::vector<std::tuple<uint64_t, uint64_t, short>> &results,
                         PortType port) {
+    if (!isValidScanPageRequest(offset, count))
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_GETSCAN_TYPE_RESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -265,9 +283,14 @@ bool GetTypedScanResult(int offset, int count,
         CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.total_count < 0 ||
+            output.actual_count < 0 ||
+            output.actual_count > count)
+            return false;
         results.clear();
         if (output.actual_count <= 0)
             return true;
+        results.reserve(static_cast<size_t>(output.actual_count));
         for (int i = 0; i < output.actual_count; i++) {
             uint64_t addr = 0;
             uint64_t value = 0;
