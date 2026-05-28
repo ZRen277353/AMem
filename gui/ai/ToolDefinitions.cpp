@@ -650,7 +650,13 @@ std::string execScanValue(const std::string& argsJson) {
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
         const uint64_t start = parseOptionalAddress(args, "start", 0);
         const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
+                                   ? args["memory_type_raw"].get<int>()
+                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
 
+        if (!ScanSetRange(memoryType, PORT_MAIN)) {
+            return makeError("socket communication error: scan_set_range");
+        }
         const int count = ScanValue(flags, bytes, start, end, PORT_MAIN);
         if (count < 0) {
             return makeError("socket communication error: scan_value");
@@ -699,7 +705,13 @@ std::string execScanFuzzy(const std::string& argsJson) {
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
         const uint64_t start = parseOptionalAddress(args, "start", 0);
         const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
+                                   ? args["memory_type_raw"].get<int>()
+                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
 
+        if (!ScanSetRange(memoryType, PORT_MAIN)) {
+            return makeError("socket communication error: scan_set_range");
+        }
         const int count = ScanFuzzyValueWithProgress(flags, nullptr, nullptr, start, end, PORT_MAIN);
         if (count < 0) {
             return makeError("socket communication error: scan_fuzzy");
@@ -726,6 +738,13 @@ std::string execScanHex(const std::string& argsJson) {
         }
         const uint64_t start = parseOptionalAddress(args, "start", 0);
         const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
+                                   ? args["memory_type_raw"].get<int>()
+                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
+
+        if (!ScanSetRange(memoryType, PORT_MAIN)) {
+            return makeError("socket communication error: scan_set_range");
+        }
         const int count = ScanHEXValueWithProgress(start, end, bytes, nullptr, nullptr, PORT_MAIN);
         if (count < 0) {
             return makeError("socket communication error: scan_hex");
