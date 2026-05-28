@@ -40,7 +40,7 @@ public:
     };
 
     DispatchResult dispatchModelRequest(const ModelRequest& request,
-                                        std::atomic<bool>& cancelFlag);
+                                        CancellationToken cancelToken);
 
     ToolOutcome beginToolCalls(const std::vector<ToolCall>& calls,
                                const ToolConfig& config);
@@ -62,6 +62,7 @@ public:
     void finishFailed();
     void finishCancelled();
     RunState state() const { return run_.state; }
+    const std::string& runId() const { return run_.id; }
     int stepCount() const { return runner_.stepCount(); }
     const std::vector<AgentTraceEvent>& trace() const { return run_.trace; }
     const ToolCall* pendingApproval() const;

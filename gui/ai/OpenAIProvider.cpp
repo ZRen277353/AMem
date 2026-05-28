@@ -128,6 +128,7 @@ ProviderError classifyHttpError(const HttpResponse& resp) {
 void deliverCompletion(const CompletionRequest& request, CompletionResponse response) {
     UIMessage msg;
     msg.type = UIMessageType::Completion;
+    msg.runId = request.runId;
     msg.response = response;
     UIMessageQueue::getInstance().push(std::move(msg));
     if (request.onComplete) {
@@ -143,6 +144,7 @@ void deliverToken(const CompletionRequest& request, const std::string& token) {
     }
     UIMessage msg;
     msg.type = UIMessageType::Token;
+    msg.runId = request.runId;
     msg.data = token;
     UIMessageQueue::getInstance().push(std::move(msg));
     if (request.onToken) {
@@ -407,7 +409,7 @@ CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) co
 // ---------------------------------------------------------------------------
 
 void OpenAIProvider::sendCompletion(const CompletionRequest& request,
-                                    std::atomic<bool>& cancelFlag) {
+                                    CancellationToken cancelToken) {
     const std::string base = stripTrailingSlash(
         !config_.baseUrl.empty() ? config_.baseUrl : getDefaultBaseUrl());
     const std::string url = base + "/chat/completions";
@@ -442,6 +444,7 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
                 // the UI queue so the window can show it inline.
                 UIMessage msg;
                 msg.type = UIMessageType::Error;
+                msg.runId = requestCopy->runId;
                 msg.data = delta.error.message;
                 UIMessageQueue::getInstance().push(std::move(msg));
                 return;
@@ -500,7 +503,7 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
 
         HttpClient::getInstance().postAsync(url, headers, body,
                                             std::move(sseCb), std::move(doneCb),
-                                            cancelFlag);
+                                            std::move(cancelToken));
     } else {
         auto requestCopy = std::make_shared<CompletionRequest>(request);
 
@@ -520,7 +523,7 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
 
         HttpClient::getInstance().postAsync(url, headers, body,
                                             /*onSSE=*/nullptr, std::move(doneCb),
-                                            cancelFlag);
+                                            std::move(cancelToken));
     }
 }
 

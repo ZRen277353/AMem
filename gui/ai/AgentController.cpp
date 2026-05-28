@@ -53,7 +53,7 @@ void AgentController::trimTrace() {
 
 AgentController::DispatchResult AgentController::dispatchModelRequest(
     const ModelRequest& request,
-    std::atomic<bool>& cancelFlag) {
+    CancellationToken cancelToken) {
     DispatchResult result;
     result.providerName = request.providerName;
 
@@ -72,6 +72,7 @@ AgentController::DispatchResult AgentController::dispatchModelRequest(
 
     const ProviderConfig& cfg = provider->getConfig();
     CompletionRequest completion;
+    completion.runId = run_.id;
     completion.messages = request.messages;
     completion.tools = ToolExecutor::getInstance().getToolDefinitions();
     completion.model =
@@ -86,8 +87,11 @@ AgentController::DispatchResult AgentController::dispatchModelRequest(
                       ? "model request dispatched"
                       : "model request dispatched: " + completion.model);
     appendTraceEvent(result.traceEvent);
-    cancelFlag.store(false);
-    provider->sendCompletion(completion, cancelFlag);
+    if (!cancelToken) {
+        cancelToken = std::make_shared<std::atomic<bool>>(false);
+    }
+    cancelToken->store(false);
+    provider->sendCompletion(completion, std::move(cancelToken));
     result.dispatched = true;
     markWaitingModel();
     return result;

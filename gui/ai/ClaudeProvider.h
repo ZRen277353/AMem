@@ -34,7 +34,7 @@ public:
     const ProviderConfig& getConfig() const override;
 
     void sendCompletion(const CompletionRequest& request,
-                        std::atomic<bool>& cancelFlag) override;
+                        CancellationToken cancelToken) override;
 
 private:
     ProviderConfig config_;

@@ -20,6 +20,7 @@ enum class UIMessageType {
 // 后台线程 → 主线程（ImGui）消息
 struct UIMessage {
     UIMessageType type = UIMessageType::Token;
+    std::string runId;
     std::string data;                 // Token 内容 or Error 描述
     CompletionResponse response;      // Completion 时的完整响应
 };

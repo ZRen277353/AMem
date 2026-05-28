@@ -47,6 +47,10 @@ std::string trimWhitespace(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
+CancellationToken makeCancellationToken() {
+    return std::make_shared<std::atomic<bool>>(false);
+}
+
 bool startsWithICase(const std::string& s, const char* prefix) {
     const size_t n = std::strlen(prefix);
     if (s.size() < n) return false;
@@ -91,7 +95,7 @@ long long nowUnixSeconds() {
 }
 
 // Current steady-clock time in milliseconds. Used for measuring response
-// latency — steady_clock is immune to wall-clock adjustments, so the
+// latency. steady_clock is immune to wall-clock adjustments, so the
 // delta is accurate even if the system clock drifts during a long
 // completion.
 long long nowSteadyMs() {
@@ -137,7 +141,7 @@ std::string formatDuration(long long ms) {
 }
 
 const char* stateLabel(ChatWindow* /*unused*/, int stateValue) {
-    // Internal helper — the State enum is private, so callers pass an int
+    // Internal helper: the State enum is private, so callers pass an int
     // cast of the enum value. Keeps the label logic out of the header.
     switch (stateValue) {
         case 0: return "Idle";
@@ -223,6 +227,7 @@ ImVec4 agentRunStateColor(AgentRunState state) {
 
 ChatWindow::ChatWindow() {
     name = "AI Chat";
+    cancelToken_ = makeCancellationToken();
 
     // Initialise the provider registry and tool registry. Both initBuiltin*
     // methods are idempotent (they replace existing entries) so calling
@@ -344,8 +349,10 @@ ChatWindow::~ChatWindow() {
     // Abort any in-flight request so the background HTTP worker exits
     // promptly instead of running to completion against a destroyed
     // window. The worker only inspects this flag between chunks, so a
-    // brief delay is still possible — acceptable for a UI shutdown path.
-    cancelFlag_.store(true);
+    // brief delay is still possible; acceptable for a UI shutdown path.
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
 
     // Best-effort persist on shutdown. addMessage() already auto-persists
     // after every append, but saving again here captures any in-memory
@@ -366,7 +373,7 @@ unsigned int ChatWindow::getWindowFlags() const {
 // ---------------------------------------------------------------------------
 
 void ChatWindow::onDraw() {
-    // Drain the producer→consumer queue first so any tokens that arrived
+    // Drain the producer-to-consumer queue first so any tokens that arrived
     // since the last frame are visible in the render performed below.
     pollMessages();
 
@@ -469,10 +476,10 @@ void ChatWindow::drawSessionControls() {
             std::string display = s.title;
             if (display.size() > kMaxTitleChars) {
                 display.resize(kMaxTitleChars);
-                display += "…";
+                display += "...";
             }
 
-            // Inline the message count into the label — no SameLine(),
+            // Inline the message count into the label; no SameLine(),
             // which was previously pushing the cursor past the popup's
             // content region and forcing it to grow horizontally.
             char label[192];
@@ -527,7 +534,9 @@ void ChatWindow::switchToSession(const std::string& id) {
 
     // Cancel any in-flight request so a late completion can't land on
     // the newly-loaded session and corrupt it.
-    cancelFlag_.store(true);
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
     streamingContent_.clear();
     agentController_.resetForNewRun();
     requestStartMs_ = 0;
@@ -566,7 +575,9 @@ void ChatWindow::createNewSession() {
 
     // Clear in-memory state and bind session_ to the new path without
     // touching the previous session's file on disk.
-    cancelFlag_.store(true);
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
     streamingContent_.clear();
     agentController_.resetForNewRun();
     requestStartMs_ = 0;
@@ -608,7 +619,7 @@ void ChatWindow::deleteSession(const std::string& id) {
 void ChatWindow::touchActiveSession() {
     if (activeSessionId_.empty()) return;
     const auto& msgs = session_.getMessages();
-    // First user message — used to auto-derive the session title on the
+    // First user message: used to auto-derive the session title on the
     // first send in a fresh chat.
     std::string firstUser;
     for (const auto& m : msgs) {
@@ -647,7 +658,7 @@ void ChatWindow::drawToolbar() {
 
     ImGui::SameLine();
 
-    // Model field — free-form text so the user can pick models not in the
+    // Model field: free-form text so the user can pick models not in the
     // built-in list without needing a settings-panel round-trip.
     ImGui::SetNextItemWidth(220.0f);
     char modelBuf[256] = {};
@@ -685,7 +696,7 @@ void ChatWindow::drawToolbar() {
     ImGui::TextDisabled("[%s]", stateLabel(this, static_cast<int>(state_)));
 
     // Live token usage. `estimateTokenCount()` is the same heuristic the
-    // session uses when deciding whether to truncate — showing it here
+    // session uses when deciding whether to truncate. Showing it here
     // gives users an at-a-glance warning when they're approaching the
     // configured ceiling so they can wipe history or raise the limit.
     const int usedTokens = session_.estimateTokenCount();
@@ -707,7 +718,7 @@ void ChatWindow::drawToolbar() {
     ImGui::PopStyleColor();
 
     // YOLO indicator. Shows up only when auto-approve is on so the user
-    // can't forget they enabled it — bright red to match the warning in
+    // can't forget they enabled it; bright red to match the warning in
     // the settings panel.
     if (AiSettings::getInstance().get().autoApproveWrites) {
         ImGui::SameLine();
@@ -822,7 +833,7 @@ void ChatWindow::drawInputArea() {
     // Append inputGeneration_ to the widget id so that bumping the
     // counter in sendMessage() forces ImGui to treat this as a brand-
     // new widget. InputTextMultiline keeps an internal cached copy of
-    // the buffer as long as the same widget id is active — without a
+    // the buffer as long as the same widget id is active. Without a
     // fresh id, a plain memset on inputBuf_ is immediately overwritten
     // by that cache on the next frame, causing the "sent text stays in
     // the input box" bug.
@@ -931,7 +942,9 @@ void ChatWindow::sendMessage() {
 }
 
 void ChatWindow::cancelRequest() {
-    cancelFlag_.store(true);
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
 
     // Preserve any partial streaming content as an assistant message so the
     // user doesn't lose what they've already seen (AC 12.7), then append a
@@ -963,7 +976,9 @@ void ChatWindow::cancelRequest() {
 void ChatWindow::clearHistory() {
     // Cancel any in-flight request first so its completion callback
     // doesn't re-add a stale assistant message after the clear.
-    cancelFlag_.store(true);
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
     streamingContent_.clear();
     agentController_.resetForNewRun();
     state_ = State::Idle;
@@ -978,6 +993,9 @@ void ChatWindow::clearHistory() {
 void ChatWindow::pollMessages() {
     UIMessage msg;
     while (UIMessageQueue::getInstance().tryPop(msg)) {
+        if (!msg.runId.empty() && msg.runId != agentController_.runId()) {
+            continue;
+        }
         switch (msg.type) {
             case UIMessageType::Token: {
                 streamingContent_.append(msg.data);
@@ -987,13 +1005,13 @@ void ChatWindow::pollMessages() {
                 const CompletionResponse& resp = msg.response;
 
                 if (resp.error) {
-                    // Categorised error handling (task 9.1, AC 12.1–12.8).
+                    // Categorised error handling (task 9.1, AC 12.1-12.8).
                     displayErrorForCategory(resp.error);
                     break;
                 }
 
                 // Success path: commit the assistant message. Prefer the
-                // response's own content field — it's authoritative — but
+                // response's own content field. It's authoritative, but
                 // fall back to the streamed accumulator when providers
                 // return an empty content on the final completion (some
                 // streaming endpoints do this).
@@ -1014,7 +1032,7 @@ void ChatWindow::pollMessages() {
                 touchActiveSession();
 
                 if (hasToolCalls) {
-                    // Keep requestStartMs_ running — the follow-up
+                    // Keep requestStartMs_ running; the follow-up
                     // completion after tool execution continues the same
                     // logical "AI turn" from the user's perspective.
                     processToolCalls(calls);
@@ -1047,7 +1065,7 @@ void ChatWindow::pollMessages() {
 }
 
 // ---------------------------------------------------------------------------
-// Error routing — task 9.1 (Requirement 12)
+// Error routing: task 9.1 (Requirement 12)
 // ---------------------------------------------------------------------------
 
 void ChatWindow::displayErrorForCategory(const ProviderError& err) {
@@ -1129,7 +1147,7 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
 }
 
 // ---------------------------------------------------------------------------
-// Message rendering — task 8.2
+// Message rendering: task 8.2
 // ---------------------------------------------------------------------------
 
 void ChatWindow::drawMessageArea() {
@@ -1223,7 +1241,7 @@ void ChatWindow::renderMessage(const ChatMessage& msg, int /*index*/) {
             break;
     }
 
-    // Header line: role · timestamp · (duration for AI messages).
+    // Header line: role, timestamp, and duration for AI messages.
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::TextUnformatted(roleStr);
     ImGui::PopStyleColor();
@@ -1281,7 +1299,7 @@ void ChatWindow::renderStreamingMessage() {
 void ChatWindow::renderLoadingIndicator() {
     // Animated cycling dots at roughly 500ms per step (AC 9.5). ImGui
     // typically runs at ~60 FPS, so advancing every 30 frames puts us at
-    // 4 states per two seconds ("" → "." → ".." → "...").
+    // 4 states per two seconds ("", ".", "..", "...").
     static const char* dots[] = {"", ".", "..", "..."};
     // When a request is in flight, include a live elapsed counter so the
     // user can see the request isn't stuck.
@@ -1298,7 +1316,7 @@ void ChatWindow::renderLoadingIndicator() {
 }
 
 // ---------------------------------------------------------------------------
-// Tool-confirmation + tool-execution flow — task 8.3
+// Tool-confirmation + tool-execution flow: task 8.3
 // ---------------------------------------------------------------------------
 
 void ChatWindow::drawToolConfirmationModal() {
@@ -1315,7 +1333,7 @@ void ChatWindow::drawToolConfirmationModal() {
 
             // Pretty-print the arguments JSON when possible so the user can
             // actually read what they're approving (AC 6.3). Fall back to
-            // the raw string if the arguments aren't valid JSON — which can
+            // the raw string if the arguments aren't valid JSON, which can
             // happen for malformed tool calls we still want to surface.
             std::string prettyArgs = pending->arguments;
             try {
@@ -1347,7 +1365,7 @@ void ChatWindow::drawToolConfirmationModal() {
             agentController_.addTraceEvent(AgentTraceType::ProviderError,
                                            "pending tool confirmation disappeared");
             agentController_.finishFailed();
-            // Pending call went away — recover gracefully.
+            // Pending call went away; recover gracefully.
             state_ = State::Idle;
             ImGui::CloseCurrentPopup();
         }
@@ -1414,9 +1432,13 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     request.stream = true;
 
     streamingContent_.clear();
+    if (cancelToken_) {
+        cancelToken_->store(true);
+    }
+    cancelToken_ = makeCancellationToken();
     requestStartMs_ = nowSteadyMs();
     AgentController::DispatchResult result =
-        agentController_.dispatchModelRequest(request, cancelFlag_);
+        agentController_.dispatchModelRequest(request, cancelToken_);
 
     if (result.dispatched) {
         state_ = State::WaitingResponse;

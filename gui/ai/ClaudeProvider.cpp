@@ -157,6 +157,7 @@ struct StreamState {
     bool errorSeen = false;
     ProviderError streamError;
 
+    std::string runId;
     StreamCallback onToken;
 };
 
@@ -215,6 +216,7 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
             }
             UIMessage m;
             m.type = UIMessageType::Token;
+            m.runId = state.runId;
             m.data = chunk;
             UIMessageQueue::getInstance().push(std::move(m));
         } else if (deltaType == "input_json_delta") {
@@ -437,7 +439,7 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
 }
 
 void ClaudeProvider::sendCompletion(const CompletionRequest& request,
-                                    std::atomic<bool>& cancelFlag) {
+                                    CancellationToken cancelToken) {
     // Fail fast when required config is missing so callers get a clear error
     // message instead of a 401 from the upstream API.
     if (config_.apiKey.empty()) {
@@ -446,6 +448,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         r.error.message  = "Anthropic API key is not configured";
         UIMessage m;
         m.type     = UIMessageType::Error;
+        m.runId    = request.runId;
         m.data     = r.error.message;
         m.response = r;
         UIMessageQueue::getInstance().push(std::move(m));
@@ -473,6 +476,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
     // callback (same HTTP worker thread invokes both, but shared_ptr keeps
     // the object alive across the callback transition regardless).
     auto state = std::make_shared<StreamState>();
+    state->runId = request.runId;
     state->onToken = request.onToken;
 
     // Snapshot the completion callback so we can hand it through to the
@@ -496,6 +500,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
             final.error = mapError(http, http.body);
             UIMessage m;
             m.type     = UIMessageType::Error;
+            m.runId    = state->runId;
             m.data     = final.error.message;
             m.response = final;
             UIMessageQueue::getInstance().push(std::move(m));
@@ -513,6 +518,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
             }
             UIMessage m;
             m.type     = UIMessageType::Error;
+            m.runId    = state->runId;
             m.data     = final.error.message;
             m.response = final;
             UIMessageQueue::getInstance().push(std::move(m));
@@ -527,6 +533,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
                 final.message.toolCalls = std::move(state->toolCalls);
                 UIMessage m;
                 m.type     = UIMessageType::Error;
+                m.runId    = state->runId;
                 m.data     = final.error.message;
                 m.response = final;
                 UIMessageQueue::getInstance().push(std::move(m));
@@ -542,6 +549,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
 
         UIMessage m;
         m.type     = UIMessageType::Completion;
+        m.runId    = state->runId;
         m.response = final;
         UIMessageQueue::getInstance().push(std::move(m));
         if (onComplete) onComplete(std::move(final));
@@ -552,7 +560,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
                                         body,
                                         std::move(sseCb),
                                         std::move(completeCb),
-                                        cancelFlag);
+                                        std::move(cancelToken));
 }
 
 } // namespace AI

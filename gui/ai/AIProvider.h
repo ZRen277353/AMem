@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -96,9 +97,11 @@ struct CompletionResponse {
 // 流式回调
 using StreamCallback = std::function<void(const std::string& token)>;
 using CompletionCallback = std::function<void(CompletionResponse response)>;
+using CancellationToken = std::shared_ptr<std::atomic<bool>>;
 
 // 请求参数
 struct CompletionRequest {
+    std::string runId;
     std::vector<ChatMessage> messages;
     std::vector<ToolDefinition> tools;
     std::string model;
@@ -129,7 +132,7 @@ public:
 
     // 发送聊天完成请求（异步，在后台线程调用）
     virtual void sendCompletion(const CompletionRequest& request,
-                                std::atomic<bool>& cancelFlag) = 0;
+                                CancellationToken cancelToken) = 0;
 };
 
 } // namespace AI

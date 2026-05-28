@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -33,6 +34,7 @@ using SSECallback = std::function<void(const std::string& eventData)>;
 
 // HTTP 完成回调（在后台线程调用）
 using HttpCompletionCallback = std::function<void(HttpResponse response)>;
+using CancellationToken = std::shared_ptr<std::atomic<bool>>;
 
 // 异步 HTTPS 客户端（Meyer's 单例）
 class HttpClient {
@@ -55,13 +57,13 @@ public:
     // 返回请求 ID，可用于 cancelRequest()
     // onSSE 每次接收到一个完整 SSE 事件（以空行分隔）时被调用
     // onComplete 在请求结束（成功/失败/取消）时被调用
-    // cancelFlag 由调用方提供，cancelRequest() 会将其置为 true
+    // cancelToken is owned by the async request; cancelRequest() sets it.
     uint64_t postAsync(const std::string& url,
                        const std::map<std::string, std::string>& headers,
                        const std::string& body,
                        SSECallback onSSE,
                        HttpCompletionCallback onComplete,
-                       std::atomic<bool>& cancelFlag);
+                       CancellationToken cancelToken);
 
     // 取消进行中的请求
     void cancelRequest(uint64_t requestId);
@@ -78,9 +80,9 @@ private:
     int responseTimeout_ = 300;
     ProxyConfig proxy_;
 
-    // 活跃请求表：requestId -> cancelFlag 指针
+    // Active request table: requestId -> cancellation token.
     std::mutex activeMutex_;
-    std::unordered_map<uint64_t, std::atomic<bool>*> activeRequests_;
+    std::unordered_map<uint64_t, CancellationToken> activeRequests_;
 
     std::atomic<uint64_t> nextRequestId_{1};
 };

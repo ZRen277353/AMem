@@ -214,6 +214,7 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
                 outMessage.content += token;
                 UIMessage msg;
                 msg.type = UIMessageType::Token;
+                msg.runId = request.runId;
                 msg.data = token;
                 UIMessageQueue::getInstance().push(std::move(msg));
                 if (request.onToken) {
@@ -363,7 +364,7 @@ bool DeepSeekProvider::validateToolCallArguments(const ChatMessage& message,
 // ---------------------------------------------------------------------------
 
 void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
-                                      std::atomic<bool>& cancelFlag) {
+                                      CancellationToken cancelToken) {
     // Build URL: {baseUrl}/chat/completions (no /v1 prefix for DeepSeek)
     std::string baseUrl = config_.baseUrl.empty() ? getDefaultBaseUrl() : config_.baseUrl;
     // Trim trailing slash to avoid double-slash in the final URL.
@@ -449,6 +450,7 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
 
             UIMessage msg;
             msg.type = UIMessageType::Completion;
+            msg.runId = request.runId;
             msg.response = resp;
             UIMessageQueue::getInstance().push(std::move(msg));
 
@@ -457,14 +459,14 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
             }
         };
 
-    // Fire the request. Ownership of cancelFlag remains with the caller; the
-    // HttpClient stores a pointer to it so cancelRequest() can signal it.
+    // Fire the request. The cancellation token is shared with HttpClient so
+    // it can outlive the UI object that started the request.
     (void)HttpClient::getInstance().postAsync(url,
                                               headers,
                                               body,
                                               std::move(onSSE),
                                               std::move(onComplete),
-                                              cancelFlag);
+                                              std::move(cancelToken));
 }
 
 } // namespace AI

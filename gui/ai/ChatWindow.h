@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -136,7 +137,7 @@ private:
 
     // Shared with the background HTTP worker: setting this to true aborts
     // the in-flight request. Reset to false before every new send.
-    std::atomic<bool> cancelFlag_{false};
+    CancellationToken cancelToken_;
 
     bool autoScroll_ = true;
     bool userScrolledUp_ = false;

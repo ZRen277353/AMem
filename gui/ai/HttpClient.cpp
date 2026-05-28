@@ -198,12 +198,15 @@ uint64_t HttpClient::postAsync(const std::string& url,
                                const std::string& body,
                                SSECallback onSSE,
                                HttpCompletionCallback onComplete,
-                               std::atomic<bool>& cancelFlag) {
+                               CancellationToken cancelToken) {
     const uint64_t requestId = nextRequestId_.fetch_add(1);
+    if (!cancelToken) {
+        cancelToken = std::make_shared<std::atomic<bool>>(false);
+    }
 
     {
         std::lock_guard<std::mutex> lock(activeMutex_);
-        activeRequests_[requestId] = &cancelFlag;
+        activeRequests_[requestId] = cancelToken;
     }
 
     // 捕获当前配置快照，避免后台线程读取时与 setter 竞争
@@ -224,7 +227,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
                         body,
                         onSSE = std::move(onSSE),
                         onComplete = std::move(onComplete),
-                        &cancelFlag,
+                        cancelToken = std::move(cancelToken),
                         connTimeout,
                         readTimeout,
                         proxySnap]() mutable {
@@ -306,7 +309,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
 
         req.content_receiver = [&](const char* data, size_t dataLen,
                                    uint64_t /*offset*/, uint64_t /*total*/) -> bool {
-            if (cancelFlag.load()) {
+            if (cancelToken && cancelToken->load()) {
                 aborted = true;
                 return false; // 通知 cpp-httplib 终止连接
             }
@@ -326,7 +329,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
             parser.finish();
         }
 
-        if (cancelFlag.load() || aborted) {
+        if ((cancelToken && cancelToken->load()) || aborted) {
             response.cancelled = true;
             response.errorMessage = "request cancelled";
             removeFromActive();
@@ -374,7 +377,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
 void HttpClient::cancelRequest(uint64_t requestId) {
     std::lock_guard<std::mutex> lock(activeMutex_);
     auto it = activeRequests_.find(requestId);
-    if (it != activeRequests_.end() && it->second != nullptr) {
+    if (it != activeRequests_.end() && it->second) {
         it->second->store(true);
     }
 }
