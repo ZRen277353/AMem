@@ -21,7 +21,10 @@ public:
     std::atomic<int> processHandle{0};
 
     void selectProcess(int pid, const std::string& name);
-    bool hasProcess() const { return selectedPid.load(std::memory_order_relaxed) != 0; }
+    bool hasProcess() const {
+        return selectedPid.load(std::memory_order_relaxed) != 0 &&
+               processHandle.load(std::memory_order_relaxed) != 0;
+    }
 
     // 线程安全的 selectedName 访问
     std::string getSelectedName() const {

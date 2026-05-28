@@ -5,20 +5,24 @@
 #include <algorithm>
 
 void AppContext::selectProcess(int pid, const std::string& name) {
-    selectedPid.store(pid, std::memory_order_relaxed);
+    selectedPid.store(0, std::memory_order_relaxed);
     processHandle.store(0, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lock(nameMutex_);
-        selectedName_ = name;
-    }
-
-    SetCurrentPid(pid);
     int handle = 0;
     if (OpenProcessHandle(pid, handle)) {
+        SetCurrentPid(pid);
         processHandle.store(handle, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(nameMutex_);
+            selectedName_ = name;
+        }
         Gui::log("进程已打开，句柄=%d", handle);
     } else {
+        SetCurrentPid(0);
         processHandle.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(nameMutex_);
+            selectedName_.clear();
+        }
         Gui::log("无法打开进程句柄 %d", pid);
     }
 
