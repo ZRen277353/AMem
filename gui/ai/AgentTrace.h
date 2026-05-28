@@ -7,6 +7,7 @@ namespace AI {
 
 enum class AgentTraceType {
     Started,
+    ModelRequestDispatched,
     CallLimitTruncated,
     StepLimitReached,
     AwaitingApproval,

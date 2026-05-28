@@ -151,6 +151,8 @@ const char* stateLabel(ChatWindow* /*unused*/, int stateValue) {
 const char* traceTypeLabel(AgentTraceType type) {
     switch (type) {
         case AgentTraceType::Started:            return "started";
+        case AgentTraceType::ModelRequestDispatched:
+            return "model";
         case AgentTraceType::CallLimitTruncated: return "limited";
         case AgentTraceType::StepLimitReached:   return "stopped";
         case AgentTraceType::AwaitingApproval:   return "approval";
@@ -187,6 +189,7 @@ ImVec4 traceTypeColor(AgentTraceType type) {
         case AgentTraceType::ProviderError:
             return ColorScheme::Error;
         case AgentTraceType::Started:
+        case AgentTraceType::ModelRequestDispatched:
         case AgentTraceType::Approved:
         case AgentTraceType::ToolStarted:
         default:
@@ -518,6 +521,7 @@ void ChatWindow::switchToSession(const std::string& id) {
     cancelFlag_.store(true);
     streamingContent_.clear();
     agentRunner_.reset();
+    agentController_.reset();
     clearAgentTrace();
     requestStartMs_ = 0;
     state_ = State::Idle;
@@ -558,6 +562,7 @@ void ChatWindow::createNewSession() {
     cancelFlag_.store(true);
     streamingContent_.clear();
     agentRunner_.reset();
+    agentController_.reset();
     clearAgentTrace();
     requestStartMs_ = 0;
     state_ = State::Idle;
@@ -580,6 +585,7 @@ void ChatWindow::deleteSession(const std::string& id) {
         // manager already picked a new active id, otherwise create one.
         streamingContent_.clear();
         agentRunner_.reset();
+        agentController_.reset();
         clearAgentTrace();
         requestStartMs_ = 0;
         state_ = State::Idle;
@@ -929,25 +935,13 @@ void ChatWindow::sendMessage() {
     streamingContent_.clear();
     agentRunner_.reset();
     clearAgentTrace();
-    addAgentTraceEvent(AgentTraceType::Started,
-                       "model request dispatched",
-                       currentProvider_);
-    cancelFlag_.store(false);
-    // Start the latency timer; pollMessages will stamp the assistant
-    // response with the elapsed delta when Completion arrives.
-    requestStartMs_ = nowSteadyMs();
 
-    // Build the outgoing request. The session handles the system prompt;
-    // tools come from the global ToolExecutor registry so every provider
-    // sees the same tool surface area.
-    CompletionRequest req;
-    req.messages = session_.getMessagesForRequest();
-    req.tools = ToolExecutor::getInstance().getToolDefinitions();
-    req.model = currentModel_.empty() ? provider->getConfig().model : currentModel_;
-    req.stream = true;
-
-    state_ = State::WaitingResponse;
-    provider->sendCompletion(req, cancelFlag_);
+    if (!dispatchAgentRequest(session_.getMessagesForRequest(),
+                              "provider unavailable before dispatch")) {
+        requestStartMs_ = 0;
+        agentRunner_.reset();
+        state_ = State::Idle;
+    }
 }
 
 void ChatWindow::cancelRequest() {
@@ -977,6 +971,7 @@ void ChatWindow::cancelRequest() {
     requestStartMs_ = 0;
     addAgentTraceEvent(AgentTraceType::Cancelled, "request cancelled");
     agentRunner_.reset();
+    agentController_.markCancelled();
     state_ = State::Idle;
 }
 
@@ -986,6 +981,7 @@ void ChatWindow::clearHistory() {
     cancelFlag_.store(true);
     streamingContent_.clear();
     agentRunner_.reset();
+    agentController_.reset();
     clearAgentTrace();
     state_ = State::Idle;
     session_.clearHistory();
@@ -1044,6 +1040,7 @@ void ChatWindow::pollMessages() {
                     addAgentTraceEvent(AgentTraceType::Completed,
                                        "assistant response completed");
                     agentRunner_.reset();
+                    agentController_.markCompleted();
                     state_ = State::Idle;
                 }
                 break;
@@ -1059,6 +1056,7 @@ void ChatWindow::pollMessages() {
                 requestStartMs_ = 0;
                 addAgentTraceEvent(AgentTraceType::ProviderError, msg.data);
                 agentRunner_.reset();
+                agentController_.markFailed();
                 state_ = State::Idle;
                 break;
             }
@@ -1145,6 +1143,7 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
     streamingContent_.clear();
     requestStartMs_ = 0;
     agentRunner_.reset();
+    agentController_.markFailed();
     state_ = State::Idle;
 }
 
@@ -1392,6 +1391,7 @@ void ChatWindow::drawToolConfirmationModal() {
 
 void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
     state_ = State::ToolExecuting;
+    agentController_.markExecutingTools();
     handleAgentOutcome(agentRunner_.beginToolCalls(calls, makeAgentConfig()));
 }
 
@@ -1411,8 +1411,10 @@ void ChatWindow::handleAgentOutcome(AgentRunner::Outcome outcome) {
                 ToolExecutor::getInstance().setPendingToolCall(&*outcome.pendingToolCall);
                 ToolExecutor::getInstance().setConfirmationState(
                     ToolExecutor::ConfirmationState::Pending);
+                agentController_.markWaitingApproval();
                 state_ = State::ToolConfirmation;
             } else {
+                agentController_.markFailed();
                 state_ = State::Idle;
             }
             break;
@@ -1424,35 +1426,57 @@ void ChatWindow::handleAgentOutcome(AgentRunner::Outcome outcome) {
         default:
             requestStartMs_ = 0;
             agentRunner_.reset();
+            agentController_.markFailed();
             state_ = State::Idle;
             break;
     }
 }
 
 void ChatWindow::sendFollowUpAfterTools() {
-    if (AIProvider* provider =
-            ProviderRegistry::getInstance().getProvider(currentProvider_)) {
-        CompletionRequest followUp;
-        followUp.messages = session_.getMessagesForRequest();
-        followUp.tools = ToolExecutor::getInstance().getToolDefinitions();
-        followUp.model =
-            currentModel_.empty() ? provider->getConfig().model : currentModel_;
-        followUp.stream = true;
-        cancelFlag_.store(false);
-        streamingContent_.clear();
-        requestStartMs_ = nowSteadyMs();
+    if (dispatchAgentRequest(session_.getMessagesForRequest(),
+                             "active provider unavailable for tool follow-up")) {
         addAgentTraceEvent(AgentTraceType::FollowUpRequested,
                            "tool results sent back to model");
-        state_ = State::WaitingResponse;
-        provider->sendCompletion(followUp, cancelFlag_);
         return;
     }
 
     requestStartMs_ = 0;
     agentRunner_.reset();
-    addAgentTraceEvent(AgentTraceType::ProviderError,
-                       "active provider unavailable for tool follow-up");
     state_ = State::Idle;
+}
+
+bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
+                                      const char* failureDetail) {
+    AgentController::ModelRequest request;
+    request.providerName = currentProvider_;
+    request.modelOverride = currentModel_;
+    request.messages = messages;
+    request.stream = true;
+
+    streamingContent_.clear();
+    requestStartMs_ = nowSteadyMs();
+    AgentController::DispatchResult result =
+        agentController_.dispatchModelRequest(request, cancelFlag_);
+
+    const std::string detail =
+        failureDetail && *failureDetail
+            ? std::string(failureDetail)
+            : (result.error.empty() ? std::string("agent dispatch failed")
+                                    : result.error);
+    if (!result.dispatched) {
+        result.traceEvent.detail = detail;
+    }
+    agentTrace_.push_back(result.traceEvent);
+    trimTraceEvents(agentTrace_);
+    if (result.dispatched) {
+        agentController_.markWaitingModel();
+        state_ = State::WaitingResponse;
+        return true;
+    }
+
+    Gui::log("[AI Chat] agent dispatch failed: %s", detail.c_str());
+    agentController_.markFailed();
+    return false;
 }
 
 AgentRunner::Config ChatWindow::makeAgentConfig() const {

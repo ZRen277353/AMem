@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "../Window.h"
+#include "AgentController.h"
 #include "AgentRunner.h"
 #include "AIProvider.h"
 #include "ChatSession.h"
@@ -86,6 +87,8 @@ private:
     void processToolCalls(const std::vector<ToolCall>& calls);
     void handleAgentOutcome(AgentRunner::Outcome outcome);
     void sendFollowUpAfterTools();
+    bool dispatchAgentRequest(const std::vector<ChatMessage>& messages,
+                              const char* failureDetail);
     AgentRunner::Config makeAgentConfig() const;
     void addAgentTraceEvent(AgentTraceType type,
                             const std::string& detail = {},
@@ -157,6 +160,7 @@ private:
     size_t lastStreamingContentLen_ = 0;
 
     AgentRunner agentRunner_;
+    AgentController agentController_;
     std::vector<AgentTraceEvent> agentTrace_;
     int maxAgentSteps_ = 12;
     int maxToolCallsPerTurn_ = 16;
