@@ -2,6 +2,7 @@
 
 #include <list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,8 +14,10 @@ class Window;
 namespace Gui {
 	extern std::list<std::unique_ptr<Window>> windows;
 	extern std::list<std::pair<std::string, int>> logs;
+	extern std::mutex logsMutex;
 
 	void mainLoop();
+	std::vector<std::pair<std::string, int>> getLogsSnapshot();
 
 	inline void log(const char* fmt, ...) {
 		char small_buf[512];
@@ -35,6 +38,7 @@ namespace Gui {
 			va_end(args2);
 			str.assign(buf.data(), buf.data() + needed);
 		}
+		std::lock_guard<std::mutex> lock(logsMutex);
 		if (!logs.empty() && str == logs.back().first)
 			logs.back().second++;
 		else
@@ -66,4 +70,4 @@ namespace Gui {
 		w->shouldBringToFront = true;
 		return w;
 	}
-} 
+}

@@ -13,7 +13,7 @@ unsigned int LogWindow::getWindowFlags() const
 }
 
 void LogWindow::onDraw() {
-    auto& logs = Gui::logs;
+    const auto logs = Gui::getLogsSnapshot();
     if (logs.empty()) {
         ImGui::TextDisabled("暂无日志");
     } else {
