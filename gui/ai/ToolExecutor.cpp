@@ -4,13 +4,13 @@
 
 #include "../../third_party/nlohmann/json.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <future>
-#include <iterator>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace AI {
@@ -193,6 +193,25 @@ std::string extractToolError(const std::string& resultJson) {
     }
 }
 
+std::shared_future<std::string> runExecutorAsync(
+    std::function<std::string(const std::string&)> executor,
+    std::string argsJson) {
+    auto promise = std::make_shared<std::promise<std::string>>();
+    std::shared_future<std::string> future = promise->get_future().share();
+
+    std::thread([promise,
+                 executor = std::move(executor),
+                 argsJson = std::move(argsJson)]() mutable {
+        try {
+            promise->set_value(executor(argsJson));
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    }).detach();
+
+    return future;
+}
+
 } // namespace
 
 void ToolExecutor::registerTool(const std::string& name,
@@ -276,34 +295,25 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
 
     const std::string normalizedArgsJson = args.dump();
 
-    // Invoke the executor asynchronously so we can enforce a wall-clock
-    // timeout (AC 6.6). std::async with launch::async guarantees a separate
-    // thread; the returned future's destructor will block if we abandoned
-    // it, but that is acceptable because we always wait_for() here and only
-    // give up on timeout — in which case we deliberately let the detached
-    // work finish on its own rather than introducing a stuck join.
+    // Invoke the executor asynchronously. Read-only tools enforce a
+    // wall-clock timeout (AC 6.6); write-classified tools wait for the real
+    // result in this background thread so the agent never continues from an
+    // ambiguous "timed out but may still commit" target state.
     ToolResult result;
     try {
         std::shared_future<std::string> fut =
-            std::async(std::launch::async,
-                       [executor = registration.executor, argsJson = normalizedArgsJson]() {
-                           return executor(argsJson);
-                       }).share();
+            runExecutorAsync(registration.executor, normalizedArgsJson);
         if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {
+            if (registration.safety == ToolSafety::Write) {
+                result.resultJson = fut.get();
+                result.errorMessage = extractToolError(result.resultJson);
+                result.success = result.errorMessage.empty();
+                return result;
+            }
+
             result.success = false;
             result.errorMessage = "Tool '" + call.name + "' execution timed out after " +
                                   std::to_string(timeoutSeconds) + " seconds";
-            {
-                std::lock_guard<std::mutex> lock(activeFuturesMutex_);
-                activeFutures_.erase(
-                    std::remove_if(activeFutures_.begin(), activeFutures_.end(),
-                                   [](const std::shared_future<std::string>& f) {
-                                       return f.wait_for(std::chrono::seconds(0)) ==
-                                              std::future_status::ready;
-                                   }),
-                    activeFutures_.end());
-                activeFutures_.push_back(fut);
-            }
             return result;
         }
         result.resultJson = fut.get();

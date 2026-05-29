@@ -22,6 +22,13 @@ int clampBudget(int value) {
     return std::clamp(value, 1, 64);
 }
 
+bool sameToolCall(const ToolCall& expected, const ToolCall& actual) {
+    if (!expected.id.empty() || !actual.id.empty()) {
+        return expected.id == actual.id;
+    }
+    return expected.name == actual.name && expected.arguments == actual.arguments;
+}
+
 } // namespace
 
 void AgentRunner::reset() {
@@ -135,7 +142,6 @@ AgentRunner::Outcome AgentRunner::completeToolExecution(const ToolCall& call,
                                                         const ToolResult& result,
                                                         long long durationMs,
                                                         const Config& config) {
-    (void)call;
     Outcome out;
     if (currentToolCallIndex_ >= static_cast<int>(pendingToolCalls_.size())) {
         reset();
@@ -144,6 +150,20 @@ AgentRunner::Outcome AgentRunner::completeToolExecution(const ToolCall& call,
     }
 
     const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
+    if (!sameToolCall(tc, call)) {
+        appendTrace(out,
+                    AgentTraceType::ToolFailed,
+                    &tc,
+                    "tool result did not match the pending tool call",
+                    durationMs);
+        out.messages.push_back(makeSystemMessage(
+            "[error] Ignored a stale or mismatched tool result. "
+            "The current agent run was stopped to preserve tool-call ordering."));
+        reset();
+        out.kind = OutcomeKind::Stopped;
+        return out;
+    }
+
     appendTrace(out,
                 result.success ? AgentTraceType::ToolSucceeded
                                : AgentTraceType::ToolFailed,

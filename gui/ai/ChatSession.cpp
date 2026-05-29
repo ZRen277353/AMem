@@ -256,6 +256,9 @@ int ChatSession::estimateTokenCountUnlocked() const {
     // because they are serialized into the outgoing payload.
     std::size_t chars = systemPrompt_.size();
     for (const auto& m : messages_) {
+        if (m.role == Role::System) {
+            continue;
+        }
         chars += m.content.size();
         chars += m.toolCallId.size();
         chars += m.name.size();
@@ -302,6 +305,12 @@ std::vector<ChatMessage> ChatSession::getMessagesForRequest() const {
         out.push_back(std::move(sys));
     }
     for (const auto& m : messages_) {
+        // Persisted Role::System messages are UI/runtime notices such as
+        // cancellation and provider errors. The configured systemPrompt_ is
+        // the only system instruction that should be sent to the model.
+        if (m.role == Role::System) {
+            continue;
+        }
         out.push_back(m);
     }
     return out;

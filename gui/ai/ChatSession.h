@@ -60,7 +60,8 @@ public:
     void setSessionFilePath(const std::string& filepath);
 
     // Build the outgoing message list for an AI request. If a system prompt
-    // is set it is inserted as the first element with Role::System.
+    // is set it is inserted as the first element with Role::System. Persisted
+    // Role::System messages are UI/runtime notices and are not sent.
     std::vector<ChatMessage> getMessagesForRequest() const;
 
     // Maximum system prompt length (characters) per AC 8.2.

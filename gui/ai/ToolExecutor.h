@@ -5,7 +5,6 @@
 
 #include <functional>
 #include <mutex>
-#include <future>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,8 +82,6 @@ private:
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ToolRegistration> tools_;
-    mutable std::mutex activeFuturesMutex_;
-    std::vector<std::shared_future<std::string>> activeFutures_;
     int executionTimeout_ = 30; // seconds, AC 6.5 default
 };
 
