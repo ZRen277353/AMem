@@ -169,7 +169,18 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 { "success": true, "result": { "hex": "48656c6c6f...", "size": 256 } }
 ```
 
-默认 30 秒超时，扫描类操作 60 秒。仅支持本地回环地址。
+默认 30 秒超时，扫描类操作 60 秒。仅支持本地回环地址。GUI 返回 HTTP 400/500 时，如果响应体是 IPC JSON 错误，MCP 会保留并返回原始错误信息，便于定位参数错误或 GUI 侧异常。
+
+### 输入校验
+
+MCP 层会在请求进入 GUI IPC 前做第一道校验，避免明显非法参数传到 C++ 层：
+
+- 地址、模块基址、指针偏移必须是非负整数，支持十进制和 `0x` 十六进制字符串。
+- `size` / `count` 必须大于 0；`read_memory` 最大 65536 字节，分页类 `count` 最大 1000。
+- `hex_string` / `hex_pattern` 会去掉空白字符，但必须非空、长度为偶数且是有效十六进制。
+- `data_type` 必须是 `byte` / `word` / `dword` / `qword` / `float` / `double` / `xor`。
+- `scan_type` 和 `memory_type` 必须是下文列出的合法值；拼写错误会直接报错，不会静默回退到默认值。
+- `init_driver(card_name)` 和 `execute_lua(code)` 不接受空字符串。
 
 ---
 
@@ -199,9 +210,9 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 | 工具 | 参数 | 说明 |
 |------|------|------|
 | `read_memory(address, size=256)` | size 最大 65536 | 读取内存并返回 hex dump |
-| `read_value(address, data_type="dword")` | byte/word/dword/qword/float/double | 读取单个值 |
-| `write_value(address, value, data_type="dword")` | — | 写入单个值 |
-| `write_bytes(address, hex_string)` | 如 `"90 90 90"` | 写入原始字节 |
+| `read_value(address, data_type="dword")` | byte/word/dword/qword/float/double/xor | 读取单个值 |
+| `write_value(address, value, data_type="dword")` | 整数支持 `0x` 前缀 | 写入单个值 |
+| `write_bytes(address, hex_string)` | 如 `"90 90 90"`；必须是有效偶数长度 hex | 写入原始字节 |
 
 ### 内存扫描
 
@@ -217,6 +228,10 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 | `clear_scan()` | — | 清除所有扫描结果 |
 
 **内存类型** (`scan_set_range` 参数)：`all` / `anonymous` / `c_alloc` / `c_heap` / `c_data` / `c_bss` / `java_heap` / `java` / `stack` / `code_app` / `code_system` / `video` / `ashmem` / `bad`
+
+**数据类型** (`data_type` 参数)：`byte` / `word` / `dword` / `qword` / `float` / `double` / `xor`
+
+**扫描类型** (`scan_type` 参数)：`exact` / `unknown` / `greater` / `less` / `between` / `increased` / `increased_by` / `decreased` / `decreased_by` / `changed` / `unchanged`
 
 ### 硬件断点
 
@@ -316,3 +331,21 @@ mcp/
 ## 开发
 
 添加新工具：在 `amem_mcp/tools/` 下新建或编辑模块，实现 `register(mcp, ipc)` 函数，并在 `tools/__init__.py` 的 `register_all` 里注册。所有扫描/类型常量都在 `amem_mcp/constants.py`，复用已有 helper 可避免重复的编码逻辑。
+
+### 快速自检
+
+在仓库根目录运行：
+
+```bash
+python -m compileall -q mcp
+python -c "import sys; sys.path.insert(0, 'mcp'); from amem_mcp.app import build_server; mcp, ipc = build_server(); print(type(mcp).__name__, ipc.base_url)"
+python -c "import asyncio, sys; sys.path.insert(0, 'mcp'); from amem_mcp.app import build_server; mcp, _ = build_server(); print(len(asyncio.run(mcp.list_tools())))"
+```
+
+期望工具数量为 30。配置文件可用以下方式检查：
+
+```bash
+python -m json.tool .mcp.json
+python -m json.tool mcp/configs/claude-code.json
+python -c "import tomllib, pathlib; tomllib.loads(pathlib.Path('mcp/pyproject.toml').read_text(encoding='utf-8')); tomllib.loads(pathlib.Path('mcp/configs/codex.toml').read_text(encoding='utf-8'))"
+```
