@@ -5,6 +5,7 @@
 #include "ProviderRegistry.h"
 #include "ToolExecutor.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -20,11 +21,13 @@ long long nowUnixSeconds() {
 }
 
 std::string makeRunId() {
+    static std::atomic<unsigned long long> counter{0};
     using namespace std::chrono;
     const long long nowMs =
         duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "run-%lld", nowMs);
+    const unsigned long long serial = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "run-%lld-%llu", nowMs, serial);
     return std::string(buf);
 }
 

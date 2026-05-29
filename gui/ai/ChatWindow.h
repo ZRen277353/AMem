@@ -83,6 +83,7 @@ private:
     void sendMessage();
     void cancelRequest();
     void clearHistory();
+    void clearActiveRunContext();
 
     // ---- tool-execution flow (task 8.3 fleshes these out) --------------
     void processToolCalls(const std::vector<ToolCall>& calls);
@@ -133,6 +134,16 @@ private:
     // Currently selected provider / model as shown in the toolbar.
     std::string currentProvider_;
     std::string currentModel_;
+
+    // Provider/model captured at the start of one agent run. Tool follow-up
+    // requests must stay on the same model even if the toolbar selection
+    // changes while the run is waiting on tools or approval.
+    std::string activeRunProvider_;
+    std::string activeRunModel_;
+
+    // Run id for the currently in-flight model request. Cleared on cancel or
+    // when a request completes so late HTTP callbacks cannot mutate the chat.
+    std::string activeDispatchRunId_;
 
     ChatSession session_;
 

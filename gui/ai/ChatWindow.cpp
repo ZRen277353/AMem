@@ -595,6 +595,7 @@ void ChatWindow::switchToSession(const std::string& id) {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
     requestStartMs_ = 0;
@@ -636,6 +637,7 @@ void ChatWindow::createNewSession() {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
     requestStartMs_ = 0;
@@ -657,6 +659,7 @@ void ChatWindow::deleteSession(const std::string& id) {
     if (wasActive) {
         // Clear in-memory state before switching; if sessions remain the
         // manager already picked a new active id, otherwise create one.
+        clearActiveRunContext();
         streamingContent_.clear();
         agentController_.resetForNewRun();
         requestStartMs_ = 0;
@@ -691,11 +694,15 @@ void ChatWindow::touchActiveSession() {
 void ChatWindow::drawToolbar() {
     auto& registry = ProviderRegistry::getInstance();
     const std::vector<std::string> providerNames = registry.getProviderNames();
+    const bool runInProgress = state_ != State::Idle;
 
     // Provider selector.
     ImGui::SetNextItemWidth(160.0f);
     const char* preview =
         currentProvider_.empty() ? "<no provider>" : currentProvider_.c_str();
+    if (runInProgress) {
+        ImGui::BeginDisabled();
+    }
     if (ImGui::BeginCombo("##chat_provider", preview)) {
         for (const auto& p : providerNames) {
             const bool selected = (p == currentProvider_);
@@ -713,6 +720,9 @@ void ChatWindow::drawToolbar() {
         }
         ImGui::EndCombo();
     }
+    if (runInProgress) {
+        ImGui::EndDisabled();
+    }
 
     ImGui::SameLine();
 
@@ -728,6 +738,9 @@ void ChatWindow::drawToolbar() {
         if (n) std::memcpy(modelBuf, currentModel_.data(), n);
         modelBuf[n] = '\0';
     }
+    if (runInProgress) {
+        ImGui::BeginDisabled();
+    }
     if (ImGui::InputText("##chat_model", modelBuf, sizeof(modelBuf))) {
         currentModel_ = modelBuf;
         // Mirror the change into the live provider config so the next
@@ -739,6 +752,9 @@ void ChatWindow::drawToolbar() {
                 provider->configure(cfg);
             }
         }
+    }
+    if (runInProgress) {
+        ImGui::EndDisabled();
     }
 
     ImGui::SameLine();
@@ -991,10 +1007,15 @@ void ChatWindow::sendMessage() {
     refocusInput_ = true;
     streamingContent_.clear();
     agentController_.resetForNewRun();
+    activeRunProvider_ = currentProvider_;
+    activeRunModel_ =
+        currentModel_.empty() ? provider->getConfig().model : currentModel_;
+    activeDispatchRunId_.clear();
 
     if (!dispatchAgentRequest(session_.getMessagesForRequest(),
                               "provider unavailable before dispatch")) {
         requestStartMs_ = 0;
+        clearActiveRunContext();
         state_ = State::Idle;
     }
 }
@@ -1003,6 +1024,7 @@ void ChatWindow::cancelRequest() {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    activeDispatchRunId_.clear();
 
     // Preserve any partial streaming content as an assistant message so the
     // user doesn't lose what they've already seen (AC 12.7), then append a
@@ -1028,7 +1050,14 @@ void ChatWindow::cancelRequest() {
     requestStartMs_ = 0;
     agentController_.addTraceEvent(AgentTraceType::Cancelled, "request cancelled");
     agentController_.finishCancelled();
+    clearActiveRunContext();
     state_ = State::Idle;
+}
+
+void ChatWindow::clearActiveRunContext() {
+    activeRunProvider_.clear();
+    activeRunModel_.clear();
+    activeDispatchRunId_.clear();
 }
 
 void ChatWindow::clearHistory() {
@@ -1037,6 +1066,7 @@ void ChatWindow::clearHistory() {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
     state_ = State::Idle;
@@ -1051,8 +1081,10 @@ void ChatWindow::clearHistory() {
 void ChatWindow::pollMessages() {
     UIMessage msg;
     while (UIMessageQueue::getInstance().tryPop(msg)) {
-        if (!msg.runId.empty() && msg.runId != agentController_.runId()) {
-            continue;
+        if (!msg.runId.empty()) {
+            if (activeDispatchRunId_.empty() || msg.runId != activeDispatchRunId_) {
+                continue;
+            }
         }
         switch (msg.type) {
             case UIMessageType::Token: {
@@ -1088,6 +1120,7 @@ void ChatWindow::pollMessages() {
                 std::vector<ToolCall> calls = asstMsg.toolCalls;
                 session_.addMessage(std::move(asstMsg));
                 touchActiveSession();
+                activeDispatchRunId_.clear();
 
                 if (hasToolCalls) {
                     // Keep requestStartMs_ running; the follow-up
@@ -1100,6 +1133,7 @@ void ChatWindow::pollMessages() {
                         AgentTraceType::Completed,
                         "assistant response completed");
                     agentController_.finishCompleted();
+                    clearActiveRunContext();
                     state_ = State::Idle;
                 }
                 break;
@@ -1123,6 +1157,7 @@ void ChatWindow::pollMessages() {
                 requestStartMs_ = 0;
                 agentController_.addTraceEvent(AgentTraceType::ProviderError, msg.data);
                 agentController_.finishFailed();
+                clearActiveRunContext();
                 state_ = State::Idle;
                 break;
             }
@@ -1209,6 +1244,7 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
     streamingContent_.clear();
     requestStartMs_ = 0;
     agentController_.finishFailed();
+    clearActiveRunContext();
     state_ = State::Idle;
 }
 
@@ -1431,6 +1467,7 @@ void ChatWindow::drawToolConfirmationModal() {
             agentController_.addTraceEvent(AgentTraceType::ProviderError,
                                            "pending tool confirmation disappeared");
             agentController_.finishFailed();
+            clearActiveRunContext();
             // Pending call went away; recover gracefully.
             state_ = State::Idle;
             ImGui::CloseCurrentPopup();
@@ -1459,6 +1496,7 @@ void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
                 state_ = State::ToolConfirmation;
             } else {
                 agentController_.finishFailed();
+                clearActiveRunContext();
                 state_ = State::Idle;
             }
             break;
@@ -1470,6 +1508,7 @@ void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
         default:
             requestStartMs_ = 0;
             agentController_.finishFailed();
+            clearActiveRunContext();
             state_ = State::Idle;
             break;
     }
@@ -1485,14 +1524,20 @@ void ChatWindow::sendFollowUpAfterTools() {
 
     requestStartMs_ = 0;
     agentController_.finishFailed();
+    clearActiveRunContext();
     state_ = State::Idle;
 }
 
 bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
                                       const char* failureDetail) {
+    const std::string providerName =
+        activeRunProvider_.empty() ? currentProvider_ : activeRunProvider_;
+    const std::string modelName =
+        activeRunModel_.empty() ? currentModel_ : activeRunModel_;
+
     AgentController::ModelRequest request;
-    request.providerName = currentProvider_;
-    request.modelOverride = currentModel_;
+    request.providerName = providerName;
+    request.modelOverride = modelName;
     request.failureDetail = failureDetail ? failureDetail : "";
     request.messages = messages;
     request.stream = true;
@@ -1507,9 +1552,11 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
         agentController_.dispatchModelRequest(request, cancelToken_);
 
     if (result.dispatched) {
+        activeDispatchRunId_ = agentController_.runId();
         state_ = State::WaitingResponse;
         return true;
     }
+    activeDispatchRunId_.clear();
 
     const std::string detail =
         failureDetail && *failureDetail
