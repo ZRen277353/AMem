@@ -32,6 +32,7 @@ public:
     ChatWindow(const ChatWindow&) = delete;
     ChatWindow& operator=(const ChatWindow&) = delete;
 
+    void draw() override;
     void onDraw() override;
     unsigned int getWindowFlags() const override;
 

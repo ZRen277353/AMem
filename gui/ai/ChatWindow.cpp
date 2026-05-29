@@ -221,6 +221,39 @@ ImVec4 agentRunStateColor(AgentRunState state) {
     }
 }
 
+void renderSelectableTextBlock(const char* id,
+                               const std::string& text,
+                               const ImVec4& color) {
+    if (text.empty()) {
+        return;
+    }
+
+    const float width = (std::max)(1.0f, ImGui::GetContentRegionAvail().x);
+    const float wrapWidth = width;
+    const ImVec2 textSize =
+        ImGui::CalcTextSize(text.c_str(), nullptr, false, wrapWidth);
+    const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+    const float height = (std::max)(lineHeight, textSize.y + 2.0f);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+    std::vector<char> buffer(text.begin(), text.end());
+    buffer.push_back('\0');
+    ImGui::InputTextMultiline(
+        id,
+        buffer.data(),
+        buffer.size(),
+        ImVec2(width, height),
+        ImGuiInputTextFlags_ReadOnly |
+            ImGuiInputTextFlags_WordWrap |
+            ImGuiInputTextFlags_NoHorizontalScroll);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -368,6 +401,29 @@ ChatWindow::~ChatWindow() {
 
 unsigned int ChatWindow::getWindowFlags() const {
     return ImGuiWindowFlags_NoDocking;
+}
+
+void ChatWindow::draw() {
+    if (!pOpen) {
+        return;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    const bool oldMoveFromTitleBarOnly = io.ConfigWindowsMoveFromTitleBarOnly;
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
+
+    ImGuiWindowFlags flags = static_cast<ImGuiWindowFlags>(getWindowFlags());
+    if (shouldBringToFront) {
+        ImGui::SetNextWindowFocus();
+        shouldBringToFront = false;
+    }
+
+    if (ImGui::Begin(name.c_str(), &pOpen, flags)) {
+        onDraw();
+    }
+    ImGui::End();
+
+    io.ConfigWindowsMoveFromTitleBarOnly = oldMoveFromTitleBarOnly;
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,7 +1272,8 @@ void ChatWindow::drawMessageArea() {
     ImGui::EndChild();
 }
 
-void ChatWindow::renderMessage(const ChatMessage& msg, int /*index*/) {
+void ChatWindow::renderMessage(const ChatMessage& msg, int index) {
+    ImGui::PushID(index);
     const char* roleStr = "";
     ImVec4 color = ColorScheme::TextPrimary;
 
@@ -1270,15 +1327,14 @@ void ChatWindow::renderMessage(const ChatMessage& msg, int /*index*/) {
     }
 
     // Body.
-    ImGui::PushStyleColor(ImGuiCol_Text, color);
-    ImGui::TextWrapped("%s", msg.content.c_str());
-    ImGui::PopStyleColor();
+    renderSelectableTextBlock("##message_body", msg.content, color);
 
     for (const auto& tc : msg.toolCalls) {
         ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::TextSecondary);
         ImGui::BulletText("tool_call: %s(%s)", tc.name.c_str(), tc.arguments.c_str());
         ImGui::PopStyleColor();
     }
+    ImGui::PopID();
 }
 
 void ChatWindow::renderStreamingMessage() {
@@ -1301,9 +1357,9 @@ void ChatWindow::renderStreamingMessage() {
         }
     }
 
-    ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::TextPrimary);
-    ImGui::TextWrapped("%s", streamingContent_.c_str());
-    ImGui::PopStyleColor();
+    renderSelectableTextBlock("##streaming_body",
+                              streamingContent_,
+                              ColorScheme::TextPrimary);
 }
 
 void ChatWindow::renderLoadingIndicator() {
