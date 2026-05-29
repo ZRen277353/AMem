@@ -64,7 +64,7 @@ bool matchesType(const json& value, const std::string& expected) {
 }
 
 // Minimal JSON-Schema validator. Supports: type, required, properties,
-// minimum, maximum, minLength, maxLength. Returns an empty string on
+// anyOf, minimum, maximum, minLength, maxLength. Returns an empty string on
 // success, otherwise a human-readable description of the first violation
 // encountered (AC 5.6). The path argument is used to build
 // "root.foo.bar"-style property locators in error messages.
@@ -147,6 +147,36 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
                 const std::string err = validateAgainstSchema(args[key], it.value(), childPath);
                 if (!err.empty()) return err;
             }
+        }
+    }
+
+    // composite constraints
+    if (schema.contains("anyOf") && schema["anyOf"].is_array()) {
+        std::string firstError;
+        bool matched = false;
+        int alternatives = 0;
+        for (const auto& alternative : schema["anyOf"]) {
+            if (!alternative.is_object()) {
+                continue;
+            }
+            ++alternatives;
+            const std::string err =
+                validateAgainstSchema(args, alternative, path);
+            if (err.empty()) {
+                matched = true;
+                break;
+            }
+            if (firstError.empty()) {
+                firstError = err;
+            }
+        }
+        if (!matched && alternatives > 0) {
+            std::ostringstream oss;
+            oss << path << " did not match any accepted argument form";
+            if (!firstError.empty()) {
+                oss << " (first mismatch: " << firstError << ")";
+            }
+            return oss.str();
         }
     }
 

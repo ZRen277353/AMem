@@ -329,13 +329,34 @@ int memoryTypeToFlag(const std::string& memoryType) {
     throw std::runtime_error("unsupported memory_type '" + memoryType + "'");
 }
 
-uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
-    if (args.contains("flags") && args["flags"].is_number_integer()) {
-        const long long f = args["flags"].get<long long>();
-        if (f < 0 || f > UINT32_MAX) {
-            throw std::runtime_error("flags out of range");
+bool readRawFlagArg(const json& source, const char* key, uint32_t& out) {
+    if (!source.contains(key) || source[key].is_null()) {
+        return false;
+    }
+    if (source[key].is_number_unsigned()) {
+        const auto f = source[key].get<unsigned long long>();
+        if (f > UINT32_MAX) {
+            throw std::runtime_error(std::string(key) + " out of range");
         }
-        return static_cast<uint32_t>(f);
+        out = static_cast<uint32_t>(f);
+        return true;
+    }
+    if (source[key].is_number_integer()) {
+        const long long f = source[key].get<long long>();
+        if (f < 0 || f > UINT32_MAX) {
+            throw std::runtime_error(std::string(key) + " out of range");
+        }
+        out = static_cast<uint32_t>(f);
+        return true;
+    }
+    throw std::runtime_error(std::string(key) + " must be an integer");
+}
+
+uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
+    uint32_t rawFlag = 0;
+    if (readRawFlagArg(args, "flags", rawFlag) ||
+        readRawFlagArg(args, "scan_flag", rawFlag)) {
+        return rawFlag;
     }
     const std::string scanType =
         args.contains("scan_type") && args["scan_type"].is_string()
@@ -345,12 +366,10 @@ uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
 }
 
 uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) {
-    if (args.contains("flags") && args["flags"].is_number_integer()) {
-        const long long f = args["flags"].get<long long>();
-        if (f < 0 || f > UINT32_MAX) {
-            throw std::runtime_error("flags out of range");
-        }
-        return static_cast<uint32_t>(f);
+    uint32_t rawFlag = 0;
+    if (readRawFlagArg(args, "flags", rawFlag) ||
+        readRawFlagArg(args, "scan_flag", rawFlag)) {
+        return rawFlag;
     }
     const std::string scanType =
         args.contains("scan_type") && args["scan_type"].is_string()
@@ -1407,15 +1426,31 @@ constexpr const char* kSchemaMemoryRead = R"JSON({
 
 constexpr const char* kSchemaMemoryWrite = R"JSON({
   "type": "object",
-  "required": ["address", "data_hex"],
+  "required": ["address"],
+  "anyOf": [
+    { "required": ["data_hex"] },
+    { "required": ["hex_string"] },
+    { "required": ["hex"] }
+  ],
   "properties": {
     "address": {
-      "type": "string",
-      "description": "Memory address in hex format, e.g. '0x7FF00000'"
+      "description": "Memory address as hex string or integer"
     },
     "data_hex": {
       "type": "string",
       "description": "Hex-encoded bytes to write; whitespace and 0x prefixes are ignored (e.g. '48 65 6C 6C')",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "hex_string": {
+      "type": "string",
+      "description": "Alias for data_hex",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "hex": {
+      "type": "string",
+      "description": "Alias for data_hex",
       "minLength": 2,
       "maxLength": 16384
     }
@@ -1424,7 +1459,12 @@ constexpr const char* kSchemaMemoryWrite = R"JSON({
 
 constexpr const char* kSchemaWriteBytes = R"JSON({
   "type": "object",
-  "required": ["address", "hex_string"],
+  "required": ["address"],
+  "anyOf": [
+    { "required": ["hex_string"] },
+    { "required": ["data_hex"] },
+    { "required": ["hex"] }
+  ],
   "properties": {
     "address": {
       "description": "Memory address as hex string or integer"
@@ -1434,12 +1474,29 @@ constexpr const char* kSchemaWriteBytes = R"JSON({
       "description": "Hex-encoded bytes to write; whitespace and 0x prefixes are ignored (e.g. '90 90 90')",
       "minLength": 2,
       "maxLength": 16384
+    },
+    "data_hex": {
+      "type": "string",
+      "description": "Alias for hex_string",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "hex": {
+      "type": "string",
+      "description": "Alias for hex_string",
+      "minLength": 2,
+      "maxLength": 16384
     }
   }
 })JSON";
 
 constexpr const char* kSchemaScanValue = R"JSON({
   "type": "object",
+  "anyOf": [
+    { "required": ["value"] },
+    { "required": ["value_hex"] },
+    { "required": ["hex"] }
+  ],
   "properties": {
     "value": {
       "description": "Value to scan for; interpreted according to value_type/data_type. Required unless value_hex or hex is supplied"
@@ -1471,7 +1528,7 @@ constexpr const char* kSchemaScanValue = R"JSON({
     },
     "scan_flag": {
       "type": "integer",
-      "description": "IPC/MCP scan_next flag alias",
+      "description": "IPC/MCP raw scan flag alias",
       "minimum": 0
     },
     "start": {
@@ -1501,6 +1558,11 @@ constexpr const char* kSchemaScanFuzzy = R"JSON({
     "flags": {
       "type": "integer",
       "description": "Raw AMem scan flags",
+      "minimum": 0
+    },
+    "scan_flag": {
+      "type": "integer",
+      "description": "IPC/MCP raw scan flag alias",
       "minimum": 0
     },
     "start": {
@@ -1536,6 +1598,10 @@ constexpr const char* kSchemaEmptyObject = R"JSON({
 
 constexpr const char* kSchemaStatusInitDriver = R"JSON({
   "type": "object",
+  "anyOf": [
+    { "required": ["card_name"] },
+    { "required": ["card"] }
+  ],
   "properties": {
     "card_name": {
       "type": "string",
@@ -1613,6 +1679,11 @@ constexpr const char* kSchemaScanSetRange = R"JSON({
 
 constexpr const char* kSchemaScanHex = R"JSON({
   "type": "object",
+  "anyOf": [
+    { "required": ["hex_pattern"] },
+    { "required": ["pattern_hex"] },
+    { "required": ["value"] }
+  ],
   "properties": {
     "hex_pattern": {
       "type": "string",
@@ -1659,6 +1730,10 @@ constexpr const char* kSchemaListModules = R"JSON({
 
 constexpr const char* kSchemaGetModuleBase = R"JSON({
   "type": "object",
+  "anyOf": [
+    { "required": ["module_name"] },
+    { "required": ["name"] }
+  ],
   "properties": {
     "module_name": {
       "type": "string",
@@ -1675,11 +1750,20 @@ constexpr const char* kSchemaGetModuleBase = R"JSON({
 
 constexpr const char* kSchemaResolveOffsetChain = R"JSON({
   "type": "object",
-  "required": ["module", "base_offset"],
+  "required": ["base_offset"],
+  "anyOf": [
+    { "required": ["module"] },
+    { "required": ["module_name"] }
+  ],
   "properties": {
     "module": {
       "type": "string",
       "description": "Module name or unique substring",
+      "minLength": 1
+    },
+    "module_name": {
+      "type": "string",
+      "description": "Alias for module",
       "minLength": 1
     },
     "base_offset": {
@@ -1756,6 +1840,12 @@ constexpr const char* kSchemaRemoveBreakpoint = R"JSON({
 
 constexpr const char* kSchemaResolveSymbol = R"JSON({
   "type": "object",
+  "anyOf": [
+    { "required": ["module_name", "symbol_name"] },
+    { "required": ["module_name", "name"] },
+    { "required": ["module", "symbol_name"] },
+    { "required": ["module", "name"] }
+  ],
   "properties": {
     "module_name": {
       "type": "string",
@@ -1811,6 +1901,10 @@ constexpr const char* kSchemaSymbolList = R"JSON({
 constexpr const char* kSchemaSymbolFind = R"JSON({
   "type": "object",
   "required": ["module_base"],
+  "anyOf": [
+    { "required": ["symbol_name"] },
+    { "required": ["name"] }
+  ],
   "properties": {
     "module_base": {
       "description": "Module base address as hex string or integer"
