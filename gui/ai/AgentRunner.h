@@ -56,6 +56,7 @@ private:
                      long long durationMs = 0) const;
     static ChatMessage makeToolMessage(const ToolCall& tc, const ToolResult& result, long long durationMs);
     static ChatMessage makeDeniedToolMessage(const ToolCall& tc);
+    static ChatMessage makeSkippedToolMessage(const ToolCall& tc, const std::string& reason);
     static ChatMessage makeSystemMessage(const std::string& text);
 
     std::vector<ToolCall> pendingToolCalls_;

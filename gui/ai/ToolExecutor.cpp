@@ -274,6 +274,8 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
         return result;
     }
 
+    const std::string normalizedArgsJson = args.dump();
+
     // Invoke the executor asynchronously so we can enforce a wall-clock
     // timeout (AC 6.6). std::async with launch::async guarantees a separate
     // thread; the returned future's destructor will block if we abandoned
@@ -284,7 +286,7 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
     try {
         std::shared_future<std::string> fut =
             std::async(std::launch::async,
-                       [executor = registration.executor, argsJson = call.arguments]() {
+                       [executor = registration.executor, argsJson = normalizedArgsJson]() {
                            return executor(argsJson);
                        }).share();
         if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {

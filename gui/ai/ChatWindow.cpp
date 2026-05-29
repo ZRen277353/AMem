@@ -166,6 +166,7 @@ const char* traceTypeLabel(AgentTraceType type) {
         case AgentTraceType::ToolStarted:        return "tool";
         case AgentTraceType::ToolSucceeded:      return "ok";
         case AgentTraceType::ToolFailed:         return "failed";
+        case AgentTraceType::ToolSkipped:        return "skipped";
         case AgentTraceType::ToolBatchComplete:  return "tools done";
         case AgentTraceType::FollowUpRequested:  return "follow-up";
         case AgentTraceType::Completed:          return "completed";
@@ -188,6 +189,7 @@ ImVec4 traceTypeColor(AgentTraceType type) {
             return ColorScheme::Warning;
         case AgentTraceType::Denied:
         case AgentTraceType::ToolFailed:
+        case AgentTraceType::ToolSkipped:
         case AgentTraceType::StepLimitReached:
         case AgentTraceType::Cancelled:
         case AgentTraceType::ProviderError:

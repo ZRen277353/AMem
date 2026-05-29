@@ -17,6 +17,7 @@ enum class AgentTraceType {
     ToolStarted,
     ToolSucceeded,
     ToolFailed,
+    ToolSkipped,
     ToolBatchComplete,
     FollowUpRequested,
     Completed,

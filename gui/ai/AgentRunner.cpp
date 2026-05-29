@@ -117,6 +117,7 @@ AgentRunner::Outcome AgentRunner::resumeApproved(const Config& config) {
 }
 
 AgentRunner::Outcome AgentRunner::resumeDenied(const Config& config) {
+    (void)config;
     Outcome out;
     if (!awaitingConfirmation_ ||
         currentToolCallIndex_ >= static_cast<int>(pendingToolCalls_.size())) {
@@ -130,18 +131,19 @@ AgentRunner::Outcome AgentRunner::resumeDenied(const Config& config) {
     out.messages.push_back(makeDeniedToolMessage(pendingToolCalls_[currentToolCallIndex_]));
     ++currentToolCallIndex_;
 
-    Outcome run = runUntilBlocked(config);
-    out.messages.insert(out.messages.end(),
-                        std::make_move_iterator(run.messages.begin()),
-                        std::make_move_iterator(run.messages.end()));
-    out.logs.insert(out.logs.end(),
-                    std::make_move_iterator(run.logs.begin()),
-                    std::make_move_iterator(run.logs.end()));
-    out.traceEvents.insert(out.traceEvents.end(),
-                           std::make_move_iterator(run.traceEvents.begin()),
-                           std::make_move_iterator(run.traceEvents.end()));
-    out.pendingToolCall = std::move(run.pendingToolCall);
-    out.kind = run.kind;
+    const std::string skipReason =
+        "skipped because an earlier write-classified tool was denied by user";
+    while (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
+        const ToolCall& skipped = pendingToolCalls_[currentToolCallIndex_];
+        appendTrace(out, AgentTraceType::ToolSkipped, &skipped, skipReason);
+        out.messages.push_back(makeSkippedToolMessage(skipped, skipReason));
+        ++currentToolCallIndex_;
+    }
+
+    pendingToolCalls_.clear();
+    currentToolCallIndex_ = 0;
+    appendTrace(out, AgentTraceType::ToolBatchComplete, nullptr);
+    out.kind = OutcomeKind::ReadyForFollowUp;
     return out;
 }
 
@@ -278,6 +280,30 @@ ChatMessage AgentRunner::makeDeniedToolMessage(const ToolCall& tc) {
     denied.content = audit.dump();
     denied.timestamp = nowUnixSeconds();
     return denied;
+}
+
+ChatMessage AgentRunner::makeSkippedToolMessage(const ToolCall& tc,
+                                                const std::string& reason) {
+    nlohmann::json audit;
+    audit["tool"] = tc.name;
+    audit["success"] = false;
+    audit["skipped"] = true;
+    audit["error"] = reason;
+    try {
+        audit["arguments"] = tc.arguments.empty()
+                                 ? nlohmann::json::object()
+                                 : nlohmann::json::parse(tc.arguments);
+    } catch (const nlohmann::json::exception&) {
+        audit["arguments_raw"] = tc.arguments;
+    }
+
+    ChatMessage skipped;
+    skipped.role = Role::Tool;
+    skipped.toolCallId = tc.id;
+    skipped.name = tc.name;
+    skipped.content = audit.dump();
+    skipped.timestamp = nowUnixSeconds();
+    return skipped;
 }
 
 ChatMessage AgentRunner::makeSystemMessage(const std::string& text) {
