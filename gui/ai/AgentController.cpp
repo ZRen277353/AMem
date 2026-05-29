@@ -135,6 +135,19 @@ AgentController::ToolOutcome AgentController::resumeDeniedTool(
     return outcome;
 }
 
+AgentController::ToolOutcome AgentController::completeToolExecution(
+    const ToolCall& call,
+    const ToolResult& result,
+    long long durationMs,
+    const ToolConfig& config) {
+    AgentRunner::Outcome outcome =
+        runner_.completeToolExecution(call, result, durationMs, config);
+    appendTraceEvents(outcome.traceEvents);
+    outcome.traceEvents.clear();
+    updateRunFromToolOutcome(outcome);
+    return outcome;
+}
+
 AgentController::ToolOutcome AgentController::denyPendingTool(
     const ToolConfig& config) {
     run_.approvalDecision = AgentApprovalDecision::Denied;
@@ -189,7 +202,8 @@ void AgentController::appendTraceEvent(AgentTraceEvent event) {
 
 void AgentController::updateRunFromToolOutcome(const ToolOutcome& outcome) {
     run_.toolSteps = runner_.stepCount();
-    if (outcome.pendingToolCall) {
+    if (outcome.kind == ToolOutcomeKind::NeedsConfirmation &&
+        outcome.pendingToolCall) {
         run_.pendingApproval = outcome.pendingToolCall;
         run_.approvalDecision = AgentApprovalDecision::Pending;
     } else {
@@ -204,6 +218,9 @@ void AgentController::updateRunFromToolOutcome(const ToolOutcome& outcome) {
             } else {
                 finishFailed();
             }
+            break;
+        case ToolOutcomeKind::NeedsExecution:
+            run_.state = RunState::ExecutingTools;
             break;
         case ToolOutcomeKind::ReadyForFollowUp:
             run_.state = RunState::ExecutingTools;

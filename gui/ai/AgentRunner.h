@@ -25,6 +25,7 @@ public:
     enum class OutcomeKind {
         Idle,
         NeedsConfirmation,
+        NeedsExecution,
         ReadyForFollowUp,
         Stopped
     };
@@ -35,6 +36,7 @@ public:
         std::vector<std::string> logs;
         std::vector<AgentTraceEvent> traceEvents;
         std::optional<ToolCall> pendingToolCall;
+        std::optional<ToolCall> toolCallToExecute;
     };
 
     void reset();
@@ -42,13 +44,16 @@ public:
     Outcome beginToolCalls(const std::vector<ToolCall>& calls, const Config& config);
     Outcome resumeApproved(const Config& config);
     Outcome resumeDenied(const Config& config);
+    Outcome completeToolExecution(const ToolCall& call,
+                                  const ToolResult& result,
+                                  long long durationMs,
+                                  const Config& config);
 
     int stepCount() const { return stepCount_; }
     bool hasPendingConfirmation() const { return awaitingConfirmation_; }
 
 private:
     Outcome runUntilBlocked(const Config& config);
-    void executeCurrentTool(Outcome& out);
     void appendTrace(Outcome& out,
                      AgentTraceType type,
                      const ToolCall* tc,

@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -932,8 +933,10 @@ void ChatWindow::drawInputArea() {
         ImGui::EndDisabled();
     }
 
-    // Stop is visible only while a response is streaming (AC 9.6).
-    if (state_ == State::WaitingResponse) {
+    // Stop is visible while the model or tools are still in flight.
+    if (state_ == State::WaitingResponse ||
+        state_ == State::ToolExecuting ||
+        state_ == State::ToolConfirmation) {
         if (ImGui::Button("Stop", ImVec2(80.0f, 36.0f))) {
             cancelRequest();
         }
@@ -1043,8 +1046,8 @@ void ChatWindow::cancelRequest() {
 
     ChatMessage notice;
     notice.role = Role::System;
-    notice.content = "[响应已中断]";
     notice.timestamp = nowUnixSeconds();
+    notice.content = "[cancelled]";
     session_.addMessage(std::move(notice));
 
     requestStartMs_ = 0;
@@ -1058,6 +1061,7 @@ void ChatWindow::clearActiveRunContext() {
     activeRunProvider_.clear();
     activeRunModel_.clear();
     activeDispatchRunId_.clear();
+    activeToolRunId_.clear();
 }
 
 void ChatWindow::clearHistory() {
@@ -1082,7 +1086,10 @@ void ChatWindow::pollMessages() {
     UIMessage msg;
     while (UIMessageQueue::getInstance().tryPop(msg)) {
         if (!msg.runId.empty()) {
-            if (activeDispatchRunId_.empty() || msg.runId != activeDispatchRunId_) {
+            const bool isToolResult = msg.type == UIMessageType::ToolResult;
+            const std::string& expectedRunId =
+                isToolResult ? activeToolRunId_ : activeDispatchRunId_;
+            if (expectedRunId.empty() || msg.runId != expectedRunId) {
                 continue;
             }
         }
@@ -1159,6 +1166,15 @@ void ChatWindow::pollMessages() {
                 agentController_.finishFailed();
                 clearActiveRunContext();
                 state_ = State::Idle;
+                break;
+            }
+            case UIMessageType::ToolResult: {
+                activeToolRunId_.clear();
+                handleAgentOutcome(agentController_.completeToolExecution(
+                    msg.toolCall,
+                    msg.toolResult,
+                    msg.durationMs,
+                    makeAgentConfig()));
                 break;
             }
         }
@@ -1481,6 +1497,24 @@ void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
     handleAgentOutcome(agentController_.beginToolCalls(calls, makeAgentConfig()));
 }
 
+void ChatWindow::startToolExecution(const ToolCall& call) {
+    activeToolRunId_ = agentController_.runId();
+    const std::string runId = activeToolRunId_;
+    std::thread([call, runId]() {
+        const long long startMs = nowSteadyMs();
+        ToolResult result = ToolExecutor::getInstance().execute(call);
+        const long long durationMs = nowSteadyMs() - startMs;
+
+        UIMessage msg;
+        msg.type = UIMessageType::ToolResult;
+        msg.runId = runId;
+        msg.toolCall = call;
+        msg.toolResult = std::move(result);
+        msg.durationMs = durationMs;
+        UIMessageQueue::getInstance().push(std::move(msg));
+    }).detach();
+}
+
 void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
     for (const std::string& line : outcome.logs) {
         Gui::log("%s", line.c_str());
@@ -1494,6 +1528,15 @@ void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
         case AgentController::ToolOutcomeKind::NeedsConfirmation:
             if (outcome.pendingToolCall) {
                 state_ = State::ToolConfirmation;
+            } else {
+                agentController_.finishFailed();
+                clearActiveRunContext();
+                state_ = State::Idle;
+            }
+            break;
+        case AgentController::ToolOutcomeKind::NeedsExecution:
+            if (outcome.toolCallToExecute) {
+                startToolExecution(*outcome.toolCallToExecute);
             } else {
                 agentController_.finishFailed();
                 clearActiveRunContext();
@@ -1543,6 +1586,7 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     request.stream = true;
 
     streamingContent_.clear();
+    activeToolRunId_.clear();
     if (cancelToken_) {
         cancelToken_->store(true);
     }

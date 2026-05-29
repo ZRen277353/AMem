@@ -88,6 +88,7 @@ private:
     // ---- tool-execution flow (task 8.3 fleshes these out) --------------
     void processToolCalls(const std::vector<ToolCall>& calls);
     void handleAgentOutcome(AgentController::ToolOutcome outcome);
+    void startToolExecution(const ToolCall& call);
     void sendFollowUpAfterTools();
     bool dispatchAgentRequest(const std::vector<ChatMessage>& messages,
                               const char* failureDetail);
@@ -144,6 +145,7 @@ private:
     // Run id for the currently in-flight model request. Cleared on cancel or
     // when a request completes so late HTTP callbacks cannot mutate the chat.
     std::string activeDispatchRunId_;
+    std::string activeToolRunId_;
 
     ChatSession session_;
 

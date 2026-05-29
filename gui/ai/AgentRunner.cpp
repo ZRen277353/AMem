@@ -18,11 +18,6 @@ long long nowUnixSeconds() {
     return duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
 }
 
-long long nowSteadyMs() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
-
 int clampBudget(int value) {
     return std::clamp(value, 1, 64);
 }
@@ -88,6 +83,7 @@ AgentRunner::Outcome AgentRunner::beginToolCalls(const std::vector<ToolCall>& ca
 }
 
 AgentRunner::Outcome AgentRunner::resumeApproved(const Config& config) {
+    (void)config;
     Outcome out;
     if (!awaitingConfirmation_ ||
         currentToolCallIndex_ >= static_cast<int>(pendingToolCalls_.size())) {
@@ -98,21 +94,9 @@ AgentRunner::Outcome AgentRunner::resumeApproved(const Config& config) {
 
     awaitingConfirmation_ = false;
     appendTrace(out, AgentTraceType::Approved, &pendingToolCalls_[currentToolCallIndex_]);
-    executeCurrentTool(out);
-    ++currentToolCallIndex_;
-
-    Outcome run = runUntilBlocked(config);
-    out.messages.insert(out.messages.end(),
-                        std::make_move_iterator(run.messages.begin()),
-                        std::make_move_iterator(run.messages.end()));
-    out.logs.insert(out.logs.end(),
-                    std::make_move_iterator(run.logs.begin()),
-                    std::make_move_iterator(run.logs.end()));
-    out.traceEvents.insert(out.traceEvents.end(),
-                           std::make_move_iterator(run.traceEvents.begin()),
-                           std::make_move_iterator(run.traceEvents.end()));
-    out.pendingToolCall = std::move(run.pendingToolCall);
-    out.kind = run.kind;
+    appendTrace(out, AgentTraceType::ToolStarted, &pendingToolCalls_[currentToolCallIndex_]);
+    out.toolCallToExecute = pendingToolCalls_[currentToolCallIndex_];
+    out.kind = OutcomeKind::NeedsExecution;
     return out;
 }
 
@@ -147,6 +131,44 @@ AgentRunner::Outcome AgentRunner::resumeDenied(const Config& config) {
     return out;
 }
 
+AgentRunner::Outcome AgentRunner::completeToolExecution(const ToolCall& call,
+                                                        const ToolResult& result,
+                                                        long long durationMs,
+                                                        const Config& config) {
+    (void)call;
+    Outcome out;
+    if (currentToolCallIndex_ >= static_cast<int>(pendingToolCalls_.size())) {
+        reset();
+        out.kind = OutcomeKind::Stopped;
+        return out;
+    }
+
+    const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
+    appendTrace(out,
+                result.success ? AgentTraceType::ToolSucceeded
+                               : AgentTraceType::ToolFailed,
+                &tc,
+                result.success ? "" : result.errorMessage,
+                durationMs);
+    out.messages.push_back(makeToolMessage(tc, result, durationMs));
+    ++currentToolCallIndex_;
+
+    Outcome run = runUntilBlocked(config);
+    out.messages.insert(out.messages.end(),
+                        std::make_move_iterator(run.messages.begin()),
+                        std::make_move_iterator(run.messages.end()));
+    out.logs.insert(out.logs.end(),
+                    std::make_move_iterator(run.logs.begin()),
+                    std::make_move_iterator(run.logs.end()));
+    out.traceEvents.insert(out.traceEvents.end(),
+                           std::make_move_iterator(run.traceEvents.begin()),
+                           std::make_move_iterator(run.traceEvents.end()));
+    out.pendingToolCall = std::move(run.pendingToolCall);
+    out.toolCallToExecute = std::move(run.toolCallToExecute);
+    out.kind = run.kind;
+    return out;
+}
+
 AgentRunner::Outcome AgentRunner::runUntilBlocked(const Config& config) {
     Outcome out;
     while (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
@@ -169,8 +191,10 @@ AgentRunner::Outcome AgentRunner::runUntilBlocked(const Config& config) {
             appendTrace(out, AgentTraceType::AutoApproved, &tc);
         }
 
-        executeCurrentTool(out);
-        ++currentToolCallIndex_;
+        appendTrace(out, AgentTraceType::ToolStarted, &tc);
+        out.toolCallToExecute = tc;
+        out.kind = OutcomeKind::NeedsExecution;
+        return out;
     }
 
     pendingToolCalls_.clear();
@@ -179,21 +203,6 @@ AgentRunner::Outcome AgentRunner::runUntilBlocked(const Config& config) {
     appendTrace(out, AgentTraceType::ToolBatchComplete, nullptr);
     out.kind = OutcomeKind::ReadyForFollowUp;
     return out;
-}
-
-void AgentRunner::executeCurrentTool(Outcome& out) {
-    const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
-    appendTrace(out, AgentTraceType::ToolStarted, &tc);
-    const long long toolStartMs = nowSteadyMs();
-    ToolResult result = ToolExecutor::getInstance().execute(tc);
-    const long long durationMs = nowSteadyMs() - toolStartMs;
-    appendTrace(out,
-                result.success ? AgentTraceType::ToolSucceeded
-                               : AgentTraceType::ToolFailed,
-                &tc,
-                result.success ? "" : result.errorMessage,
-                durationMs);
-    out.messages.push_back(makeToolMessage(tc, result, durationMs));
 }
 
 void AgentRunner::appendTrace(Outcome& out,

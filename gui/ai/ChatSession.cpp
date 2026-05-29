@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace AI {
 
@@ -95,6 +96,46 @@ ChatMessage messageFromJson(const nlohmann::json& j) {
     return msg;
 }
 
+bool eraseOldestConversationGroup(std::vector<ChatMessage>& messages) {
+    if (messages.size() <= 1) {
+        return false;
+    }
+
+    // Prefer trimming at user-turn boundaries. A user turn owns every
+    // assistant/tool/system message until the next user message, so removing
+    // the whole group keeps assistant tool_calls adjacent to their tool
+    // results instead of leaving orphan tool messages in the request.
+    std::size_t eraseEnd = messages.size();
+    const bool startsWithUser = messages.front().role == Role::User;
+    for (std::size_t i = 1; i < messages.size(); ++i) {
+        if (messages[i].role == Role::User) {
+            eraseEnd = i;
+            break;
+        }
+    }
+
+    if (startsWithUser && eraseEnd == messages.size()) {
+        // Only the newest user turn remains. Keep it even if it is still
+        // over budget, matching the existing "preserve latest user input"
+        // contract.
+        return false;
+    }
+
+    if (!startsWithUser && eraseEnd == messages.size()) {
+        // Legacy/corrupt histories may have no user boundary. Drop the
+        // oldest standalone message as a best-effort fallback.
+        eraseEnd = 1;
+    }
+
+    if (eraseEnd == 0 || eraseEnd > messages.size()) {
+        return false;
+    }
+
+    messages.erase(messages.begin(),
+                   messages.begin() + static_cast<std::ptrdiff_t>(eraseEnd));
+    return true;
+}
+
 } // namespace
 
 // ---- ChatSession -----------------------------------------------------------
@@ -107,11 +148,13 @@ void ChatSession::addMessage(ChatMessage msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         messages_.push_back(std::move(msg));
 
-        // Enforce hard message cap (AC 8.1) by dropping the oldest entries.
-        if (messages_.size() > static_cast<size_t>(kMaxMessages)) {
-            const size_t excess = messages_.size() - static_cast<size_t>(kMaxMessages);
-            messages_.erase(messages_.begin(),
-                            messages_.begin() + static_cast<std::ptrdiff_t>(excess));
+        // Enforce hard message cap (AC 8.1) by dropping complete oldest
+        // conversation groups. This avoids splitting assistant tool_calls
+        // from their tool result messages.
+        while (messages_.size() > static_cast<size_t>(kMaxMessages)) {
+            if (!eraseOldestConversationGroup(messages_)) {
+                break;
+            }
         }
 
         // Enforce token-limit truncation (AC 8.3).
@@ -235,30 +278,14 @@ void ChatSession::truncateIfNeeded() {
 }
 
 void ChatSession::truncateIfNeededUnlocked() {
-    // AC 8.3: remove oldest messages one at a time until within the limit,
-    // preserving the most recent user message. The system prompt is stored
-    // outside messages_ so it is inherently preserved.
+    // AC 8.3: remove oldest complete conversation groups until within the
+    // token limit, preserving the most recent user turn. The system prompt
+    // is stored outside messages_ so it is inherently preserved.
     if (messages_.empty()) return;
 
-    // Locate the most recent user message (by index from the front). If no
-    // user message exists, we still truncate from the front.
-    auto findLatestUserIndex = [&]() -> std::size_t {
-        for (std::size_t i = messages_.size(); i > 0; --i) {
-            if (messages_[i - 1].role == Role::User) return i - 1;
-        }
-        return static_cast<std::size_t>(-1);
-    };
-
-    std::size_t latestUserIdx = findLatestUserIndex();
-
     while (messages_.size() > 1 && estimateTokenCountUnlocked() > tokenLimit_) {
-        // Never drop the most recent user message: if it sits at index 0
-        // there is nothing else we can remove without violating AC 8.3.
-        if (latestUserIdx == 0) break;
-
-        messages_.erase(messages_.begin());
-        if (latestUserIdx != static_cast<std::size_t>(-1)) {
-            --latestUserIdx;
+        if (!eraseOldestConversationGroup(messages_)) {
+            break;
         }
     }
 }
@@ -432,13 +459,12 @@ bool ChatSession::loadUnlocked(const std::string& filepath) {
                 }
             }
             // Enforce retention cap in case the persisted file pre-dates the
-            // limit or was edited externally.
-            if (messages_.size() > static_cast<size_t>(kMaxMessages)) {
-                const size_t excess =
-                    messages_.size() - static_cast<size_t>(kMaxMessages);
-                messages_.erase(
-                    messages_.begin(),
-                    messages_.begin() + static_cast<std::ptrdiff_t>(excess));
+            // limit or was edited externally. Trim complete groups so loading
+            // cannot create orphan tool-result messages either.
+            while (messages_.size() > static_cast<size_t>(kMaxMessages)) {
+                if (!eraseOldestConversationGroup(messages_)) {
+                    break;
+                }
             }
         }
     } catch (const std::exception& e) {

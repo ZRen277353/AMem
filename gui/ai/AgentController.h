@@ -46,6 +46,10 @@ public:
                                const ToolConfig& config);
     ToolOutcome resumeApprovedTool(const ToolConfig& config);
     ToolOutcome resumeDeniedTool(const ToolConfig& config);
+    ToolOutcome completeToolExecution(const ToolCall& call,
+                                      const ToolResult& result,
+                                      long long durationMs,
+                                      const ToolConfig& config);
     ToolOutcome approvePendingTool(const ToolConfig& config);
     ToolOutcome denyPendingTool(const ToolConfig& config);
 
