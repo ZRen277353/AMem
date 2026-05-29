@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..helpers import clamp_limit, parse_address, require_non_negative, require_positive
 from ..ipc_client import IpcClient
 
 
@@ -27,6 +28,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             pid: 目标进程 PID
         """
+        pid = require_positive(pid, "pid")
         r = ipc.call_or_raise("open_process", {"pid": pid})
         return f"已打开进程 PID={pid}, handle={r['handle']}"
 
@@ -39,7 +41,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移，默认 0
             count: 获取数量，默认 200，最大 1000
         """
-        count = min(count, 1000)
+        offset = require_non_negative(offset, "offset")
+        count = clamp_limit(count, 1000, "count")
         params: dict = {"offset": offset, "count": count}
         if filter:
             params["filter"] = filter
@@ -84,10 +87,16 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offsets: 偏移链列表，如 [0x10, 0x20, 0x8]
             deref_final: 是否解引用最终地址，默认 True
         """
+        parse_address(base_offset, "base_offset")
+        normalized_offsets = []
+        for offset in offsets or []:
+            parsed_offset = parse_address(offset, "offsets")
+            normalized_offsets.append(parsed_offset)
+
         r = ipc.call_or_raise("resolve_offset_chain", {
             "module": module,
             "base_offset": base_offset,
-            "offsets": offsets or [],
+            "offsets": normalized_offsets,
             "deref_final": deref_final,
         })
         return f"最终地址: {r['address']}"

@@ -39,7 +39,7 @@ class IpcClient:
         payload = json.dumps({
             "method": method,
             "params": params or {},
-        }).encode("utf-8")
+        }, ensure_ascii=False).encode("utf-8")
 
         last_error: Optional[str] = None
         for attempt in range(1 + retries):
@@ -56,6 +56,19 @@ class IpcClient:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        parsed.setdefault("success", False)
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+                return {
+                    "success": False,
+                    "error": f"AMem GUI HTTP {e.code} {e.reason}: {body[:500]}",
+                }
             except ConnectionRefusedError:
                 return {
                     "success": False,

@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from ..helpers import decode_value, encode_value_hex, hex_dump, parse_int
+from ..constants import DATA_TYPE_SIZE
+from ..helpers import (
+    clamp_limit,
+    clean_hex_string,
+    decode_value,
+    encode_value_hex,
+    hex_dump,
+    normalize_data_type,
+    parse_address,
+)
 from ..ipc_client import IpcClient
 
 
@@ -18,9 +27,10 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             address: 内存地址，支持 0x 前缀（如 "0x7f12345000"）
             size: 读取字节数，默认 256，最大 65536
         """
-        size = min(size, 65536)
+        size = clamp_limit(size, 65536, "size")
+        addr_int = parse_address(address)
         r = ipc.call_or_raise("read_memory", {"address": address, "size": size})
-        return hex_dump(r["hex"], parse_int(address))
+        return hex_dump(r["hex"], addr_int)
 
     @mcp.tool()
     def read_value(address: str, data_type: str = "dword") -> str:
@@ -30,13 +40,13 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             address: 内存地址
             data_type: 数据类型 - byte/word/dword/qword/float/double
         """
-        size_map = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "float": 4, "double": 8}
-        sz = size_map.get(data_type, 4)
+        data_type = normalize_data_type(data_type)
+        sz = DATA_TYPE_SIZE[data_type]
+        addr_int = parse_address(address)
         r = ipc.call_or_raise("read_memory", {"address": address, "size": sz})
         val = decode_value(r["hex"], data_type)
         if val is None:
             return "读取失败"
-        addr_int = parse_int(address)
         if data_type in ("float", "double"):
             return f"[{addr_int:#x}] {data_type} = {val}"
         return f"[{addr_int:#x}] {data_type} = {val} ({val:#x})"
@@ -50,6 +60,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             value: 要写入的值
             data_type: 数据类型 - byte/word/dword/qword/float/double
         """
+        parse_address(address)
         hex_val = encode_value_hex(value, data_type)
         r = ipc.call_or_raise("write_memory", {"address": address, "hex": hex_val})
         return f"已写入 {r['written']} 字节到 {address}"
@@ -62,6 +73,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             address: 内存地址
             hex_string: 十六进制字节串，如 "90 90 90" 或 "909090"
         """
-        hex_clean = hex_string.replace(" ", "").replace("\n", "")
+        parse_address(address)
+        hex_clean = clean_hex_string(hex_string)
         r = ipc.call_or_raise("write_memory", {"address": address, "hex": hex_clean})
         return f"已写入 {r['written']} 字节到 {address}"

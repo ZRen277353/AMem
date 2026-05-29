@@ -37,6 +37,9 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             card_name: 卡密/授权字符串
         """
+        card_name = card_name.strip()
+        if not card_name:
+            raise ValueError("card_name 不能为空")
         r = ipc.call_or_raise("init_driver", {"card": card_name})
         return f"结果: {r['message']}"
 

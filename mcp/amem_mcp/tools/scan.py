@@ -5,7 +5,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from ..constants import MEMORY_TYPE_MAP
-from ..helpers import encode_value_hex, make_scan_flags
+from ..helpers import clamp_limit, clean_hex_string, encode_value_hex, make_scan_flags, require_non_negative
 from ..ipc_client import IpcClient
 
 
@@ -20,7 +20,11 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
                          java_heap / java / stack / code_app / code_system /
                          video / ashmem / bad
         """
-        mt = MEMORY_TYPE_MAP.get(memory_type.lower(), -1)
+        key = memory_type.strip().lower()
+        if key not in MEMORY_TYPE_MAP:
+            valid = ", ".join(sorted(MEMORY_TYPE_MAP))
+            raise ValueError(f"未知内存区域类型: {memory_type}，合法值: {valid}")
+        mt = MEMORY_TYPE_MAP[key]
         ipc.call_or_raise("scan_set_range", {"type": mt})
         return f"扫描范围已设置为: {memory_type}"
 
@@ -74,7 +78,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             hex_pattern: 十六进制字节串，如 "48 65 6C 6C 6F"
         """
-        pattern = hex_pattern.replace(" ", "")
+        pattern = clean_hex_string(hex_pattern)
         r = ipc.call_or_raise("scan_hex", {"pattern_hex": pattern})
         return f"HEX 扫描完成，找到 {r['count']} 个结果"
 
@@ -92,7 +96,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移
             count: 获取数量，默认 20，最大 1000
         """
-        count = min(count, 1000)
+        offset = require_non_negative(offset, "offset")
+        count = clamp_limit(count, 1000, "count")
         r = ipc.call_or_raise("get_scan_results", {"offset": offset, "count": count})
         total = r.get("total", 0)
         items = r.get("items", [])

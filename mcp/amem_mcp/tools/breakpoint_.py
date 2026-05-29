@@ -15,6 +15,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from ..constants import BP_TYPE_BY_NAME, BP_TYPE_EXECUTE, BP_TYPE_NAMES
+from ..helpers import parse_address
 from ..ipc_client import IpcClient
 
 
@@ -37,7 +38,7 @@ def _resolve_bp_type(bp_type: int | str) -> int:
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
-    def set_breakpoint(address: str, bp_type: int = 2, bp_size: int = 4) -> str:
+    def set_breakpoint(address: str, bp_type: int | str = 2, bp_size: int = 4) -> str:
         """设置硬件断点（类型编号与 AMem 内部保持一致）。
 
         Args:
@@ -47,8 +48,11 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
                      默认 2 (写入)
             bp_size: 监控大小 (1/2/4/8 字节)；执行断点强制为 4
         """
+        parse_address(address)
         resolved = _resolve_bp_type(bp_type)
         size = 4 if resolved == BP_TYPE_EXECUTE else bp_size
+        if size not in (1, 2, 4, 8):
+            raise ValueError("bp_size 必须是 1、2、4 或 8")
         ipc.call_or_raise("set_breakpoint", {
             "address": address, "bp_type": resolved, "bp_size": size,
         })
@@ -61,6 +65,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             address: 断点地址
         """
+        parse_address(address)
         ipc.call_or_raise("remove_breakpoint", {"address": address})
         return f"断点 {address} 已移除"
 
@@ -71,6 +76,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             address: 断点地址
         """
+        parse_address(address)
         hits = ipc.call_or_raise("read_bp_info", {"address": address})
         if not hits:
             return f"断点 {address} 无命中记录"
@@ -93,6 +99,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             address: 断点地址
         """
+        parse_address(address)
         ipc.call_or_raise("suspend_breakpoint", {"address": address})
         return f"断点 {address} 已暂停"
 
@@ -103,5 +110,6 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             address: 断点地址
         """
+        parse_address(address)
         ipc.call_or_raise("resume_breakpoint", {"address": address})
         return f"断点 {address} 已恢复"

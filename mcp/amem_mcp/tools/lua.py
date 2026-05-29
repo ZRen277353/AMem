@@ -20,6 +20,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             code: Lua 脚本代码
         """
+        if not code.strip():
+            raise ValueError("code 不能为空")
         r = ipc.call_or_raise("execute_lua", {"code": code})
         output = r.get("output", "")
         return output if output else "(执行成功，无输出)"
