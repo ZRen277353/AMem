@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -304,11 +305,86 @@ std::vector<ChatMessage> ChatSession::getMessagesForRequest() const {
         sys.content = systemPrompt_;
         out.push_back(std::move(sys));
     }
-    for (const auto& m : messages_) {
+    for (std::size_t i = 0; i < messages_.size(); ++i) {
+        const ChatMessage& m = messages_[i];
         // Persisted Role::System messages are UI/runtime notices such as
         // cancellation and provider errors. The configured systemPrompt_ is
         // the only system instruction that should be sent to the model.
         if (m.role == Role::System) {
+            continue;
+        }
+        if (m.role == Role::Assistant && !m.toolCalls.empty()) {
+            ChatMessage assistant = m;
+            assistant.toolCalls.erase(
+                std::remove_if(assistant.toolCalls.begin(),
+                               assistant.toolCalls.end(),
+                               [](const ToolCall& tc) {
+                                   return tc.id.empty() || tc.name.empty();
+                               }),
+                assistant.toolCalls.end());
+            if (assistant.toolCalls.empty()) {
+                assistant.toolCalls.clear();
+                if (!assistant.content.empty()) {
+                    out.push_back(std::move(assistant));
+                }
+                continue;
+            }
+
+            std::unordered_set<std::string> requiredToolIds;
+            for (const auto& tc : assistant.toolCalls) {
+                requiredToolIds.insert(tc.id);
+            }
+            if (requiredToolIds.size() != assistant.toolCalls.size()) {
+                assistant.toolCalls.clear();
+                if (!assistant.content.empty()) {
+                    out.push_back(std::move(assistant));
+                }
+                continue;
+            }
+
+            std::vector<ChatMessage> toolResults;
+            std::size_t nextIndex = i + 1;
+            bool completeToolGroup = false;
+            for (; nextIndex < messages_.size(); ++nextIndex) {
+                const ChatMessage& next = messages_[nextIndex];
+                if (next.role == Role::System) {
+                    continue;
+                }
+                if (next.role != Role::Tool) {
+                    break;
+                }
+                if (next.toolCallId.empty()) {
+                    continue;
+                }
+                const auto erased = requiredToolIds.erase(next.toolCallId);
+                if (erased == 0) {
+                    continue;
+                }
+                toolResults.push_back(next);
+                if (requiredToolIds.empty()) {
+                    completeToolGroup = true;
+                    ++nextIndex;
+                    break;
+                }
+            }
+
+            if (completeToolGroup) {
+                out.push_back(std::move(assistant));
+                out.insert(out.end(), toolResults.begin(), toolResults.end());
+                i = nextIndex - 1;
+            } else {
+                // Historical interrupted/corrupt runs may contain an assistant
+                // tool_call without all corresponding tool results. Sending
+                // that group would violate chat-completions protocol, so keep
+                // only the text portion when available.
+                assistant.toolCalls.clear();
+                if (!assistant.content.empty()) {
+                    out.push_back(std::move(assistant));
+                }
+            }
+            continue;
+        }
+        if (m.role == Role::Tool) {
             continue;
         }
         out.push_back(m);

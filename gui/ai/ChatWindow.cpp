@@ -86,6 +86,41 @@ bool getProviderConfigProblem(const AIProvider* provider, const std::string& mod
     return false;
 }
 
+std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
+    std::vector<std::string> seenIds;
+    seenIds.reserve(calls.size());
+    for (size_t i = 0; i < calls.size(); ++i) {
+        ToolCall& call = calls[i];
+        const std::string label = "tool call #" + std::to_string(i + 1);
+        const std::string id = trimWhitespace(call.id);
+        if (id.empty()) {
+            return label + " is missing a tool_call id";
+        }
+        if (std::find(seenIds.begin(), seenIds.end(), id) != seenIds.end()) {
+            return label + " duplicates tool_call id '" + id + "'";
+        }
+        seenIds.push_back(id);
+        call.id = id;
+        call.name = trimWhitespace(call.name);
+        if (call.name.empty()) {
+            return label + " is missing a tool name";
+        }
+        if (trimWhitespace(call.arguments).empty()) {
+            call.arguments = "{}";
+        }
+        try {
+            const nlohmann::json parsed = nlohmann::json::parse(call.arguments);
+            if (!parsed.is_object()) {
+                return label + " arguments must be a JSON object";
+            }
+            call.arguments = parsed.dump();
+        } catch (const nlohmann::json::exception& e) {
+            return label + " has invalid JSON arguments: " + e.what();
+        }
+    }
+    return {};
+}
+
 // Current wall-clock time as seconds since the Unix epoch. Used as the
 // ChatMessage.timestamp value so rendered times reflect real calendar
 // time rather than an arbitrary monotonic baseline.
@@ -1123,8 +1158,38 @@ void ChatWindow::pollMessages() {
                 }
                 streamingContent_.clear();
 
-                const bool hasToolCalls = !asstMsg.toolCalls.empty();
                 std::vector<ToolCall> calls = asstMsg.toolCalls;
+                const std::string toolCallError = validateAndNormalizeToolCalls(calls);
+                if (!toolCallError.empty()) {
+                    if (!asstMsg.content.empty()) {
+                        asstMsg.toolCalls.clear();
+                        session_.addMessage(std::move(asstMsg));
+                    }
+
+                    ChatMessage errMsg;
+                    errMsg.role = Role::System;
+                    errMsg.content = "[error] Invalid tool call from AI: " + toolCallError;
+                    errMsg.timestamp = nowUnixSeconds();
+                    session_.addMessage(std::move(errMsg));
+                    touchActiveSession();
+                    Gui::log("[AI Chat] invalid tool call: %s", toolCallError.c_str());
+                    streamingContent_.clear();
+                    requestStartMs_ = 0;
+                    activeDispatchRunId_.clear();
+                    agentController_.addTraceEvent(AgentTraceType::ProviderError,
+                                                   toolCallError);
+                    agentController_.finishFailed();
+                    clearActiveRunContext();
+                    state_ = State::Idle;
+                    break;
+                }
+                const bool hasToolCalls = !calls.empty();
+                std::vector<ToolCall> persistedCalls = calls;
+                const int maxCallsForHistory = std::clamp(maxToolCallsPerTurn_, 1, 64);
+                if (static_cast<int>(persistedCalls.size()) > maxCallsForHistory) {
+                    persistedCalls.resize(static_cast<size_t>(maxCallsForHistory));
+                }
+                asstMsg.toolCalls = std::move(persistedCalls);
                 session_.addMessage(std::move(asstMsg));
                 touchActiveSession();
                 activeDispatchRunId_.clear();
@@ -1608,6 +1673,13 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
             : (result.error.empty() ? std::string("agent dispatch failed")
                                     : result.error);
     Gui::log("[AI Chat] agent dispatch failed: %s", detail.c_str());
+
+    ChatMessage errMsg;
+    errMsg.role = Role::System;
+    errMsg.content = std::string("[error] ") + detail;
+    errMsg.timestamp = nowUnixSeconds();
+    session_.addMessage(std::move(errMsg));
+    touchActiveSession();
     return false;
 }
 
