@@ -173,6 +173,32 @@ AgentRunner::Outcome AgentRunner::completeToolExecution(const ToolCall& call,
     out.messages.push_back(makeToolMessage(tc, result, durationMs));
     ++currentToolCallIndex_;
 
+    if (!result.success) {
+        std::string skipReason = "skipped because an earlier tool failed";
+        if (!result.errorMessage.empty()) {
+            skipReason += ": " + result.errorMessage;
+            constexpr size_t kMaxSkipReasonChars = 240;
+            if (skipReason.size() > kMaxSkipReasonChars) {
+                skipReason.resize(kMaxSkipReasonChars - 3);
+                skipReason += "...";
+            }
+        }
+
+        while (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
+            const ToolCall& skipped = pendingToolCalls_[currentToolCallIndex_];
+            appendTrace(out, AgentTraceType::ToolSkipped, &skipped, skipReason);
+            out.messages.push_back(makeSkippedToolMessage(skipped, skipReason));
+            ++currentToolCallIndex_;
+        }
+
+        pendingToolCalls_.clear();
+        currentToolCallIndex_ = 0;
+        awaitingConfirmation_ = false;
+        appendTrace(out, AgentTraceType::ToolBatchComplete, nullptr);
+        out.kind = OutcomeKind::ReadyForFollowUp;
+        return out;
+    }
+
     Outcome run = runUntilBlocked(config);
     out.messages.insert(out.messages.end(),
                         std::make_move_iterator(run.messages.begin()),
