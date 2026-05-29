@@ -176,8 +176,18 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
 }
 
 std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body) {
+    const char* reason = "OK";
+    switch (statusCode) {
+    case 200: reason = "OK"; break;
+    case 204: reason = "No Content"; break;
+    case 400: reason = "Bad Request"; break;
+    case 404: reason = "Not Found"; break;
+    case 500: reason = "Internal Server Error"; break;
+    default:  reason = "Unknown"; break;
+    }
+
     std::ostringstream oss;
-    oss << "HTTP/1.1 " << statusCode << " OK\r\n"
+    oss << "HTTP/1.1 " << statusCode << " " << reason << "\r\n"
         << "Content-Type: application/json; charset=utf-8\r\n"
         << "Access-Control-Allow-Origin: *\r\n"
         << "Content-Length: " << body.size() << "\r\n"
@@ -306,11 +316,10 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── open_process ──────────────────────────────────────────────
     RegisterMethod("open_process", [](const json& p) -> json {
         int pid = p.at("pid").get<int>();
-        int handle = 0;
-        SetCurrentPid(pid);
-        if (!OpenProcessHandle(pid, handle))
-            return {{"success", false}, {"error", "打开进程失败"}};
         AppContext::Get().selectProcess(pid, "");
+        int handle = AppContext::Get().processHandle.load(std::memory_order_relaxed);
+        if (handle == 0)
+            return {{"success", false}, {"error", "打开进程失败"}};
         return {{"success", true}, {"result", {{"handle", handle}}}};
     });
 

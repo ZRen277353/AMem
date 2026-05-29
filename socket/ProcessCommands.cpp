@@ -2,6 +2,19 @@
 #include "SocketCommand.h"
 #include <ctime>
 
+namespace {
+constexpr int kMaxProcessCount = 65536;
+constexpr int kMaxProcessNameSize = 64 * 1024;
+constexpr int kMaxModuleCount = 65536;
+constexpr int kMaxModuleNameSize = 64 * 1024;
+constexpr int kMaxDriverCardSize = 4096;
+constexpr int kMaxDriverResponseSize = 64 * 1024;
+
+bool isValidCount(int value, int maxValue) {
+    return value >= 0 && value <= maxValue;
+}
+} // namespace
+
 bool GetMemType(int &outType, PortType type) {
     return SocketCommand::executeNoHandle(type, [&](WindowsSocketClient* client) -> bool {
         unsigned char command = CMD_GETMEMTYPE;
@@ -16,6 +29,12 @@ bool GetMemType(int &outType, PortType type) {
 }
 
 bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
+    resStr.clear();
+    if (Card.empty() || Card.size() > static_cast<size_t>(kMaxDriverCardSize)) {
+        resStr = "invalid driver card length";
+        return false;
+    }
+
     int ret = 0;
     int resStrlen = 0;
     std::vector<char> resStrVec;
@@ -24,19 +43,19 @@ bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
         unsigned char command = CMD_INITRWDRIVER;
         if (!client->Send(&command, sizeof(command)))
             return false;
-        int Cardlen = Card.size();
+        int Cardlen = static_cast<int>(Card.size());
         if (!client->Send(&Cardlen, sizeof(Cardlen)))
             return false;
-        if (!client->Send(Card.data(), Card.size()))
+        if (!client->Send(Card.data(), static_cast<size_t>(Cardlen)))
             return false;
         if (!client->Receive(&ret, sizeof(ret)))
             return false;
         if (!client->Receive(&resStrlen, sizeof(resStrlen)))
             return false;
-        if (resStrlen == 0)
+        if (!isValidCount(resStrlen, kMaxDriverResponseSize))
             return false;
         resStrVec.resize(resStrlen);
-        if (!client->Receive(resStrVec.data(), resStrlen))
+        if (resStrlen > 0 && !client->Receive(resStrVec.data(), static_cast<size_t>(resStrlen)))
             return false;
         return true;
     });
@@ -98,14 +117,19 @@ bool FetchProcessList(std::vector<ProcessInfoItem> &outList, PortType type) {
         int len = 0;
         if (!client->Receive(&len, 4))
             return false;
+        if (!isValidCount(len, kMaxProcessCount))
+            return false;
         outList.clear();
-        while (len--) {
+        outList.reserve(static_cast<size_t>(len));
+        for (int i = 0; i < len; ++i) {
             struct { int pid; int size; } proc{};
             if (!client->Receive(&proc, sizeof(proc)))
-                break;
+                return false;
+            if (!isValidCount(proc.size, kMaxProcessNameSize))
+                return false;
             std::vector<char> name(proc.size);
-            if (!client->Receive(name.data(), proc.size))
-                break;
+            if (proc.size > 0 && !client->Receive(name.data(), proc.size))
+                return false;
             ProcessInfoItem item{};
             item.pid = proc.pid;
             item.name.assign(name.data(), name.size());
@@ -123,7 +147,7 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
         int len = 0;
         if (!client->Receive(&len, 4))
             return false;
-        if (len < 0)
+        if (!isValidCount(len, kMaxModuleCount))
             return false;
         CeModuleListEntry entry{};
         outList.clear();
@@ -132,7 +156,7 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
-            if (entry.modulenamesize < 0)
+            if (!isValidCount(entry.modulenamesize, kMaxModuleNameSize))
                 return false;
             std::vector<char> name;
             if (entry.modulenamesize > 0) {

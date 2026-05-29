@@ -274,6 +274,14 @@ void MemoryViewerWindow::drawDissectorTable()
                 expandPointerNode(*node, baseAddr);
         }
     }
+    // 延迟执行偏移调整
+    if (ops.pendingOffsetChangeFlat >= 0) {
+        auto* parentVec = &dissectNodes;
+        for (int p = 0; p < (int)ops.pendingOffsetChangePath.size() - 1; p++)
+            parentVec = &(*parentVec)[ops.pendingOffsetChangePath[p]].children;
+        int idx = ops.pendingOffsetChangePath.back();
+        onDissectNodeOffsetChanged(*parentVec, idx, ops.pendingNewOffset);
+    }
 }
 
 // PLACEHOLDER_DRAW_NODE_ROW
@@ -289,7 +297,7 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
     ImGui::TableNextRow();
     ImGui::PushID(myFlat);
 
-    // --- 偏移列：TreeNodeEx 实现缩进 ---
+    // --- 偏移列：TreeNodeEx + 可编辑偏移 ---
     ImGui::TableSetColumnIndex(0);
     bool isPointer = (node.type == FieldType::POINTER);
     ImGuiTreeNodeFlags treeFlags = ImGuiTreeNodeFlags_SpanAvailWidth
@@ -301,9 +309,27 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
     else if (isPointer)
         ImGui::SetNextItemOpen(false, ImGuiCond_Always);
 
+    // 使用树节点实现缩进，但偏移值可通过 InputScalar 编辑
     char offsetLabel[64];
-    snprintf(offsetLabel, sizeof(offsetLabel), "+0x%03X", node.offset);
+    snprintf(offsetLabel, sizeof(offsetLabel), "##tree_%d", myFlat);
     bool treeOpen = ImGui::TreeNodeEx(offsetLabel, treeFlags);
+
+    // 在同一行追加可编辑的偏移输入框
+    ImGui::SameLine();
+    int editableOffset = node.offset;
+    ImGui::PushItemWidth(60);
+    char offsetFmt[16];
+    snprintf(offsetFmt, sizeof(offsetFmt), "+0x%%03X");
+    if (ImGui::InputScalar("##off", ImGuiDataType_S32, &editableOffset,
+                           nullptr, nullptr, "+0x%03X",
+                           ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (editableOffset != node.offset && editableOffset >= 0) {
+            ops.pendingOffsetChangeFlat = myFlat;
+            ops.pendingNewOffset = editableOffset;
+            ops.pendingOffsetChangePath = path;
+        }
+    }
+    ImGui::PopItemWidth();
 
     // 右键菜单
     char ctxId[64];
@@ -318,6 +344,7 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
             editNodeDesc[sizeof(editNodeDesc) - 1] = '\0';
             editNodeTypeIdx = (int)node.type;
             editNodeStringSize = node.storedSize > 0 ? node.storedSize : 32;
+            editNodeOffset = node.offset;
         }
         if (ImGui::MenuItem("浏览内存")) {
             jumpToAddress(baseAddr + node.offset);
@@ -450,6 +477,10 @@ void MemoryViewerWindow::drawNodeEditPopup()
         }
 
         ImGui::Text("偏移: +0x%03X", node->offset);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputScalar("##editOff", ImGuiDataType_S32, &editNodeOffset,
+                           nullptr, nullptr, "0x%X", ImGuiInputTextFlags_CharsHexadecimal);
         ImGui::Separator();
 
         ImGui::InputText("名称", editNodeName, sizeof(editNodeName));
@@ -489,7 +520,16 @@ void MemoryViewerWindow::drawNodeEditPopup()
                 newType == FieldType::STRING_UTF16) {
                 node->storedSize = editNodeStringSize;
             }
-            refreshDissectValues();
+            // 处理偏移变更
+            if (editNodeOffset != node->offset && editNodeOffset >= 0) {
+                auto* parentVec = &dissectNodes;
+                for (int p = 0; p < (int)dissectEditPath.size() - 1; p++)
+                    parentVec = &(*parentVec)[dissectEditPath[p]].children;
+                int idx = dissectEditPath.back();
+                onDissectNodeOffsetChanged(*parentVec, idx, editNodeOffset);
+            } else {
+                refreshDissectValues();
+            }
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -741,6 +781,102 @@ void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& node
 }
 
 // PLACEHOLDER_WRITE_AND_TEMPLATE
+
+// ============================================================
+// onDissectNodeOffsetChanged — 偏移调整，重新排列节点
+// ============================================================
+void MemoryViewerWindow::onDissectNodeOffsetChanged(std::vector<DissectNode>& nodes,
+                                                    int nodeIndex, int newOffset)
+{
+    if (nodeIndex < 0 || nodeIndex >= (int)nodes.size()) return;
+    auto& node = nodes[nodeIndex];
+    int oldOffset = node.offset;
+    if (newOffset == oldOffset) return;
+
+    int totalBytes = (int)structBuffer.size();
+    if (newOffset < 0) newOffset = 0;
+    if (newOffset + node.getSize() > totalBytes)
+        newOffset = totalBytes - node.getSize();
+    if (newOffset < 0) return;
+
+    node.offset = newOffset;
+
+    // 按偏移重新排序节点列表
+    std::sort(nodes.begin(), nodes.end(), [](const DissectNode& a, const DissectNode& b) {
+        return a.offset < b.offset;
+    });
+
+    // 检测并修复重叠：如果当前节点与前后节点有重叠，调整相邻节点
+    for (int i = 0; i < (int)nodes.size() - 1; i++) {
+        int endOfCurrent = nodes[i].offset + nodes[i].getSize();
+        if (endOfCurrent > nodes[i + 1].offset) {
+            // 当前节点末尾超过了下一个节点的起始，缩短或移除下一个节点
+            // 策略：将下一个节点的偏移推到当前节点末尾
+            nodes[i + 1].offset = endOfCurrent;
+            if (nodes[i + 1].offset + nodes[i + 1].getSize() > totalBytes) {
+                // 超出范围，移除该节点
+                nodes.erase(nodes.begin() + i + 1);
+                i--; // 重新检查当前位置
+            }
+        }
+    }
+
+    // 检查是否有间隙需要填充（可选：不自动填充，让用户自由控制）
+    // 如果两个节点之间有空隙且空隙 >= dissectDefaultSize，插入填充节点
+    FieldType fillType;
+    switch (dissectDefaultSize) {
+        case 1: fillType = FieldType::BYTE; break;
+        case 2: fillType = FieldType::WORD; break;
+        case 8: fillType = FieldType::QWORD; break;
+        default: fillType = FieldType::DWORD; break;
+    }
+
+    // 填充首节点之前的空隙
+    if (!nodes.empty() && nodes[0].offset >= dissectDefaultSize) {
+        int gapStart = 0;
+        int gapEnd = nodes[0].offset;
+        int pos = 0;
+        while (gapStart + dissectDefaultSize <= gapEnd) {
+            DissectNode filler;
+            filler.offset = gapStart;
+            filler.type = fillType;
+            filler.depth = nodes[0].depth;
+            filler.storedSize = dissectDefaultSize;
+            char nb[32];
+            snprintf(nb, sizeof(nb), "field_%04X", gapStart);
+            filler.name = nb;
+            nodes.insert(nodes.begin() + pos, std::move(filler));
+            gapStart += dissectDefaultSize;
+            pos++;
+        }
+    }
+
+    // 填充节点之间的空隙
+    for (int i = 0; i < (int)nodes.size() - 1; i++) {
+        int endOfCurrent = nodes[i].offset + nodes[i].getSize();
+        int startOfNext = nodes[i + 1].offset;
+        if (startOfNext - endOfCurrent >= dissectDefaultSize) {
+            int gapStart = endOfCurrent;
+            int insertPos = i + 1;
+            while (gapStart + dissectDefaultSize <= startOfNext) {
+                DissectNode filler;
+                filler.offset = gapStart;
+                filler.type = fillType;
+                filler.depth = nodes[i].depth;
+                filler.storedSize = dissectDefaultSize;
+                char nb[32];
+                snprintf(nb, sizeof(nb), "field_%04X", gapStart);
+                filler.name = nb;
+                nodes.insert(nodes.begin() + insertPos, std::move(filler));
+                gapStart += dissectDefaultSize;
+                insertPos++;
+                i++;
+            }
+        }
+    }
+
+    refreshDissectValues();
+}
 
 // ============================================================
 // writeDissectNodeValue — 写入值到内存

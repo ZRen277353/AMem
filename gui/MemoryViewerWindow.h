@@ -209,9 +209,14 @@ private:
         int pendingWriteFlat = -1;
         std::string pendingWriteValue;
         std::vector<int> pendingWritePath;
+        // 偏移调整
+        int pendingOffsetChangeFlat = -1;
+        int pendingNewOffset = 0;
+        std::vector<int> pendingOffsetChangePath;
     };
     void drawNodeRow(DissectNode& node, uint64_t baseAddr, int& flatIndex,
                      std::vector<int>& path, DissectDeferredOps& ops);
+    void onDissectNodeOffsetChanged(std::vector<DissectNode>& nodes, int nodeIndex, int newOffset);
     
     // 反汇编相关
     std::string formatAddressWithOffset(uint64_t address);  // 格式化地址显示：地址[偏移量]
@@ -291,6 +296,7 @@ private:
     char editNodeDesc[256] = "";
     int editNodeTypeIdx = 0;
     int editNodeStringSize = 32;
+    int editNodeOffset = 0;  // 编辑弹窗中的偏移值
     
     // 地址列表（监控项）
     std::vector<MemoryWatchItem> watchItems;

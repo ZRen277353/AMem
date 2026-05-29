@@ -1,6 +1,15 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
 
+namespace {
+constexpr int kMaxSymbolPageCount = 1000;
+constexpr int kMaxSymbolNameSize = 64 * 1024;
+
+bool isValidCount(int value, int maxValue) {
+    return value >= 0 && value <= maxValue;
+}
+} // namespace
+
 bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SYMBOL_INIT;
@@ -22,6 +31,9 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
 bool SymbolGetList(int offset, int count,
                    std::vector<std::pair<uint64_t, std::string>> &outSymbols,
                    int *outTotalCount, PortType port) {
+    if (offset < 0 || count < 0 || count > kMaxSymbolPageCount)
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int) -> bool {
         unsigned char command = CMD_SYMBOL_GETLIST;
         if (!client->Send(&command, sizeof(command)))
@@ -34,18 +46,24 @@ bool SymbolGetList(int offset, int count,
         CeGetSymbolListOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.totalCount < 0 ||
+            output.actualCount < 0 ||
+            output.actualCount > count)
+            return false;
         if (outTotalCount)
             *outTotalCount = output.totalCount;
         outSymbols.clear();
-        outSymbols.reserve(output.actualCount);
+        outSymbols.reserve(static_cast<size_t>(output.actualCount));
         for (int i = 0; i < output.actualCount; ++i) {
             CeSymbolEntry entry{};
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
+            if (!isValidCount(entry.nameSize, kMaxSymbolNameSize))
+                return false;
             std::string name;
             if (entry.nameSize > 0) {
-                name.resize(entry.nameSize);
-                if (!client->Receive(name.data(), entry.nameSize))
+                name.resize(static_cast<size_t>(entry.nameSize));
+                if (!client->Receive(name.data(), static_cast<size_t>(entry.nameSize)))
                     return false;
             }
             outSymbols.emplace_back(entry.address, std::move(name));

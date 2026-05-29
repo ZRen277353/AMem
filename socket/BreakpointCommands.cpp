@@ -2,6 +2,10 @@
 #include "SocketCommand.h"
 #include <cstring>
 
+namespace {
+constexpr int kMaxBreakpointHitCount = 100000;
+} // namespace
+
 bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_SETBREAKPOINT;
@@ -76,9 +80,11 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
             return false;
         if (!client->Receive(&TotalCount, sizeof(TotalCount)))
             return false;
+        if (result < 0 || result > kMaxBreakpointHitCount)
+            return false;
         if (result > 0) {
-            infos.resize(result);
-            if (!client->Receive(infos.data(), result * sizeof(HW_HIT_INFO)))
+            infos.resize(static_cast<size_t>(result));
+            if (!client->Receive(infos.data(), static_cast<size_t>(result) * sizeof(HW_HIT_INFO)))
                 return false;
         }
         return true;

@@ -6,6 +6,7 @@
 #include "LogWindow.h"
 #include "../imgui/imgui.h"
 #include <map>
+#include <vector>
 
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
@@ -14,6 +15,13 @@
 namespace Gui {
 	std::list<std::unique_ptr<Window>> windows;
 	std::list<std::pair<std::string, int>> logs;
+	std::mutex logsMutex;
+
+	std::vector<std::pair<std::string, int>> getLogsSnapshot()
+	{
+		std::lock_guard<std::mutex> lock(logsMutex);
+		return {logs.begin(), logs.end()};
+	}
 
 	void addWindow(Window* window)
 	{
@@ -58,4 +66,4 @@ namespace Gui {
 			}
 		}
 	}
-} 
+}

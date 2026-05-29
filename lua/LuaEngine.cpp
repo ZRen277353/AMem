@@ -82,7 +82,10 @@ void LuaEngine::RegisterAPIs() {
 
 bool LuaEngine::ExecuteFile(const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex);
-    
+    return ExecuteFileLocked(filepath);
+}
+
+bool LuaEngine::ExecuteFileLocked(const std::string& filepath) {
     if (!initialized || !L) {
         lastError = "Lua engine not initialized";
         return false;
@@ -206,7 +209,7 @@ bool LuaEngine::ReloadScript(const std::string& name) {
     }
 
     std::string filepath = it->second;
-    return ExecuteFile(filepath);
+    return ExecuteFileLocked(filepath);
 }
 
 void LuaEngine::UnloadScript(const std::string& name) {
@@ -259,7 +262,10 @@ bool LuaEngine::CallCallback(const std::string& name, int nargs, int nresults) {
 
 void LuaEngine::AddScriptPath(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex);
-    
+    AddScriptPathLocked(path);
+}
+
+void LuaEngine::AddScriptPathLocked(const std::string& path) {
     if (!L) return;
 
     // 获取当前的package.path
@@ -278,7 +284,7 @@ void LuaEngine::AddScriptPath(const std::string& path) {
 void LuaEngine::SetScriptBasePath(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex);
     scriptBasePath = path;
-    AddScriptPath(path);
+    AddScriptPathLocked(path);
 }
 
 std::vector<std::string> LuaEngine::GetLoadedScripts() const {

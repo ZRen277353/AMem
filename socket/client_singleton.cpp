@@ -80,6 +80,7 @@ int GetCurrentPid() {
 }
 
 bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
+  outHandle = 0;
   auto client = GetSocketMgr().GetClient(type);
   if (!client->IsConnected())
     return false;
@@ -98,6 +99,10 @@ bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
         int handle = 0;
         if (!client->Receive(&handle, sizeof(handle)))
           return false;
+        if (handle == 0) {
+          AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
+          return false;
+        }
         outHandle = handle;
         AppContext::Get().processHandle.store(handle, std::memory_order_relaxed);
         return true;

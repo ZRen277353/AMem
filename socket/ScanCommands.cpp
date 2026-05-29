@@ -3,6 +3,14 @@
 #include <iostream>
 #include <iomanip>
 
+namespace {
+constexpr int kMaxScanResultPageCount = 1000;
+
+bool isValidScanPageRequest(int offset, int count) {
+    return offset >= 0 && count >= 0 && count <= kMaxScanResultPageCount;
+}
+} // namespace
+
 bool ScanSetRange(int type, PortType port) {
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SETRANGE;
@@ -25,8 +33,10 @@ int ScanValue(uint32_t flags, std::vector<unsigned char> &Value, uint64_t start,
 #pragma pack()
         scanParams.start = start; scanParams.end = end;
         scanParams.size = Value.size(); scanParams.flag = flags;
-        client->Send(&scanParams, sizeof(scanParams));
-        client->Send(Value.data(), Value.size());
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
+        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
+            return false;
         while (true) {
             ScanProgress progress;
             if (!client->Receive(&progress, sizeof(progress))) break;
@@ -52,8 +62,10 @@ int ScanNextValue(std::vector<unsigned char> &Value, int flag, uint64_t start,
 #pragma pack()
         scanParams.start = start; scanParams.end = end;
         scanParams.size = Value.size(); scanParams.flag = flag;
-        client->Send(&scanParams, sizeof(scanParams));
-        client->Send(Value.data(), Value.size());
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
+        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
+            return false;
         while (true) {
             ScanProgress progress;
             if (!client->Receive(&progress, sizeof(progress))) break;
@@ -78,6 +90,9 @@ int GetScanResultCount(PortType port) {
 
 bool GetScanResult(int offset, int count,
                    std::vector<std::pair<uint64_t, uint64_t>> &results, PortType port) {
+    if (!isValidScanPageRequest(offset, count))
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_GETSCANRESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -89,11 +104,15 @@ bool GetScanResult(int offset, int count,
         CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.total_count < 0 ||
+            output.actual_count < 0 ||
+            output.actual_count > count)
+            return false;
         results.clear();
         if (output.actual_count <= 0)
             return true;
-        results.resize(output.actual_count);
-        if (!client->Receive(results.data(), output.actual_count * sizeof(uint64_t) * 2))
+        results.resize(static_cast<size_t>(output.actual_count));
+        if (!client->Receive(results.data(), static_cast<size_t>(output.actual_count) * sizeof(uint64_t) * 2))
             return false;
         return true;
     });
@@ -132,8 +151,10 @@ int ScanValueWithProgress(uint32_t flags, std::vector<unsigned char> &Value,
 #pragma pack()
         scanParams.start = start; scanParams.end = end;
         scanParams.size = Value.size(); scanParams.flag = flags;
-        client->Send(&scanParams, sizeof(scanParams));
-        client->Send(Value.data(), Value.size());
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
+        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
+            return false;
         if (!SocketCommand::receiveProgressLoop(client, callback, userData))
             return false;
         if (!client->Receive(&len, sizeof(len)))
@@ -154,8 +175,10 @@ int ScanNextValueWithProgress(std::vector<unsigned char> &Value, int flag,
 #pragma pack()
         scanParams.start = start; scanParams.end = end;
         scanParams.size = Value.size(); scanParams.flag = flag;
-        client->Send(&scanParams, sizeof(scanParams));
-        client->Send(Value.data(), Value.size());
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
+        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
+            return false;
         if (!SocketCommand::receiveProgressLoop(client, callback, userData))
             return false;
         if (!client->Receive(&len, sizeof(len)))
@@ -175,7 +198,8 @@ int ScanFuzzyValueWithProgress(uint32_t flags, ScanProgressCallback callback,
         struct { uint64_t start; uint64_t end; unsigned int flag; } scanParams;
 #pragma pack()
         scanParams.start = start; scanParams.end = end; scanParams.flag = flags;
-        client->Send(&scanParams, sizeof(scanParams));
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
         if (!SocketCommand::receiveProgressLoop(client, callback, userData))
             return false;
         if (!client->Receive(&len, sizeof(len)))
@@ -198,13 +222,18 @@ int ScanGroupValueWithProgress(
         int len = Value.size();
         scanParams.start = start; scanParams.end = end;
         scanParams.order = order; scanParams.len = len;
-        client->Send(&scanParams, sizeof(scanParams));
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
         std::vector<char> types, sizes;
         for (auto &it : Value) { types.push_back(it.second.second); sizes.push_back(it.second.first); }
-        client->Send(types.data(), types.size());
-        client->Send(sizes.data(), sizes.size());
-        for (int i = 0; i < len; i++)
-            client->Send(Value[i].first.data(), sizes[i]);
+        if (!client->Send(types.data(), types.size()))
+            return false;
+        if (!client->Send(sizes.data(), sizes.size()))
+            return false;
+        for (int i = 0; i < len; i++) {
+            if (!client->Send(Value[i].first.data(), sizes[i]))
+                return false;
+        }
         if (!SocketCommand::receiveProgressLoop(client, callback, userData))
             return false;
         if (!client->Receive(&SearchCount, sizeof(SearchCount)))
@@ -225,8 +254,10 @@ int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
         struct { uint64_t start; uint64_t end; int size; } scanParams;
 #pragma pack()
         scanParams.start = start; scanParams.end = end; scanParams.size = Value.size();
-        client->Send(&scanParams, sizeof(scanParams));
-        client->Send(Value.data(), Value.size());
+        if (!client->Send(&scanParams, sizeof(scanParams)))
+            return false;
+        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
+            return false;
         if (!SocketCommand::receiveProgressLoop(client, callback, userData))
             return false;
         if (!client->Receive(&len, sizeof(len)))
@@ -238,6 +269,9 @@ int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
 bool GetTypedScanResult(int offset, int count,
                         std::vector<std::tuple<uint64_t, uint64_t, short>> &results,
                         PortType port) {
+    if (!isValidScanPageRequest(offset, count))
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_GETSCAN_TYPE_RESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -249,9 +283,14 @@ bool GetTypedScanResult(int offset, int count,
         CeGetScanResultOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.total_count < 0 ||
+            output.actual_count < 0 ||
+            output.actual_count > count)
+            return false;
         results.clear();
         if (output.actual_count <= 0)
             return true;
+        results.reserve(static_cast<size_t>(output.actual_count));
         for (int i = 0; i < output.actual_count; i++) {
             uint64_t addr = 0;
             uint64_t value = 0;
