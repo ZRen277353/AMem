@@ -344,6 +344,21 @@ uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
     return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
 }
 
+uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) {
+    if (args.contains("flags") && args["flags"].is_number_integer()) {
+        const long long f = args["flags"].get<long long>();
+        if (f < 0 || f > UINT32_MAX) {
+            throw std::runtime_error("flags out of range");
+        }
+        return static_cast<uint32_t>(f);
+    }
+    const std::string scanType =
+        args.contains("scan_type") && args["scan_type"].is_string()
+            ? args["scan_type"].get<std::string>()
+            : std::string("unknown");
+    return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
+}
+
 // Encode a value (int/float/etc.) as a byte vector for scan/write tools.
 // Supports both legacy value_type names (int32/int64/bytes/string) and
 // MCP-style data_type names (byte/word/dword/qword/float/double).
@@ -410,6 +425,11 @@ std::vector<unsigned char> scanBytesFromArgs(const json& args,
         std::vector<unsigned char> bytes = parseHexBytes(args["hex"].get<std::string>());
         if (bytes.empty()) throw std::runtime_error("hex is empty");
         return bytes;
+    }
+    if (!args.contains(valueFieldName)) {
+        throw std::runtime_error(std::string("missing required property '") +
+                                 valueFieldName +
+                                 "' (or provide value_hex/hex)");
     }
     return encodeScanValue(valueType, args.at(valueFieldName));
 }
@@ -702,7 +722,7 @@ std::string execScanFuzzy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string valueType = valueTypeFromArgs(args);
-        const uint32_t flags = scanFlagsFromArgs(args, valueType);
+        const uint32_t flags = fuzzyScanFlagsFromArgs(args, valueType);
         const uint64_t start = parseOptionalAddress(args, "start", 0);
         const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
         const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
@@ -1422,15 +1442,15 @@ constexpr const char* kSchemaScanValue = R"JSON({
   "type": "object",
   "properties": {
     "value": {
-      "description": "Value to scan for; interpreted according to value_type/data_type"
+      "description": "Value to scan for; interpreted according to value_type/data_type. Required unless value_hex or hex is supplied"
     },
     "value_hex": {
       "type": "string",
-      "description": "Little-endian encoded value bytes, IPC/MCP-compatible"
+      "description": "Little-endian encoded value bytes. Alternative to value"
     },
     "hex": {
       "type": "string",
-      "description": "Alias for value_hex"
+      "description": "Alias for value_hex. Alternative to value"
     },
     "value_type": {
       "type": "string",
@@ -1476,7 +1496,7 @@ constexpr const char* kSchemaScanFuzzy = R"JSON({
     },
     "scan_type": {
       "type": "string",
-      "description": "MCP-style fuzzy scan type: unknown, increased, decreased, changed, unchanged"
+      "description": "MCP-style fuzzy scan type: unknown, increased, increased_by, decreased, decreased_by, changed, unchanged. Default: unknown"
     },
     "flags": {
       "type": "integer",
