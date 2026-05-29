@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMem MCP"
+  short_description: "Use AMem MCP tools safely and consistently."
+  default_prompt: "Use the AMem MCP skill to inspect status, select a process, read or scan memory, manage breakpoints, run Lua, or query symbols through the AMem GUI IPC bridge."

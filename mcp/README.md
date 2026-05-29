@@ -332,6 +332,10 @@ mcp/
 
 添加新工具：在 `amem_mcp/tools/` 下新建或编辑模块，实现 `register(mcp, ipc)` 函数，并在 `tools/__init__.py` 的 `register_all` 里注册。所有扫描/类型常量都在 `amem_mcp/constants.py`，复用已有 helper 可避免重复的编码逻辑。
 
+### Codex Skill
+
+`skills/amem-mcp/SKILL.md` 是随本 MCP 一起维护的 Codex skill，用于约束 AI 使用 AMem MCP 时的调用顺序、安全边界、参数规范和错误处理。需要让 Codex 自动发现时，可将整个 `skills/amem-mcp/` 目录复制或安装到 `$CODEX_HOME/skills/`。
+
 ### 快速自检
 
 在仓库根目录运行：
