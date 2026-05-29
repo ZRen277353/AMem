@@ -1022,6 +1022,7 @@ void ChatWindow::sendMessage() {
         errMsg.content = std::string("[error] ") + configProblem;
         errMsg.timestamp = nowUnixSeconds();
         session_.addMessage(std::move(errMsg));
+        touchActiveSession();
         showSettings_ = true;
         state_ = State::Idle;
         return;
@@ -1076,6 +1077,7 @@ void ChatWindow::cancelRequest() {
             partial.durationMs = nowSteadyMs() - requestStartMs_;
         }
         session_.addMessage(std::move(partial));
+        touchActiveSession();
         streamingContent_.clear();
     }
 
@@ -1084,6 +1086,7 @@ void ChatWindow::cancelRequest() {
     notice.timestamp = nowUnixSeconds();
     notice.content = "[cancelled]";
     session_.addMessage(std::move(notice));
+    touchActiveSession();
 
     requestStartMs_ = 0;
     agentController_.addTraceEvent(AgentTraceType::Cancelled, "request cancelled");
@@ -1224,6 +1227,7 @@ void ChatWindow::pollMessages() {
                 errMsg.content = std::string("[error] ") + msg.data;
                 errMsg.timestamp = nowUnixSeconds();
                 session_.addMessage(std::move(errMsg));
+                touchActiveSession();
                 Gui::log("[AI Chat] error: %s", msg.data.c_str());
                 streamingContent_.clear();
                 requestStartMs_ = 0;
@@ -1262,6 +1266,7 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
             partial.durationMs = nowSteadyMs() - requestStartMs_;
         }
         session_.addMessage(std::move(partial));
+        touchActiveSession();
     }
 
     // Format a category-specific user-facing message. The "[error]" prefix
@@ -1314,6 +1319,7 @@ void ChatWindow::displayErrorForCategory(const ProviderError& err) {
     errMsg.content = std::move(text);
     errMsg.timestamp = nowUnixSeconds();
     session_.addMessage(std::move(errMsg));
+    touchActiveSession();
 
     // Log every error (AC 12.8).
     Gui::log("[AI Chat] error (category=%d): %s",
