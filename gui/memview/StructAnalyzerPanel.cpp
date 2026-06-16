@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cerrno>
+#include <limits>
 
 namespace {
 constexpr uint64_t kMinLikelyPointer = 0x4FFFFFFFFFULL;
@@ -21,6 +22,7 @@ constexpr uint64_t kMaxLikelyPointer = 0x7FFFFFFFFFFFULL;
 constexpr size_t kMaxStructDefinitionCount = 4096;
 constexpr size_t kMaxStructFieldCount = 65536;
 constexpr size_t kMaxStructStringLength = 4096;
+constexpr int kMaxStructFieldByteSpan = 1024 * 1024;
 
 bool isLikelyPointerAddress(uint64_t address)
 {
@@ -53,6 +55,51 @@ bool readDissectMemory(uint64_t address, int size, std::vector<unsigned char>& o
         return false;
     }
     return ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), out);
+}
+
+bool getStructFieldSpan(const StructField& field, size_t bufferSize,
+                        size_t& offset, size_t& bytes)
+{
+    offset = 0;
+    bytes = 0;
+    if (field.offset < 0 || field.size <= 0 || field.arrayCount <= 0) {
+        return false;
+    }
+
+    const int64_t span =
+        static_cast<int64_t>(field.size) * static_cast<int64_t>(field.arrayCount);
+    if (span <= 0 || span > kMaxStructFieldByteSpan) {
+        return false;
+    }
+
+    offset = static_cast<size_t>(field.offset);
+    bytes = static_cast<size_t>(span);
+    return offset <= bufferSize && bytes <= bufferSize - offset;
+}
+
+bool addStructOffsetToAddress(uint64_t baseAddress, int offset, uint64_t& address)
+{
+    address = 0;
+    if (baseAddress == 0 || offset < 0) {
+        return false;
+    }
+
+    const uint64_t unsignedOffset = static_cast<uint64_t>(offset);
+    if (baseAddress > (std::numeric_limits<uint64_t>::max)() - unsignedOffset) {
+        return false;
+    }
+
+    address = baseAddress + unsignedOffset;
+    return true;
+}
+
+bool isValidStoredStructField(const StructField& field)
+{
+    size_t offset = 0;
+    size_t bytes = 0;
+    return static_cast<int>(field.type) >= static_cast<int>(FieldType::BYTE) &&
+           static_cast<int>(field.type) <= static_cast<int>(FieldType::STRUCT) &&
+           getStructFieldSpan(field, static_cast<size_t>(kMaxStructFieldByteSpan), offset, bytes);
 }
 
 template <typename T>
@@ -565,6 +612,8 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
     int myFlat = flatIndex++;
     ImGui::TableNextRow();
     ImGui::PushID(myFlat);
+    uint64_t nodeAddress = 0;
+    const bool hasNodeAddress = addStructOffsetToAddress(baseAddr, node.offset, nodeAddress);
 
     // --- 偏移列：TreeNodeEx + 可编辑偏移 ---
     ImGui::TableSetColumnIndex(0);
@@ -614,17 +663,21 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
             editNodeOffset = node.offset;
         }
         if (ImGui::MenuItem("浏览内存")) {
-            jumpToAddress(baseAddr + node.offset);
+            if (hasNodeAddress) {
+                jumpToAddress(nodeAddress);
+            }
         }
         if (ImGui::MenuItem("添加到监控")) {
-            MemoryWatchItem item;
-            item.description = node.name;
-            item.address = baseAddr + node.offset;
-            item.type = node.type;
-            item.enabled = true;
-            watchItems.push_back(item);
-            if (AppContext::Get().hasProcess())
-                watchItems.back().cachedValue = readWatchItemValue(watchItems.back());
+            if (hasNodeAddress) {
+                MemoryWatchItem item;
+                item.description = node.name;
+                item.address = nodeAddress;
+                item.type = node.type;
+                item.enabled = true;
+                watchItems.push_back(item);
+                if (AppContext::Get().hasProcess())
+                    watchItems.back().cachedValue = readWatchItemValue(watchItems.back());
+            }
         }
         if (isPointer && node.pointerTarget != 0) {
             if (ImGui::MenuItem("在新地址解析指针目标")) {
@@ -658,7 +711,11 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
 
     // --- 地址列 ---
     ImGui::TableSetColumnIndex(1);
-    ImGui::TextColored(ColorScheme::Address, "%llX", (unsigned long long)(baseAddr + node.offset));
+    if (hasNodeAddress) {
+        ImGui::TextColored(ColorScheme::Address, "%llX", (unsigned long long)nodeAddress);
+    } else {
+        ImGui::TextDisabled("??");
+    }
 
     // --- 名称列（可编辑）---
     ImGui::TableSetColumnIndex(2);
@@ -1186,7 +1243,10 @@ void MemoryViewerWindow::onDissectNodeOffsetChanged(std::vector<DissectNode>& no
 bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseAddr,
                                                const std::string& valueStr)
 {
-    uint64_t addr = baseAddr + node.offset;
+    uint64_t addr = 0;
+    if (!addStructOffsetToAddress(baseAddr, node.offset, addr)) {
+        return false;
+    }
     std::vector<unsigned char> data;
     try {
         switch (node.type) {
@@ -1450,16 +1510,21 @@ int MemoryViewerWindow::getFieldTypeSize(FieldType type)
 std::string MemoryViewerWindow::readFieldValue(const std::vector<unsigned char>& data,
                                                const StructField& field, uint64_t baseAddr)
 {
-    if (field.offset + field.size * field.arrayCount > (int)data.size())
+    size_t fieldOffset = 0;
+    size_t fieldBytes = 0;
+    if (!getStructFieldSpan(field, data.size(), fieldOffset, fieldBytes))
         return "超出范围";
     std::stringstream ss;
     if (field.arrayCount > 1) {
         ss << "{ ";
         for (int i = 0; i < field.arrayCount && i < 10; i++) {
             if (i > 0) ss << ", ";
-            int elemOffset = field.offset + i * field.size;
-            if (elemOffset + field.size <= (int)data.size())
-                ss << readSingleFieldValue(data, field.type, elemOffset, field.size);
+            const size_t elemOffset = fieldOffset + static_cast<size_t>(i) * static_cast<size_t>(field.size);
+            if (elemOffset <= data.size() &&
+                static_cast<size_t>(field.size) <= data.size() - elemOffset &&
+                elemOffset <= static_cast<size_t>((std::numeric_limits<int>::max)())) {
+                ss << readSingleFieldValue(data, field.type, static_cast<int>(elemOffset), field.size);
+            }
         }
         if (field.arrayCount > 10) ss << ", ...";
         ss << " }";
@@ -1621,8 +1686,7 @@ void MemoryViewerWindow::loadStructDefinitions()
                 structValid = false;
                 break;
             }
-            if ((int)field.type < (int)FieldType::BYTE || (int)field.type > (int)FieldType::STRUCT ||
-                field.size < 0 || field.arrayCount < 1) {
+            if (!isValidStoredStructField(field)) {
                 structValid = false;
                 break;
             }
@@ -1653,8 +1717,9 @@ void MemoryViewerWindow::loadStructDefinitions()
             structDef.fields.push_back(field);
         }
         if (!structValid) return;
-        if (!file.read((char*)&structDef.totalSize, sizeof(structDef.totalSize))) return;
-        if (structDef.totalSize < 0) return;
+        int storedTotalSize = 0;
+        if (!file.read((char*)&storedTotalSize, sizeof(storedTotalSize))) return;
+        structDef.calculateSize();
         loadedDefinitions.push_back(structDef);
     }
 
@@ -1668,7 +1733,13 @@ std::string MemoryViewerWindow::readUTF8String(const std::vector<unsigned char>&
 {
     std::string result;
     size_t i = offset;
-    size_t end = (offset + maxLength < data.size()) ? (offset + maxLength) : data.size();
+    if (offset >= data.size()) {
+        return result;
+    }
+    size_t end = data.size();
+    if (maxLength < data.size() - offset) {
+        end = offset + maxLength;
+    }
     while (i < end) {
         unsigned char c = data[i];
         if (c == 0) break;
@@ -1738,9 +1809,13 @@ void MemoryViewerWindow::addStructToWatchList(const StructDefinition& structDef)
     if (structBaseAddress == 0) return;
     int addedCount = 0;
     for (const auto& field : structDef.fields) {
+        uint64_t fieldAddress = 0;
+        if (!addStructOffsetToAddress(structBaseAddress, field.offset, fieldAddress)) {
+            continue;
+        }
         MemoryWatchItem item;
         item.description = structDef.name + "." + field.name;
-        item.address = structBaseAddress + field.offset;
+        item.address = fieldAddress;
         item.type = field.type;
         item.enabled = true;
         watchItems.push_back(item);
@@ -1759,7 +1834,9 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
     const auto& structDef = structDefinitions[selectedStructIndex];
     if (fieldIndex < 0 || fieldIndex >= (int)structDef.fields.size()) return false;
     const auto& field = structDef.fields[fieldIndex];
-    uint64_t addr = structBaseAddress + field.offset;
+    uint64_t addr = 0;
+    if (!addStructOffsetToAddress(structBaseAddress, field.offset, addr)) return false;
+    if (field.size <= 0) return false;
     std::vector<unsigned char> data;
     try {
         switch (field.type) {
@@ -1812,8 +1889,11 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
             default: return false;
         }
         if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
-            if (field.offset + (int)data.size() <= (int)structBuffer.size())
-                memcpy(&structBuffer[field.offset], data.data(), data.size());
+            const size_t fieldOffset = static_cast<size_t>(field.offset);
+            if (fieldOffset <= structBuffer.size() &&
+                data.size() <= structBuffer.size() - fieldOffset) {
+                memcpy(structBuffer.data() + fieldOffset, data.data(), data.size());
+            }
             return true;
         }
     } catch (const std::exception& e) {

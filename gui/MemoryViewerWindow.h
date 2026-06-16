@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 
 // 数据结构字段类型枚举
@@ -77,7 +78,17 @@ struct StructDefinition {
     void calculateSize() {
         totalSize = 0;
         for (const auto& field : fields) {
-            int fieldEnd = field.offset + field.size * field.arrayCount;
+            if (field.offset < 0 || field.size <= 0 || field.arrayCount <= 0) {
+                continue;
+            }
+            const int64_t fieldBytes =
+                static_cast<int64_t>(field.size) * static_cast<int64_t>(field.arrayCount);
+            if (fieldBytes <= 0 ||
+                fieldBytes > (std::numeric_limits<int>::max)() - field.offset) {
+                totalSize = (std::numeric_limits<int>::max)();
+                continue;
+            }
+            const int fieldEnd = field.offset + static_cast<int>(fieldBytes);
             if (fieldEnd > totalSize) {
                 totalSize = fieldEnd;
             }
