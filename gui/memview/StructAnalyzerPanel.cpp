@@ -1587,19 +1587,19 @@ void MemoryViewerWindow::loadStructDefinitions()
     if (!file.read((char*)&count, sizeof(count))) return;
     if (count > kMaxStructDefinitionCount) return;
 
-    structDefinitions.clear();
-    structDefinitions.reserve(count);
+    std::vector<StructDefinition> loadedDefinitions;
+    loadedDefinitions.reserve(count);
     for (size_t i = 0; i < count; i++) {
         StructDefinition structDef;
         bool structValid = true;
 
         size_t nameLen;
-        if (!file.read((char*)&nameLen, sizeof(nameLen)) || nameLen > kMaxStructStringLength) break;
+        if (!file.read((char*)&nameLen, sizeof(nameLen)) || nameLen > kMaxStructStringLength) return;
         structDef.name.resize(nameLen);
-        if (nameLen > 0 && !file.read(&structDef.name[0], nameLen)) break;
+        if (nameLen > 0 && !file.read(&structDef.name[0], nameLen)) return;
 
         size_t fieldCount;
-        if (!file.read((char*)&fieldCount, sizeof(fieldCount)) || fieldCount > kMaxStructFieldCount) break;
+        if (!file.read((char*)&fieldCount, sizeof(fieldCount)) || fieldCount > kMaxStructFieldCount) return;
         for (size_t j = 0; j < fieldCount; j++) {
             StructField field;
             size_t fieldNameLen;
@@ -1652,11 +1652,13 @@ void MemoryViewerWindow::loadStructDefinitions()
             }
             structDef.fields.push_back(field);
         }
-        if (!structValid) break;
-        if (!file.read((char*)&structDef.totalSize, sizeof(structDef.totalSize))) break;
-        if (structDef.totalSize < 0) break;
-        structDefinitions.push_back(structDef);
+        if (!structValid) return;
+        if (!file.read((char*)&structDef.totalSize, sizeof(structDef.totalSize))) return;
+        if (structDef.totalSize < 0) return;
+        loadedDefinitions.push_back(structDef);
     }
+
+    structDefinitions = std::move(loadedDefinitions);
 }
 
 // PLACEHOLDER_STRING_UTILS

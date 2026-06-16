@@ -938,40 +938,37 @@ void MemoryViewerWindow::loadWatchList()
     std::ifstream file("watch_list.dat", std::ios::binary);
     if (!file.is_open()) return;
 
-    clearWatchItemFreezes(watchItems);
-    watchItems.clear();
-    watchLastValues.clear();
-    selectedWatchIndex = -1;
-
     size_t count;
     if (!file.read((char*)&count, sizeof(count))) return;
     if (count > 100000) return;
 
+    std::vector<MemoryWatchItem> loadedItems;
+    loadedItems.reserve(count);
     for (size_t i = 0; i < count; i++) {
         MemoryWatchItem item;
         bool itemValid = true;
 
         size_t descLen;
-        if (!file.read((char*)&descLen, sizeof(descLen))) break;
-        if (descLen > 4096) break;
+        if (!file.read((char*)&descLen, sizeof(descLen))) return;
+        if (descLen > 4096) return;
         item.description.resize(descLen);
-        if (descLen > 0 && !file.read(&item.description[0], descLen)) break;
+        if (descLen > 0 && !file.read(&item.description[0], descLen)) return;
 
-        if (!file.read((char*)&item.address, sizeof(item.address))) break;
-        if (!file.read((char*)&item.type, sizeof(item.type))) break;
-        if ((int)item.type < (int)FieldType::BYTE || (int)item.type > (int)FieldType::STRING_UTF16) break;
-        if (!file.read((char*)&item.enabled, sizeof(item.enabled))) break;
-        if (!file.read((char*)&item.frozen, sizeof(item.frozen))) break;
+        if (!file.read((char*)&item.address, sizeof(item.address))) return;
+        if (!file.read((char*)&item.type, sizeof(item.type))) return;
+        if ((int)item.type < (int)FieldType::BYTE || (int)item.type > (int)FieldType::STRING_UTF16) return;
+        if (!file.read((char*)&item.enabled, sizeof(item.enabled))) return;
+        if (!file.read((char*)&item.frozen, sizeof(item.frozen))) return;
 
-        if (!file.read((char*)&item.frozenDataSize, sizeof(item.frozenDataSize))) break;
-        if (!file.read((char*)item.frozenData, sizeof(item.frozenData))) break;
-        if (item.frozenDataSize > sizeof(item.frozenData)) break;
+        if (!file.read((char*)&item.frozenDataSize, sizeof(item.frozenDataSize))) return;
+        if (!file.read((char*)item.frozenData, sizeof(item.frozenData))) return;
+        if (item.frozenDataSize > sizeof(item.frozenData)) return;
 
-        if (!file.read((char*)&item.isPointer, sizeof(item.isPointer))) break;
+        if (!file.read((char*)&item.isPointer, sizeof(item.isPointer))) return;
 
         size_t offsetCount;
-        if (!file.read((char*)&offsetCount, sizeof(offsetCount))) break;
-        if (offsetCount > 1024) break;
+        if (!file.read((char*)&offsetCount, sizeof(offsetCount))) return;
+        if (offsetCount > 1024) return;
         for (size_t j = 0; j < offsetCount; j++) {
             uint64_t offset;
             if (!file.read((char*)&offset, sizeof(offset))) {
@@ -980,10 +977,15 @@ void MemoryViewerWindow::loadWatchList()
             }
             item.offsets.push_back(offset);
         }
-        if (!itemValid) break;
+        if (!itemValid) return;
 
-        watchItems.push_back(item);
+        loadedItems.push_back(item);
     }
+
+    clearWatchItemFreezes(watchItems);
+    watchItems = std::move(loadedItems);
+    watchLastValues.clear();
+    selectedWatchIndex = -1;
 
     // 加载后，对冻结项重新注册到服务端
     for (auto& item : watchItems) {
