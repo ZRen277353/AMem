@@ -15,6 +15,33 @@
 #include <cerrno>
 
 namespace {
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& result)
+{
+    if (base > UINT64_MAX - offset) {
+        result = 0;
+        return false;
+    }
+
+    result = base + offset;
+    return true;
+}
+
+bool addressSpanEndInclusive(uint64_t start, size_t size, uint64_t& end)
+{
+    if (size == 0) {
+        end = start;
+        return true;
+    }
+
+    const uint64_t lastOffset = static_cast<uint64_t>(size - 1);
+    return addAddressOffset(start, lastOffset, end);
+}
+
+bool addressInSpan(uint64_t start, size_t size, uint64_t address)
+{
+    return address >= start && static_cast<uint64_t>(address - start) < static_cast<uint64_t>(size);
+}
+
 bool parseHexStrict(const char* text, uint64_t& value)
 {
     if (!text) {
@@ -233,14 +260,16 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::SameLine();
     
     uint64_t pageNumber = pageBaseAddress / pageSize;
+    uint64_t pageEndAddress = pageBaseAddress;
+    addressSpanEndInclusive(pageBaseAddress, static_cast<size_t>(pageSize), pageEndAddress);
     ImGui::TextColored(ColorScheme::SuccessLight, "页#%llu", pageNumber);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("当前页号: %llu\n页首: 0x%llX\n页范围: 0x%llX - 0x%llX\n页大小: %d 字节", 
                          pageNumber, pageBaseAddress, 
-                         pageBaseAddress, pageBaseAddress + pageSize - 1, pageSize);
+                         pageBaseAddress, pageEndAddress, pageSize);
     }
     
-    if (targetAddress >= pageBaseAddress && targetAddress < pageBaseAddress + pageSize) {
+    if (addressInSpan(pageBaseAddress, static_cast<size_t>(pageSize), targetAddress)) {
         ImGui::SameLine();
         uint64_t offsetInPage = targetAddress - pageBaseAddress;
         ImGui::TextColored(ColorScheme::WarningLight, "+0x%llX", offsetInPage);
@@ -805,14 +834,17 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 扩展buffer，读取下一页数据
             size_t currentSize = buffer.size();
+            uint64_t safeNextPageAddr = 0;
+            const bool hasNextPageAddress =
+                addAddressOffset(viewAddress, static_cast<uint64_t>(currentSize), safeNextPageAddr);
             size_t newSize = currentSize + pageSize;
             
             // 限制最大缓冲区大小（例如最多10页）
-            if (newSize <= pageSize * 10) {
+            if (hasNextPageAddress && newSize <= pageSize * 10) {
                 buffer.resize(newSize);
                 
                 // 读取下一页数据
-                uint64_t nextPageAddr = viewAddress + currentSize;
+                uint64_t nextPageAddr = safeNextPageAddr;
                 std::vector<unsigned char> nextPageData;
                 if (ReadProcessMemoryBytes(nextPageAddr, pageSize, nextPageData, PORT_DEBUG)) {
                     // 复制数据到buffer末尾
@@ -869,10 +901,13 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 地址列
             ImGui::TableSetColumnIndex(0);
-            uint64_t rowAddress = viewAddress + row;
+            uint64_t rowAddress = 0;
+            if (!addAddressOffset(viewAddress, static_cast<uint64_t>(row), rowAddress)) {
+                break;
+            }
             
             // 检查当前行是否包含目标地址
-            bool isTargetRow = (targetAddress >= rowAddress && targetAddress < rowAddress + bytesPerRow);
+            bool isTargetRow = addressInSpan(rowAddress, static_cast<size_t>(bytesPerRow), targetAddress);
             
             // 如果需要滚动到目标地址，并且当前行包含目标地址
             if (scrollToTarget && isTargetRow) {
@@ -932,8 +967,11 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 bool isSelected = (selectedByteOffset >= (int)idx && selectedByteOffset < (int)(idx + bytesPerUnit));
                 
                 // 检查当前单元是否包含目标地址
-                uint64_t unitAddress = viewAddress + idx;
-                bool isTargetUnit = (targetAddress >= unitAddress && targetAddress < unitAddress + bytesPerUnit);
+                uint64_t unitAddress = 0;
+                const bool hasUnitAddress =
+                    addAddressOffset(viewAddress, static_cast<uint64_t>(idx), unitAddress);
+                bool isTargetUnit = hasUnitAddress &&
+                    addressInSpan(unitAddress, static_cast<size_t>(bytesPerUnit), targetAddress);
                 
                 // 设置按钮样式
                 if (isSelected) {
@@ -988,7 +1026,9 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 ImVec2 buttonSize(minButtonWidth, 0);
                 if (ImGui::Button(valueStr, buttonSize)) {
                     selectedByteOffset = (int)idx;
-                    selectedByteAddress = viewAddress + idx;
+                    if (hasUnitAddress) {
+                        selectedByteAddress = unitAddress;
+                    }
                 }
                 
                 ImGui::PopStyleColor(3);
@@ -996,8 +1036,10 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 // 右键菜单
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                     selectedByteOffset = (int)idx;
-                    selectedByteAddress = viewAddress + idx;
-                    openByteContextMenu = true;
+                    if (hasUnitAddress) {
+                        selectedByteAddress = unitAddress;
+                        openByteContextMenu = true;
+                    }
                 }
                 
                 // 双击编辑
