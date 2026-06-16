@@ -16,6 +16,10 @@ bool isValidCount(int value, int maxValue) {
     return value >= 0 && value <= maxValue;
 }
 
+bool isValidModuleSize(int value) {
+    return value > 0;
+}
+
 bool parseTimestampMs(const std::string& text, uint64_t& value) {
     const char* str = text.c_str();
     char* end = nullptr;
@@ -183,7 +187,8 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
-            if (!isValidCount(entry.modulenamesize, kMaxModuleNameSize))
+            if (!isValidModuleSize(entry.modulesize) ||
+                !isValidCount(entry.modulenamesize, kMaxModuleNameSize))
                 return false;
             std::vector<char> name;
             if (entry.modulenamesize > 0) {

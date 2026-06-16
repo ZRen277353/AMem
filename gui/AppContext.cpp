@@ -91,7 +91,14 @@ void AppContext::ModuleCache::refresh() {
 ModuleInfoItem AppContext::ModuleCache::findByAddress(uint64_t addr) {
     std::lock_guard<std::mutex> lock(mutex);
     for (const auto& m : modules) {
-        if (addr >= m.base && addr < m.base + static_cast<uint64_t>(m.size)) {
+        if (m.size <= 0) {
+            continue;
+        }
+        const uint64_t moduleSize = static_cast<uint64_t>(m.size);
+        if (m.base > UINT64_MAX - moduleSize) {
+            continue;
+        }
+        if (addr >= m.base && addr < m.base + moduleSize) {
             return m;  // 返回拷贝
         }
     }
