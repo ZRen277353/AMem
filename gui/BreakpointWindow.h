@@ -67,10 +67,11 @@ class BreakpointWindow : public Window {
 public:
     BreakpointWindow();
 
-    void onDraw() override;
+    void draw() override;
     unsigned int getWindowFlags() const override;
 
 private:
+    void resetProcessState();
     void drawBreakpointList();
     void drawBreakpointControls();
     void drawAddBreakpointDialog();
@@ -97,6 +98,7 @@ private:
     
     // 状态变量
     std::vector<BreakpointInfo> breakpoints;
+    uint64_t observedProcessRevision = 0;
     
     // 添加断点对话框状态
     bool showAddBreakpointDialog = false;
@@ -108,7 +110,6 @@ private:
     // 全局设置
     bool autoRefreshHitInfo = true;
     float refreshInterval = 1.0f;
-    float lastRefreshTime = 0.0f;
     
     // 弹窗管理
     struct BreakpointDetailWindow {
@@ -128,6 +129,7 @@ private:
         std::string lastFilterStr = "";
         bool needsStatRefresh = true;
         bool needsHitRefresh = true;
+        float lastHitRefreshTime = 0.0f;
         int lastDataVersion = 0;  // 用于检测数据变化
         
         // 显示选项
@@ -154,6 +156,13 @@ private:
         bool autoRefreshDisasm = false;  // 自动刷新反汇编
         float disasmRefreshInterval = 2.0f;  // 反汇编刷新间隔（秒）
         float lastDisasmRefreshTime = 0.0f;  // 上次反汇编刷新时间
+
+        int disasmBeforeCount = 4;
+        int disasmAfterCount = 4;
+        int fpDisplayMode = 0;  // 0: hex, 1: double, 2: float, 3: half, 4: i64, 5: i32
+        int fpRegGroup = 0;     // 0: all, 1: args, 2: saved, 3: temp
+        bool fpFilterNonZero = false;
+        bool fpHighlightSpecial = true;
         
         BreakpointDetailWindow() = default;
         BreakpointDetailWindow(int bpIndex, const std::string& title) 
@@ -175,4 +184,4 @@ private:
     // 反汇编助手
     std::unique_ptr<DisassemblyHelper> disassemblyHelper;
     bool disassemblyInitialized = false;
-}; 
+};

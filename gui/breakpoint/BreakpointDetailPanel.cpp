@@ -134,6 +134,12 @@ void BreakpointWindow::drawBreakpointDetailWindow(BreakpointDetailWindow& detail
                 bp.hitHistory.clear();
                 bp.pcHitStats.clear();
                 bp.hitCount = 0;
+                for (auto& window : detailWindows) {
+                    if (window.breakpointIndex == detailWindow.breakpointIndex) {
+                        window.selectedHitIndex = -1;
+                        window.selectedPCAddress = 0;
+                    }
+                }
                 bp.dataVersion++;  // 增加数据版本号
                 // 通知所有相关的详情窗口需要刷新
                 markDetailWindowsForRefresh(detailWindow.breakpointIndex);
@@ -194,9 +200,10 @@ void BreakpointWindow::drawBreakpointDetailWindow(BreakpointDetailWindow& detail
     // 自动刷新逻辑
     if (autoRefreshHitInfo && bp.enabled && !bp.suspended) {
         float currentTime = ImGui::GetTime();
-        if (currentTime - lastRefreshTime >= refreshInterval) {
+        float interval = refreshInterval < 0.1f ? 0.1f : refreshInterval;
+        if (currentTime - detailWindow.lastHitRefreshTime >= interval) {
             refreshBreakpointHitInfo(detailWindow.breakpointIndex);
-            lastRefreshTime = currentTime;
+            detailWindow.lastHitRefreshTime = currentTime;
         }
     }
     ImGui::End();
@@ -522,30 +529,28 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                                     ImGui::Separator();
                                     
                                     // 控制选项
-                                    static int beforeCount = 4;
-                                    static int afterCount = 4;
                                     ImGui::Text("显示范围:");
                                     ImGui::SameLine();
                                     ImGui::SetNextItemWidth(80);
-                                    ImGui::InputInt("##BeforeCount", &beforeCount, 1, 10);
+                                    ImGui::InputInt("##BeforeCount", &detailWindow.disasmBeforeCount, 1, 10);
                                     ImGui::SameLine();
                                     ImGui::Text("条指令前");
                                     ImGui::SameLine();
                                     ImGui::SetNextItemWidth(80);
-                                    ImGui::InputInt("##AfterCount", &afterCount, 1, 10);
+                                    ImGui::InputInt("##AfterCount", &detailWindow.disasmAfterCount, 1, 10);
                                     ImGui::SameLine();
                                     ImGui::Text("条指令后");
                                     
                                     // 限制范围
-                                    if (beforeCount < 0) beforeCount = 0;
-                                    if (beforeCount > 20) beforeCount = 20;
-                                    if (afterCount < 0) afterCount = 0;
-                                    if (afterCount > 20) afterCount = 20;
+                                    if (detailWindow.disasmBeforeCount < 0) detailWindow.disasmBeforeCount = 0;
+                                    if (detailWindow.disasmBeforeCount > 20) detailWindow.disasmBeforeCount = 20;
+                                    if (detailWindow.disasmAfterCount < 0) detailWindow.disasmAfterCount = 0;
+                                    if (detailWindow.disasmAfterCount > 20) detailWindow.disasmAfterCount = 20;
                                     
                                     ImGui::Separator();
                                     
                                     // 调用新的方法读取并显示PC周围的指令
-                                    drawDisassemblyForPC(detailWindow.selectedPCAddress, beforeCount, afterCount, detailWindow);
+                                    drawDisassemblyForPC(detailWindow.selectedPCAddress, detailWindow.disasmBeforeCount, detailWindow.disasmAfterCount, detailWindow);
                                 } else {
                                     ImGui::TextColored(ColorScheme::Warning, "反汇编引擎未初始化");
                                     ImGui::TextWrapped("请安装 Capstone 库以启用反汇编功能");
@@ -826,11 +831,10 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
         
         // 浮点寄存器标签页
         if (ImGui::BeginTabItem("浮点寄存器")) {
-            // 浮点寄存器显示选项（静态变量，在标签页作用域内）
-            static int fpDisplayMode = 0;  // 0: 十六进制, 1: 双精度浮点, 2: 单精度浮点, 3: 半精度浮点, 4: 64位整数, 5: 32位整数
-            static int fpRegGroup = 0;  // 0: 全部, 1: 参数寄存器(V0-V7), 2: 被调用者保存(V8-V15), 3: 临时寄存器(V16-V31)
-            static bool filterNonZero = false;
-            static bool highlightSpecial = true;
+            int& fpDisplayMode = detailWindow.fpDisplayMode;
+            int& fpRegGroup = detailWindow.fpRegGroup;
+            bool& filterNonZero = detailWindow.fpFilterNonZero;
+            bool& highlightSpecial = detailWindow.fpHighlightSpecial;
             
             // 浮点状态和控制寄存器 - 增强显示
             if (ImGui::BeginTable("FPStatusTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
@@ -1617,4 +1621,3 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
     ImGui::TextColored(ColorScheme::TextSecondary, "提示: => 标记表示当前PC位置");
     ImGui::TextColored(ColorScheme::TextSecondary, "右键点击指令可复制或在内存查看器中查看");
 }
-

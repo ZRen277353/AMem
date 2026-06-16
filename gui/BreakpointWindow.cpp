@@ -15,6 +15,7 @@
 BreakpointWindow::BreakpointWindow()
 {
     name = "断点调试器";
+    observedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
     
     // 初始化反汇编助手
     if (DisassemblyHelper::isCapstoneAvailable()) {
@@ -37,10 +38,31 @@ unsigned int BreakpointWindow::getWindowFlags() const
     return ImGuiWindowFlags_NoDocking;
 }
 
+void BreakpointWindow::resetProcessState()
+{
+    breakpoints.clear();
+    detailWindows.clear();
+    showAddBreakpointDialog = false;
+    memset(newBreakpointAddress, 0, sizeof(newBreakpointAddress));
+    memset(newBreakpointDescription, 0, sizeof(newBreakpointDescription));
+    newBreakpointType = 0;
+    newBreakpointSize = 0;
+}
 
-void BreakpointWindow::onDraw()
+void BreakpointWindow::draw()
 {
     if (!pOpen) return;
+
+    const uint64_t processRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
+    if (processRevision != observedProcessRevision) {
+        observedProcessRevision = processRevision;
+        resetProcessState();
+    }
+
+    if (shouldBringToFront) {
+        ImGui::SetNextWindowFocus();
+        shouldBringToFront = false;
+    }
 
     // 自动刷新模块列表（仅当有断点存在时才刷新）
     if (AppContext::Get().hasProcess() && !breakpoints.empty()) {
@@ -58,8 +80,9 @@ void BreakpointWindow::onDraw()
     if (ImGui::Begin(name.c_str(), &pOpen, ImGuiWindowFlags_None))
     {
         if (AppContext::Get().hasProcess()) {
+            const std::string processName = AppContext::Get().getSelectedName();
             ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
-                AppContext::Get().selectedName.c_str(), AppContext::Get().selectedPid.load());
+                processName.c_str(), AppContext::Get().selectedPid.load());
         } else {
             ImGui::TextDisabled("未附加进程");
         }
@@ -136,6 +159,7 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
         
         // 直接追加所有新记录（假设每次读取都是新数据）
         bp.hitHistory.insert(bp.hitHistory.end(), hitInfos.begin(), hitInfos.end());
+        bool historyTrimmed = false;
         
         // 限制历史记录最大数量，防止内存溢出
         const int MAX_HISTORY_SIZE = 50000; // 最多保留5万条记录
@@ -143,21 +167,31 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
             // 删除最旧的记录，保留最新的
             int removeCount = (int)bp.hitHistory.size() - MAX_HISTORY_SIZE;
             bp.hitHistory.erase(bp.hitHistory.begin(), bp.hitHistory.begin() + removeCount);
+            historyTrimmed = true;
             Gui::log("断点 0x%llX 历史记录已达上限，移除了 %d 条最旧记录", bp.address, removeCount);
         }
         
-        // 增量更新PC统计信息（只处理新增的记录）
-        for (const auto& hit : hitInfos) {
-            uint64_t pc = hit.regs_info.pc;
-            auto& stat = bp.pcHitStats[pc];
-            
-            if (stat.hit_count == 0) {
-                stat.pc_address = pc;
-                stat.first_hit_time = hit.hit_time;
+        if (historyTrimmed) {
+            updatePCHitStatistics(index);
+            for (auto& window : detailWindows) {
+                if (window.breakpointIndex == index) {
+                    window.selectedHitIndex = -1;
+                }
             }
-            
-            stat.hit_count++;
-            stat.last_hit_time = hit.hit_time;
+        } else {
+            // 增量更新PC统计信息（只处理新增的记录）
+            for (const auto& hit : hitInfos) {
+                uint64_t pc = hit.regs_info.pc;
+                auto& stat = bp.pcHitStats[pc];
+
+                if (stat.hit_count == 0) {
+                    stat.pc_address = pc;
+                    stat.first_hit_time = hit.hit_time;
+                }
+
+                stat.hit_count++;
+                stat.last_hit_time = hit.hit_time;
+            }
         }
         
         // 更新总命中次数和版本号
