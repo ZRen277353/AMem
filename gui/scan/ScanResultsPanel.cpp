@@ -12,6 +12,22 @@
 #include <cstdio>
 #include <utility>
 
+namespace {
+const char* getScanValueTypeLabel(int valueType)
+{
+    static constexpr const char* kLabels[] = {
+        "1字节", "2字节", "4字节", "8字节", "浮点", "双精度"
+    };
+    const int labelCount = static_cast<int>(sizeof(kLabels) / sizeof(kLabels[0]));
+    return (valueType >= 0 && valueType < labelCount) ? kLabels[valueType] : "Unknown";
+}
+
+bool isIntegerScanValueType(int valueType)
+{
+    return valueType >= 0 && valueType <= 3;
+}
+} // namespace
+
 void ScanWindow::drawResultsPanel()
 {
     ImGui::BeginChild("ScanResults", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.5f), ImGuiChildFlags_Borders);
@@ -140,10 +156,6 @@ void ScanWindow::drawResultsPanel()
         }
     }
 
-    const char* value_types[] = {
-        "1字节", "2字节", "4字节", "8字节", "浮点", "双精度"
-    };
-
     if (totalResults > 0) {
         int totalPages = (totalResults + resultPageSize - 1) / resultPageSize;
         int currentPage = currentResultOffset / resultPageSize + 1;
@@ -165,13 +177,13 @@ void ScanWindow::drawResultsPanel()
                         case 3: break; // 8字节不需要截断
                         case 4: case 5: break; // 浮点数单独处理
                     }
-                    if (resultValueType <= 3) { // 整数类型
+                    if (isIntegerScanValueType(resultValueType)) { // 整数类型
                         if (val < minVal) minVal = val;
                         if (val > maxVal) maxVal = val;
                     }
                 }
 
-                if (resultValueType <= 3 && minVal != UINT64_MAX) {
+                if (isIntegerScanValueType(resultValueType) && minVal != UINT64_MAX) {
                     ImGui::SameLine();
                     ImGui::TextColored(ColorScheme::TextSecondary, " | 范围: %llu - %llu", minVal, maxVal);
                 }
@@ -255,7 +267,7 @@ void ScanWindow::drawResultsPanel()
                     case 4: typeColor = ColorScheme::WarningBright; break; // 浮点（增强可见性）
                     case 5: typeColor = ColorScheme::ErrorBright; break; // 双精度（增强可见性）
                 }
-                ImGui::TextColored(typeColor, "%s", value_types[resultValueType]);
+                ImGui::TextColored(typeColor, "%s", getScanValueTypeLabel(resultValueType));
                 ImGui::TableSetColumnIndex(3);
 
                 // 检查值是否最近改变（2秒内）
@@ -270,7 +282,7 @@ void ScanWindow::drawResultsPanel()
                     ImVec4 highlightColor = ColorScheme::WarningBright;  // 高亮
                     highlightColor.w = alpha;
 
-                    if (showScanResultHexValues && resultValueType <= 3) {
+                    if (showScanResultHexValues && isIntegerScanValueType(resultValueType)) {
                         std::string hexStr = formatScanResultValueHex(scanResults[i].value, resultValueType);
                         ImGui::TextColored(highlightColor, "%s", hexStr.c_str());
                     } else {
@@ -288,7 +300,7 @@ void ScanWindow::drawResultsPanel()
                         scanResults[i].valueChanged = false;
                     }
                 } else {
-                    if (showScanResultHexValues && resultValueType <= 3) {
+                    if (showScanResultHexValues && isIntegerScanValueType(resultValueType)) {
                         std::string hexStr = formatScanResultValueHex(scanResults[i].value, resultValueType);
                         ImGui::Text("%s", hexStr.c_str());
                     } else {

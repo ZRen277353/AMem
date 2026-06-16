@@ -258,6 +258,9 @@ void ScanWindow::drawAddressListPanel()
             ImVec4 typeColor = ColorScheme::TextPrimary; // 默认白色
             // 先复制值，避免后续访问时 addressList 被修改导致段错误
             int itemValueType = (i < (int)addressList.size()) ? addressList[i].valueType : 0;
+            const int valueTypeLabelCount = static_cast<int>(sizeof(value_types) / sizeof(value_types[0]));
+            const bool hasValidValueTypeLabel = itemValueType >= 0 && itemValueType < valueTypeLabelCount;
+            const char* itemValueTypeLabel = hasValidValueTypeLabel ? value_types[itemValueType] : "Unknown";
             switch (itemValueType) {
                 case 0: typeColor = ColorScheme::SuccessBright; break; // 1字节
                 case 1: typeColor = ColorScheme::InfoBright; break; // 2字节
@@ -266,7 +269,7 @@ void ScanWindow::drawAddressListPanel()
                 case 4: typeColor = ColorScheme::WarningBright; break; // 浮点
                 case 5: typeColor = ColorScheme::ErrorBright; break; // 双精度
             }
-            ImGui::TextColored(typeColor, "%s", value_types[itemValueType]);
+            ImGui::TextColored(typeColor, "%s", itemValueTypeLabel);
             ImGui::TableSetColumnIndex(4);
 
             auto& item = addressList[i];
@@ -320,7 +323,7 @@ void ScanWindow::drawAddressListPanel()
                 // 确保索引有效后再访问
                 if (i < (int)addressList.size()) {
                     ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX\n类型: %s",
-                        itemAddress, value_types[itemValueType]);
+                        itemAddress, itemValueTypeLabel);
                 } else {
                     ImGui::SetTooltip("按回车键确认修改\n地址: 0x%016llX", itemAddress);
                 }
