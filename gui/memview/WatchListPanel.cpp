@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <cerrno>
+#include <limits>
 
 // 辅助：判断类型是否可冻结（固定大小 ≤ 8 字节的数值类型）
 static bool isFreezableType(FieldType type) {
@@ -59,6 +60,9 @@ static bool resolveWatchItemAddress(const MemoryWatchItem& item, uint64_t& addre
 
         uint64_t nextAddress = 0;
         memcpy(&nextAddress, ptrData.data(), sizeof(nextAddress));
+        if (nextAddress > (std::numeric_limits<uint64_t>::max)() - offset) {
+            return false;
+        }
         address = nextAddress + offset;
     }
 
@@ -94,8 +98,9 @@ static bool readWatchScalar(const std::vector<unsigned char>& data, T& value) {
 
 template <typename T>
 static void appendWatchScalar(std::vector<unsigned char>& data, T value) {
-    data.resize(sizeof(T));
-    std::memcpy(data.data(), &value, sizeof(T));
+    const size_t oldSize = data.size();
+    data.resize(oldSize + sizeof(T));
+    std::memcpy(data.data() + oldSize, &value, sizeof(T));
 }
 
 static bool parseWatchHexStrict(const char* text, uint64_t& value) {
