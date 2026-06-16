@@ -8,6 +8,8 @@
 #include <map>
 #include <array>
 #include <cstring>
+#include <cmath>
+#include <limits>
 #include <utility>
 
 // 全局窗口管理器：窗口ID -> 窗口指针
@@ -20,36 +22,100 @@ struct LuaInputTextState {
 };
 
 static std::map<std::pair<lua_State*, ImGuiID>, LuaInputTextState> luaInputTextStates;
+static std::map<lua_State*, std::vector<int>> luaTableStack;
+
+namespace {
+constexpr int kMaxLuaTableColumns = 511;
+constexpr int kMaxLuaLegacyColumns = 512;
+constexpr int kMaxLuaListBoxItems = 65536;
+
+int checkIntRange(lua_State* L, int index, int minValue, int maxValue, const char* name) {
+    lua_Integer value = luaL_checkinteger(L, index);
+    if (value < static_cast<lua_Integer>(minValue) || value > static_cast<lua_Integer>(maxValue)) {
+        luaL_error(L, "%s out of range", name);
+        return 0;
+    }
+    return static_cast<int>(value);
+}
+
+int checkOptionalIntRange(lua_State* L, int index, int defaultValue, int minValue, int maxValue, const char* name) {
+    if (lua_isnoneornil(L, index)) {
+        return defaultValue;
+    }
+    lua_Integer value = luaL_checkinteger(L, index);
+    if (value < static_cast<lua_Integer>(minValue) || value > static_cast<lua_Integer>(maxValue)) {
+        luaL_error(L, "%s out of range", name);
+        return 0;
+    }
+    return static_cast<int>(value);
+}
+
+int checkInt(lua_State* L, int index, const char* name) {
+    return checkIntRange(
+        L, index, (std::numeric_limits<int>::min)(), (std::numeric_limits<int>::max)(), name);
+}
+
+int checkOptionalInt(lua_State* L, int index, int defaultValue, const char* name) {
+    return checkOptionalIntRange(
+        L, index, defaultValue, (std::numeric_limits<int>::min)(), (std::numeric_limits<int>::max)(), name);
+}
+
+double checkFiniteNumber(lua_State* L, int index, const char* name) {
+    lua_Number value = luaL_checknumber(L, index);
+    double number = static_cast<double>(value);
+    if (!std::isfinite(number)) {
+        luaL_error(L, "%s must be finite", name);
+        return 0.0;
+    }
+    return number;
+}
+
+float checkFloat(lua_State* L, int index, const char* name) {
+    double number = checkFiniteNumber(L, index, name);
+    if (number < -(std::numeric_limits<float>::max)() || number > (std::numeric_limits<float>::max)()) {
+        luaL_error(L, "%s out of range", name);
+        return 0.0f;
+    }
+    return static_cast<float>(number);
+}
+
+float checkOptionalFloat(lua_State* L, int index, float defaultValue, const char* name) {
+    if (lua_isnoneornil(L, index)) {
+        return defaultValue;
+    }
+    return checkFloat(L, index, name);
+}
+} // namespace
 
 // ==================== 辅助函数 ====================
 ImVec4 LuaAPI_ImGui::ParseColor(lua_State* L, int index) {
     if (lua_istable(L, index)) {
         lua_pushinteger(L, 1);
         lua_gettable(L, index);
-        float r = static_cast<float>(luaL_optnumber(L, -1, 1.0));
+        float r = checkOptionalFloat(L, -1, 1.0f, "red");
         lua_pop(L, 1);
         
         lua_pushinteger(L, 2);
         lua_gettable(L, index);
-        float g = static_cast<float>(luaL_optnumber(L, -1, 1.0));
+        float g = checkOptionalFloat(L, -1, 1.0f, "green");
         lua_pop(L, 1);
         
         lua_pushinteger(L, 3);
         lua_gettable(L, index);
-        float b = static_cast<float>(luaL_optnumber(L, -1, 1.0));
+        float b = checkOptionalFloat(L, -1, 1.0f, "blue");
         lua_pop(L, 1);
         
         lua_pushinteger(L, 4);
         lua_gettable(L, index);
-        float a = static_cast<float>(luaL_optnumber(L, -1, 1.0));
+        float a = checkOptionalFloat(L, -1, 1.0f, "alpha");
         lua_pop(L, 1);
         
         return ImVec4(r, g, b, a);
     } else if (lua_isnumber(L, index)) {
-        float r = static_cast<float>(lua_tonumber(L, index));
-        float g = static_cast<float>(luaL_optnumber(L, index + 1, 1.0));
-        float b = static_cast<float>(luaL_optnumber(L, index + 2, 1.0));
-        float a = static_cast<float>(luaL_optnumber(L, index + 3, 1.0));
+        float r = checkFloat(L, index, "red");
+        float g = checkOptionalFloat(L, index + 1, 1.0f, "green");
+        float b = checkOptionalFloat(L, index + 2, 1.0f, "blue");
+        float a = checkOptionalFloat(L, index + 3, 1.0f, "alpha");
         return ImVec4(r, g, b, a);
     }
     return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -66,17 +132,17 @@ void LuaAPI_ImGui::PushVec2(lua_State* L, const ImVec2& vec) {
 ImVec2 LuaAPI_ImGui::GetVec2(lua_State* L, int index) {
     if (lua_istable(L, index)) {
         lua_getfield(L, index, "x");
-        float x = static_cast<float>(luaL_optnumber(L, -1, 0.0));
+        float x = checkOptionalFloat(L, -1, 0.0f, "x");
         lua_pop(L, 1);
         
         lua_getfield(L, index, "y");
-        float y = static_cast<float>(luaL_optnumber(L, -1, 0.0));
+        float y = checkOptionalFloat(L, -1, 0.0f, "y");
         lua_pop(L, 1);
         
         return ImVec2(x, y);
     } else if (lua_isnumber(L, index)) {
-        float x = static_cast<float>(lua_tonumber(L, index));
-        float y = static_cast<float>(luaL_optnumber(L, index + 1, 0.0));
+        float x = checkFloat(L, index, "x");
+        float y = checkOptionalFloat(L, index + 1, 0.0f, "y");
         return ImVec2(x, y);
     }
     return ImVec2(0, 0);
@@ -208,7 +274,7 @@ int LuaAPI_ImGui::CreateWindow(lua_State* L) {
 }
 
 int LuaAPI_ImGui::DestroyWindow(lua_State* L) {
-    int windowId = static_cast<int>(luaL_checkinteger(L, 1));
+    int windowId = checkInt(L, 1, "window id");
     
     auto it = luaWindows.find(windowId);
     if (it != luaWindows.end()) {
@@ -222,7 +288,7 @@ int LuaAPI_ImGui::DestroyWindow(lua_State* L) {
 }
 
 int LuaAPI_ImGui::IsWindowOpen(lua_State* L) {
-    int windowId = static_cast<int>(luaL_checkinteger(L, 1));
+    int windowId = checkInt(L, 1, "window id");
     
     auto it = luaWindows.find(windowId);
     if (it != luaWindows.end()) {
@@ -234,7 +300,7 @@ int LuaAPI_ImGui::IsWindowOpen(lua_State* L) {
 }
 
 int LuaAPI_ImGui::SetWindowOpen(lua_State* L) {
-    int windowId = static_cast<int>(luaL_checkinteger(L, 1));
+    int windowId = checkInt(L, 1, "window id");
     bool open = lua_toboolean(L, 2) != 0;
     
     auto it = luaWindows.find(windowId);
@@ -256,7 +322,7 @@ int LuaAPI_ImGui::Begin(lua_State* L) {
         pOpen = &open;
     }
     
-    int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
+    int flags = checkOptionalInt(L, 3, 0, "window flags");
     bool result = ImGui::Begin(name, pOpen, flags);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
@@ -271,7 +337,7 @@ int LuaAPI_ImGui::BeginChild(lua_State* L) {
     const char* strId = luaL_checkstring(L, 1);
     ImVec2 size = GetVec2(L, 2);
     bool border = lua_toboolean(L, 3) != 0;
-    int flags = static_cast<int>(luaL_optinteger(L, 4, 0));
+    int flags = checkOptionalInt(L, 4, 0, "child flags");
     
     bool result = ImGui::BeginChild(strId, size, border, flags);
     lua_pushboolean(L, result ? 1 : 0);
@@ -378,7 +444,7 @@ int LuaAPI_ImGui::InputText(lua_State* L) {
         state.lastExternalValue = externalValue.substr(0, copyLen);
     }
 
-    int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
+    int flags = checkOptionalInt(L, 3, 0, "input text flags");
     bool result = ImGui::InputText(label, state.buffer.data(), state.buffer.size(), flags);
     state.activeLastFrame = ImGui::IsItemActive();
 
@@ -394,10 +460,10 @@ int LuaAPI_ImGui::InputText(lua_State* L) {
 
 int LuaAPI_ImGui::InputInt(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    int value = static_cast<int>(luaL_checkinteger(L, 2));
-    int step = static_cast<int>(luaL_optinteger(L, 3, 1));
-    int stepFast = static_cast<int>(luaL_optinteger(L, 4, 100));
-    int flags = static_cast<int>(luaL_optinteger(L, 5, 0));
+    int value = checkInt(L, 2, "value");
+    int step = checkOptionalInt(L, 3, 1, "step");
+    int stepFast = checkOptionalInt(L, 4, 100, "fast step");
+    int flags = checkOptionalInt(L, 5, 0, "input int flags");
     
     bool result = ImGui::InputInt(label, &value, step, stepFast, flags);
     lua_pushinteger(L, value);
@@ -407,11 +473,11 @@ int LuaAPI_ImGui::InputInt(lua_State* L) {
 
 int LuaAPI_ImGui::InputFloat(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    float value = static_cast<float>(luaL_checknumber(L, 2));
-    float step = static_cast<float>(luaL_optnumber(L, 3, 0.0));
-    float stepFast = static_cast<float>(luaL_optnumber(L, 4, 0.0));
+    float value = checkFloat(L, 2, "value");
+    float step = checkOptionalFloat(L, 3, 0.0f, "step");
+    float stepFast = checkOptionalFloat(L, 4, 0.0f, "fast step");
     const char* format = luaL_optstring(L, 5, "%.3f");
-    int flags = static_cast<int>(luaL_optinteger(L, 6, 0));
+    int flags = checkOptionalInt(L, 6, 0, "input float flags");
     
     bool result = ImGui::InputFloat(label, &value, step, stepFast, format, flags);
     lua_pushnumber(L, value);
@@ -421,9 +487,9 @@ int LuaAPI_ImGui::InputFloat(lua_State* L) {
 
 int LuaAPI_ImGui::SliderInt(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    int value = static_cast<int>(luaL_checkinteger(L, 2));
-    int minVal = static_cast<int>(luaL_checkinteger(L, 3));
-    int maxVal = static_cast<int>(luaL_checkinteger(L, 4));
+    int value = checkInt(L, 2, "value");
+    int minVal = checkInt(L, 3, "minimum");
+    int maxVal = checkInt(L, 4, "maximum");
     const char* format = luaL_optstring(L, 5, "%d");
     
     bool result = ImGui::SliderInt(label, &value, minVal, maxVal, format);
@@ -434,9 +500,9 @@ int LuaAPI_ImGui::SliderInt(lua_State* L) {
 
 int LuaAPI_ImGui::SliderFloat(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    float value = static_cast<float>(luaL_checknumber(L, 2));
-    float minVal = static_cast<float>(luaL_checknumber(L, 3));
-    float maxVal = static_cast<float>(luaL_checknumber(L, 4));
+    float value = checkFloat(L, 2, "value");
+    float minVal = checkFloat(L, 3, "minimum");
+    float maxVal = checkFloat(L, 4, "maximum");
     const char* format = luaL_optstring(L, 5, "%.3f");
     
     bool result = ImGui::SliderFloat(label, &value, minVal, maxVal, format);
@@ -447,14 +513,14 @@ int LuaAPI_ImGui::SliderFloat(lua_State* L) {
 
 // ==================== 布局API ====================
 int LuaAPI_ImGui::SameLine(lua_State* L) {
-    float offsetX = static_cast<float>(luaL_optnumber(L, 1, 0.0));
-    float spacing = static_cast<float>(luaL_optnumber(L, 2, -1.0));
+    float offsetX = checkOptionalFloat(L, 1, 0.0f, "offset");
+    float spacing = checkOptionalFloat(L, 2, -1.0f, "spacing");
     ImGui::SameLine(offsetX, spacing);
     return 0;
 }
 
 int LuaAPI_ImGui::Columns(lua_State* L) {
-    int count = static_cast<int>(luaL_optinteger(L, 1, 1));
+    int count = checkOptionalIntRange(L, 1, 1, 1, kMaxLuaLegacyColumns, "column count");
     const char* id = luaL_optstring(L, 2, nullptr);
     bool border = lua_toboolean(L, 3) != 0;
     
@@ -468,8 +534,8 @@ int LuaAPI_ImGui::NextColumn(lua_State* L) {
 }
 
 int LuaAPI_ImGui::SetColumnWidth(lua_State* L) {
-    int columnIndex = static_cast<int>(luaL_checkinteger(L, 1));
-    float width = static_cast<float>(luaL_checknumber(L, 2));
+    int columnIndex = checkIntRange(L, 1, 0, kMaxLuaLegacyColumns - 1, "column index");
+    float width = checkFloat(L, 2, "column width");
     ImGui::SetColumnWidth(columnIndex, width);
     return 0;
 }
@@ -489,7 +555,7 @@ int LuaAPI_ImGui::TreePop(lua_State* L) {
 
 int LuaAPI_ImGui::CollapsingHeader(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    int flags = static_cast<int>(luaL_optinteger(L, 2, 0));
+    int flags = checkOptionalInt(L, 2, 0, "header flags");
     bool result = ImGui::CollapsingHeader(label, flags);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
@@ -499,7 +565,7 @@ int LuaAPI_ImGui::CollapsingHeader(lua_State* L) {
 int LuaAPI_ImGui::Selectable(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
     bool selected = lua_toboolean(L, 2) != 0;
-    int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
+    int flags = checkOptionalInt(L, 3, 0, "selectable flags");
     ImVec2 size = GetVec2(L, 4);
     
     bool result = ImGui::Selectable(label, selected, flags, size);
@@ -509,14 +575,18 @@ int LuaAPI_ImGui::Selectable(lua_State* L) {
 
 int LuaAPI_ImGui::ListBox(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    int currentItem = static_cast<int>(luaL_checkinteger(L, 2)) - 1;
+    int currentItem = checkInt(L, 2, "current item") - 1;
     if (currentItem < 0) currentItem = 0;
     
     if (!lua_istable(L, 3)) {
         luaL_error(L, "Expected table for items");
     }
     
-    int len = static_cast<int>(lua_objlen(L, 3));
+    size_t rawLen = lua_objlen(L, 3);
+    if (rawLen > static_cast<size_t>(kMaxLuaListBoxItems)) {
+        luaL_error(L, "list box item count out of range");
+    }
+    int len = static_cast<int>(rawLen);
     std::vector<std::string> itemStrings;
     itemStrings.reserve(len);
     
@@ -563,36 +633,63 @@ int LuaAPI_ImGui::ListBox(lua_State* L) {
 // ==================== 表格API ====================
 int LuaAPI_ImGui::BeginTable(lua_State* L) {
     const char* strId = luaL_checkstring(L, 1);
-    int column = static_cast<int>(luaL_checkinteger(L, 2));
-    int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
+    int column = checkIntRange(L, 2, 1, kMaxLuaTableColumns, "table column count");
+    int flags = checkOptionalInt(L, 3, 0, "table flags");
     ImVec2 outerSize = GetVec2(L, 4);
-    float innerWidth = static_cast<float>(luaL_optnumber(L, 5, 0.0));
+    float innerWidth = checkOptionalFloat(L, 5, 0.0f, "inner width");
     
     bool result = ImGui::BeginTable(strId, column, flags, outerSize, innerWidth);
+    if (result) {
+        luaTableStack[L].push_back(column);
+    }
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::EndTable(lua_State* L) {
+    auto it = luaTableStack.find(L);
+    if (it == luaTableStack.end() || it->second.empty()) {
+        luaL_error(L, "EndTable called without active table");
+        return 0;
+    }
+    it->second.pop_back();
+    if (it->second.empty()) {
+        luaTableStack.erase(it);
+    }
     ImGui::EndTable();
     return 0;
 }
 
 int LuaAPI_ImGui::TableNextRow(lua_State* L) {
-    int rowFlags = static_cast<int>(luaL_optinteger(L, 1, 0));
-    float minRowHeight = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    auto it = luaTableStack.find(L);
+    if (it == luaTableStack.end() || it->second.empty()) {
+        luaL_error(L, "TableNextRow called without active table");
+        return 0;
+    }
+    int rowFlags = checkOptionalInt(L, 1, 0, "row flags");
+    float minRowHeight = checkOptionalFloat(L, 2, 0.0f, "minimum row height");
     ImGui::TableNextRow(rowFlags, minRowHeight);
     return 0;
 }
 
 int LuaAPI_ImGui::TableNextColumn(lua_State* L) {
+    auto it = luaTableStack.find(L);
+    if (it == luaTableStack.end() || it->second.empty()) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     bool result = ImGui::TableNextColumn();
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::TableSetColumnIndex(lua_State* L) {
-    int columnN = static_cast<int>(luaL_checkinteger(L, 1));
+    int columnN = checkIntRange(L, 1, 0, kMaxLuaTableColumns - 1, "table column index");
+    auto it = luaTableStack.find(L);
+    if (it == luaTableStack.end() || it->second.empty() || columnN >= it->second.back()) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     bool result = ImGui::TableSetColumnIndex(columnN);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
@@ -600,14 +697,14 @@ int LuaAPI_ImGui::TableSetColumnIndex(lua_State* L) {
 
 // ==================== 其他API ====================
 int LuaAPI_ImGui::IsItemClicked(lua_State* L) {
-    int button = static_cast<int>(luaL_optinteger(L, 1, 0));
+    int button = checkOptionalInt(L, 1, 0, "mouse button");
     bool result = ImGui::IsItemClicked(button);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::IsItemHovered(lua_State* L) {
-    int flags = static_cast<int>(luaL_optinteger(L, 1, 0));
+    int flags = checkOptionalInt(L, 1, 0, "hovered flags");
     bool result = ImGui::IsItemHovered(flags);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
@@ -621,7 +718,7 @@ int LuaAPI_ImGui::GetWindowSize(lua_State* L) {
 
 int LuaAPI_ImGui::SetWindowSize(lua_State* L) {
     ImVec2 size = GetVec2(L, 1);
-    int cond = static_cast<int>(luaL_optinteger(L, 2, 0));
+    int cond = checkOptionalInt(L, 2, 0, "window size condition");
     ImGui::SetWindowSize(size, cond);
     return 0;
 }
@@ -634,7 +731,7 @@ int LuaAPI_ImGui::GetWindowPos(lua_State* L) {
 
 int LuaAPI_ImGui::SetWindowPos(lua_State* L) {
     ImVec2 pos = GetVec2(L, 1);
-    int cond = static_cast<int>(luaL_optinteger(L, 2, 0));
+    int cond = checkOptionalInt(L, 2, 0, "window position condition");
     ImGui::SetWindowPos(pos, cond);
     return 0;
 }
