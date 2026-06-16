@@ -15,7 +15,22 @@
 #include <fstream>
 #include <cmath>
 #include <memory>
+#include <cerrno>
+#include <cstdlib>
 
+namespace {
+bool parseHexTermStrict(const std::string& text, uint64_t& value)
+{
+    if (text.empty() || text[0] == '-') {
+        return false;
+    }
+
+    char* endPtr = nullptr;
+    errno = 0;
+    value = std::strtoull(text.c_str(), &endPtr, 16);
+    return endPtr != text.c_str() && *endPtr == '\0' && errno != ERANGE;
+}
+}
 
 // 解析地址表达式，支持十六进制加减运算
 // 例如: "1000", "1000+200", "5000-100", "ABCD + 10"
@@ -44,9 +59,7 @@ bool MemoryViewerWindow::parseAddressExpression(const char* expr, uint64_t& resu
     
     if (opPos == std::string::npos) {
         // 没有运算符，直接解析十六进制数
-        char* endPtr = nullptr;
-        result = strtoull(s.c_str(), &endPtr, 16);
-        return endPtr != s.c_str() && *endPtr == '\0';
+        return parseHexTermStrict(s, result);
     }
     
     // 有运算符，递归解析左右两边
@@ -59,14 +72,14 @@ bool MemoryViewerWindow::parseAddressExpression(const char* expr, uint64_t& resu
     if (!parseAddressExpression(leftStr.c_str(), left)) return false;
     
     // 解析右边
-    char* endPtr = nullptr;
-    right = strtoull(rightStr.c_str(), &endPtr, 16);
-    if (endPtr == rightStr.c_str() || *endPtr != '\0') return false;
+    if (!parseHexTermStrict(rightStr, right)) return false;
     
     // 计算结果
     if (op == '+') {
+        if (UINT64_MAX - left < right) return false;
         result = left + right;
     } else if (op == '-') {
+        if (left < right) return false;
         result = left - right;
     }
     
@@ -84,7 +97,8 @@ MemoryViewerWindow::MemoryViewerWindow()
     targetAddress = 0;
     
     // 初始化偏移链输入框
-    strcpy(newOffsetBuf, "0");
+    newOffsetBuf[0] = '0';
+    newOffsetBuf[1] = '\0';
     
     // 调整buffer大小为一页
     buffer.resize(viewSize);
@@ -115,6 +129,7 @@ MemoryViewerWindow::MemoryViewerWindow()
         [this](const NavigateToAddressEvent& e) {
             jumpToAddress(e.address);
         });
+    observedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
 }
 
 MemoryViewerWindow::~MemoryViewerWindow()
@@ -164,6 +179,14 @@ void MemoryViewerWindow::jumpToAddress(uint64_t address)
 
 void MemoryViewerWindow::addToHistory(uint64_t address)
 {
+    if (historyIndex < -1 || historyIndex >= (int)addressHistory.size()) {
+        historyIndex = addressHistory.empty() ? -1 : (int)addressHistory.size() - 1;
+    }
+
+    if (historyIndex >= 0 && addressHistory[historyIndex] == address) {
+        return;
+    }
+
     // 如果不是在历史记录末尾，删除后面的记录
     if (historyIndex >= 0 && historyIndex < (int)addressHistory.size() - 1) {
         addressHistory.erase(addressHistory.begin() + historyIndex + 1, addressHistory.end());
@@ -176,8 +199,59 @@ void MemoryViewerWindow::addToHistory(uint64_t address)
     // 限制历史记录大小
     if (addressHistory.size() > 50) {
         addressHistory.erase(addressHistory.begin());
-        historyIndex--;
+        historyIndex = (int)addressHistory.size() - 1;
     }
+}
+
+void MemoryViewerWindow::resetProcessState()
+{
+    for (auto& item : watchItems) {
+        item.frozen = false;
+        item.frozenDataSize = 0;
+        item.frozenAddress = 0;
+        memset(item.frozenData, 0, sizeof(item.frozenData));
+    }
+    watchItems.clear();
+    watchLastValues.clear();
+    selectedWatchIndex = -1;
+    showAddItemDialog = false;
+    timeSinceWatchUpdate = 0.0f;
+
+    targetAddress = 0;
+    pageBaseAddress = 0;
+    viewAddress = 0;
+    selectedByteOffset = -1;
+    selectedByteAddress = 0;
+    editMode = false;
+    editingRow = -1;
+    editingCol = -1;
+    hexAddressInputBuf[0] = '\0';
+    lastHexAddressInputTarget = 0;
+    hexAutoScrolling = false;
+    addressHistory.clear();
+    historyIndex = -1;
+    buffer.assign(static_cast<size_t>(viewSize), 0);
+
+    offsetChain.clear();
+    selectedOffsetIndex = -1;
+    std::snprintf(newOffsetBuf, sizeof(newOffsetBuf), "%s", "0");
+
+    structBaseAddress = 0;
+    structBuffer.clear();
+    dissectNodes.clear();
+    dissectAddrHistory.clear();
+    dissectHistoryIdx = -1;
+    showNodeEditPopup = false;
+    dissectEditPath.clear();
+
+    disassemblyAddress = 0;
+    disassemblyAddressBuf[0] = '\0';
+    disassemblyBuffer.clear();
+    disassemblyBufferValid = false;
+    cachedDisassemblyResult = DisassemblyResult();
+    disassemblyFailed = false;
+    disassemblyFailedAddress = 0;
+    scrollToDisassemblyAddress = false;
 }
 
 void MemoryViewerWindow::refreshMemory()
@@ -219,9 +293,16 @@ void MemoryViewerWindow::writeMemoryByte(uint64_t address, unsigned char value)
 
 void MemoryViewerWindow::onDraw()
 {
+    const uint64_t processRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
+    if (processRevision != observedProcessRevision) {
+        observedProcessRevision = processRevision;
+        resetProcessState();
+    }
+
     if (AppContext::Get().hasProcess()) {
+        const std::string processName = AppContext::Get().getSelectedName();
         ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
-            AppContext::Get().selectedName.c_str(), AppContext::Get().selectedPid.load());
+            processName.c_str(), AppContext::Get().selectedPid.load());
     } else {
         ImGui::TextDisabled("未附加进程");
     }

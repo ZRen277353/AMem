@@ -9,8 +9,227 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <cstdio>
 #include <fstream>
 #include <cmath>
+#include <cstdlib>
+#include <cerrno>
+
+namespace {
+constexpr uint64_t kMinLikelyPointer = 0x4FFFFFFFFFULL;
+constexpr uint64_t kMaxLikelyPointer = 0x7FFFFFFFFFFFULL;
+constexpr size_t kMaxStructDefinitionCount = 4096;
+constexpr size_t kMaxStructFieldCount = 65536;
+constexpr size_t kMaxStructStringLength = 4096;
+
+bool isLikelyPointerAddress(uint64_t address)
+{
+    return address > kMinLikelyPointer && address < kMaxLikelyPointer;
+}
+
+uint64_t normalizePointerAddress(uint64_t rawAddress)
+{
+    if (isLikelyPointerAddress(rawAddress)) {
+        return rawAddress;
+    }
+
+    const uint64_t topByteStripped = rawAddress & 0x00FFFFFFFFFFFFFFULL;
+    if (isLikelyPointerAddress(topByteStripped)) {
+        return topByteStripped;
+    }
+
+    const uint64_t low48 = rawAddress & 0x0000FFFFFFFFFFFFULL;
+    if (isLikelyPointerAddress(low48)) {
+        return low48;
+    }
+
+    return rawAddress;
+}
+
+bool readDissectMemory(uint64_t address, int size, std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (address == 0 || size <= 0) {
+        return false;
+    }
+    return ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), out);
+}
+
+template <typename T>
+bool readDissectScalar(const std::vector<unsigned char>& data, int offset, T& value)
+{
+    if (offset < 0 || static_cast<size_t>(offset) + sizeof(T) > data.size()) {
+        return false;
+    }
+
+    std::memcpy(&value, data.data() + offset, sizeof(T));
+    return true;
+}
+
+template <typename T>
+void appendDissectScalar(std::vector<unsigned char>& data, T value)
+{
+    const size_t oldSize = data.size();
+    data.resize(oldSize + sizeof(T));
+    std::memcpy(data.data() + oldSize, &value, sizeof(T));
+}
+
+std::string stripDisplayQuotes(const std::string& value)
+{
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return value.substr(1, value.size() - 2);
+    }
+
+    return value;
+}
+
+void appendDissectString(std::vector<unsigned char>& data, const std::string& value, size_t fixedSize)
+{
+    std::string text = stripDisplayQuotes(value);
+    size_t maxTextBytes = text.size();
+    if (fixedSize > 0) {
+        maxTextBytes = text.size() < fixedSize ? text.size() : fixedSize;
+    }
+
+    data.insert(data.end(), text.begin(), text.begin() + maxTextBytes);
+    if (fixedSize == 0 || data.size() < fixedSize) {
+        data.push_back(0);
+    }
+    if (fixedSize > 0 && data.size() < fixedSize) {
+        data.resize(fixedSize, 0);
+    }
+}
+
+std::vector<uint16_t> utf8ToUtf16Units(const std::string& text)
+{
+    std::vector<uint16_t> units;
+    for (size_t i = 0; i < text.size();) {
+        uint32_t cp = 0xFFFD;
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x80) {
+            cp = c;
+            i += 1;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            if ((c1 & 0xC0) == 0x80) {
+                cp = ((c & 0x1F) << 6) | (c1 & 0x3F);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(text[i + 2]);
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
+                cp = ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(text[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(text[i + 3]);
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
+                cp = ((c & 0x07) << 18) | ((c1 & 0x3F) << 12) |
+                     ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+
+        if (cp <= 0xFFFF) {
+            units.push_back(static_cast<uint16_t>(cp));
+        } else if (cp <= 0x10FFFF) {
+            cp -= 0x10000;
+            units.push_back(static_cast<uint16_t>(0xD800 | (cp >> 10)));
+            units.push_back(static_cast<uint16_t>(0xDC00 | (cp & 0x3FF)));
+        }
+    }
+    return units;
+}
+
+void appendDissectUtf16String(std::vector<unsigned char>& data, const std::string& value, size_t fixedSize)
+{
+    std::vector<uint16_t> units = utf8ToUtf16Units(stripDisplayQuotes(value));
+    for (uint16_t unit : units) {
+        if (fixedSize > 0 && data.size() + sizeof(unit) > fixedSize) {
+            break;
+        }
+        appendDissectScalar(data, unit);
+    }
+
+    if (fixedSize == 0 || data.size() + 2 <= fixedSize) {
+        appendDissectScalar<uint16_t>(data, 0);
+    }
+    if (fixedSize > 0 && data.size() < fixedSize) {
+        data.resize(fixedSize, 0);
+    }
+}
+
+bool parseUnsignedValue(const std::string& text, uint64_t& value, int defaultBase = 0)
+{
+    size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos || text[begin] == '-') {
+        return false;
+    }
+
+    size_t endPos = begin;
+    while (endPos < text.size() &&
+           text[endPos] != ' ' &&
+           text[endPos] != '\t' &&
+           text[endPos] != '\r' &&
+           text[endPos] != '\n' &&
+           text[endPos] != '(' &&
+           text[endPos] != ',') {
+        endPos++;
+    }
+
+    std::string token = text.substr(begin, endPos - begin);
+    if (token.empty()) {
+        return false;
+    }
+
+    bool hasHexLetter = false;
+    for (char c : token) {
+        if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+            hasHexLetter = true;
+            break;
+        }
+    }
+
+    int base = defaultBase;
+    if (token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+        base = 0;
+    } else if (base == 0) {
+        base = hasHexLetter ? 16 : 10;
+    }
+
+    const char* str = token.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, base);
+    if (end == str || *end != '\0' || errno == ERANGE) {
+        return false;
+    }
+
+    return true;
+}
+
+void markNodesUnavailable(std::vector<DissectNode>& nodes)
+{
+    for (auto& node : nodes) {
+        node.cachedValue = "??";
+        node.pointerTarget = 0;
+        if (!node.children.empty()) {
+            markNodesUnavailable(node.children);
+        }
+    }
+}
+}
 
 // ============================================================
 // resolveNodeByPath — 通过路径定位树中节点
@@ -137,11 +356,15 @@ void MemoryViewerWindow::drawDissectorToolbar()
     ImGui::SameLine();
     if (ImGui::Button("解析")) {
         if (structBaseAddress != 0) {
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            autoAnalyzeNodes(structBuffer);
-            dissectAddrHistory.clear();
-            dissectAddrHistory.push_back(structBaseAddress);
-            dissectHistoryIdx = 0;
+            if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+                autoAnalyzeNodes(structBuffer);
+                dissectAddrHistory.clear();
+                dissectAddrHistory.push_back(structBaseAddress);
+                dissectHistoryIdx = 0;
+            } else {
+                dissectNodes.clear();
+                Gui::log("读取结构分析地址失败: 0x%llX", (unsigned long long)structBaseAddress);
+            }
         }
     }
 
@@ -150,8 +373,12 @@ void MemoryViewerWindow::drawDissectorToolbar()
     if (ImGui::Button("<< 后退")) {
         dissectHistoryIdx--;
         structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
-        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-        autoAnalyzeNodes(structBuffer);
+        if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+            autoAnalyzeNodes(structBuffer);
+        } else {
+            dissectNodes.clear();
+            Gui::log("读取结构分析地址失败: 0x%llX", (unsigned long long)structBaseAddress);
+        }
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -159,8 +386,12 @@ void MemoryViewerWindow::drawDissectorToolbar()
     if (ImGui::Button("前进 >>")) {
         dissectHistoryIdx++;
         structBaseAddress = dissectAddrHistory[dissectHistoryIdx];
-        ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-        autoAnalyzeNodes(structBuffer);
+        if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+            autoAnalyzeNodes(structBuffer);
+        } else {
+            dissectNodes.clear();
+            Gui::log("读取结构分析地址失败: 0x%llX", (unsigned long long)structBaseAddress);
+        }
     }
     ImGui::EndDisabled();
 
@@ -173,8 +404,12 @@ void MemoryViewerWindow::drawDissectorToolbar()
         if (dissectTotalSize < 16) dissectTotalSize = 16;
         if (dissectTotalSize > 65536) dissectTotalSize = 65536;
         if (structBaseAddress != 0) {
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            autoAnalyzeNodes(structBuffer);
+            if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+                autoAnalyzeNodes(structBuffer);
+            } else {
+                dissectNodes.clear();
+                Gui::log("读取结构分析地址失败: 0x%llX", (unsigned long long)structBaseAddress);
+            }
         }
     }
 
@@ -192,14 +427,18 @@ void MemoryViewerWindow::drawDissectorToolbar()
     ImGui::SameLine();
     ImGui::SetNextItemWidth(60);
     ImGui::InputFloat("##dissect_interval", &dissectRefreshInterval, 0, 0, "%.1f");
+    if (dissectRefreshInterval < 0.1f) dissectRefreshInterval = 0.1f;
     ImGui::SameLine();
     ImGui::Text("秒");
     if (dissectAutoRefresh && structBaseAddress != 0 && !dissectNodes.empty()) {
         timeSinceDissectRefresh += ImGui::GetIO().DeltaTime;
         if (timeSinceDissectRefresh >= dissectRefreshInterval) {
             timeSinceDissectRefresh = 0.0f;
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            refreshDissectValues();
+            if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+                refreshDissectValues();
+            } else {
+                markNodesUnavailable(dissectNodes);
+            }
         }
     }
 }
@@ -338,10 +577,8 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
         if (ImGui::MenuItem("编辑属性...")) {
             dissectEditPath = path;
             showNodeEditPopup = true;
-            strncpy(editNodeName, node.name.c_str(), sizeof(editNodeName) - 1);
-            editNodeName[sizeof(editNodeName) - 1] = '\0';
-            strncpy(editNodeDesc, node.description.c_str(), sizeof(editNodeDesc) - 1);
-            editNodeDesc[sizeof(editNodeDesc) - 1] = '\0';
+            std::snprintf(editNodeName, sizeof(editNodeName), "%s", node.name.c_str());
+            std::snprintf(editNodeDesc, sizeof(editNodeDesc), "%s", node.description.c_str());
             editNodeTypeIdx = (int)node.type;
             editNodeStringSize = node.storedSize > 0 ? node.storedSize : 32;
             editNodeOffset = node.offset;
@@ -368,9 +605,13 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
                 dissectAddrHistory.push_back(target);
                 dissectHistoryIdx = (int)dissectAddrHistory.size() - 1;
                 structBaseAddress = target;
-                ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-                regenerateDissectNodes();
-                refreshDissectValues();
+                if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+                    regenerateDissectNodes();
+                    refreshDissectValues();
+                } else {
+                    dissectNodes.clear();
+                    Gui::log("读取指针目标内存失败: 0x%llX", (unsigned long long)structBaseAddress);
+                }
             }
         }
         ImGui::EndPopup();
@@ -392,8 +633,7 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
     // --- 名称列（可编辑）---
     ImGui::TableSetColumnIndex(2);
     char nameBuf[128];
-    strncpy(nameBuf, node.name.c_str(), sizeof(nameBuf) - 1);
-    nameBuf[sizeof(nameBuf) - 1] = '\0';
+    std::snprintf(nameBuf, sizeof(nameBuf), "%s", node.name.c_str());
     ImGui::PushItemWidth(-1);
     if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf)))
         node.name = nameBuf;
@@ -417,14 +657,26 @@ void MemoryViewerWindow::drawNodeRow(DissectNode& node, uint64_t baseAddr,
 
     // --- 值列（可编辑，回车写入）---
     ImGui::TableSetColumnIndex(4);
-    char valBuf[256];
-    strncpy(valBuf, node.cachedValue.c_str(), sizeof(valBuf) - 1);
-    valBuf[sizeof(valBuf) - 1] = '\0';
+    if (!node.valueEditActive) {
+        std::snprintf(node.editValueBuffer, sizeof(node.editValueBuffer), "%s", node.cachedValue.c_str());
+    }
     ImGui::PushItemWidth(-1);
-    if (ImGui::InputText("##val", valBuf, sizeof(valBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+    bool valueSubmitted = ImGui::InputText(
+        "##val",
+        node.editValueBuffer,
+        sizeof(node.editValueBuffer),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+    if (ImGui::IsItemActivated()) {
+        node.valueEditActive = true;
+    }
+    bool valueDeactivated = ImGui::IsItemDeactivated();
+    if (valueSubmitted) {
         ops.pendingWriteFlat = myFlat;
-        ops.pendingWriteValue = valBuf;
+        ops.pendingWriteValue = node.editValueBuffer;
         ops.pendingWritePath = path;
+        node.valueEditActive = false;
+    } else if (valueDeactivated) {
+        node.valueEditActive = false;
     }
     ImGui::PopItemWidth();
 
@@ -508,17 +760,27 @@ void MemoryViewerWindow::drawNodeEditPopup()
             node->name = editNodeName;
             node->description = editNodeDesc;
             FieldType newType = (FieldType)editNodeTypeIdx;
-            if (newType != node->type) {
-                // 延迟处理类型变更（需要 merge/split）
+            bool changedLayout = false;
+            bool needsTypeOrSizeChange = newType != node->type;
+            if ((newType == FieldType::STRING || newType == FieldType::STRING_UTF8 ||
+                 newType == FieldType::STRING_UTF16) &&
+                editNodeStringSize != node->storedSize) {
+                needsTypeOrSizeChange = true;
+            }
+
+            if (needsTypeOrSizeChange) {
                 auto* parentVec = &dissectNodes;
                 for (int p = 0; p < (int)dissectEditPath.size() - 1; p++)
                     parentVec = &(*parentVec)[dissectEditPath[p]].children;
                 int idx = dissectEditPath.back();
-                onDissectNodeTypeChanged(*parentVec, idx, newType);
+                onDissectNodeTypeChanged(*parentVec, idx, newType, editNodeStringSize);
+                changedLayout = true;
             }
-            if (newType == FieldType::STRING || newType == FieldType::STRING_UTF8 ||
-                newType == FieldType::STRING_UTF16) {
-                node->storedSize = editNodeStringSize;
+            node = resolveNodeByPath(dissectEditPath);
+            if (!node) {
+                ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+                return;
             }
             // 处理偏移变更
             if (editNodeOffset != node->offset && editNodeOffset >= 0) {
@@ -528,7 +790,9 @@ void MemoryViewerWindow::drawNodeEditPopup()
                 int idx = dissectEditPath.back();
                 onDissectNodeOffsetChanged(*parentVec, idx, editNodeOffset);
             } else {
-                refreshDissectValues();
+                if (!changedLayout) {
+                    refreshDissectValues();
+                }
             }
             ImGui::CloseCurrentPopup();
         }
@@ -595,13 +859,18 @@ void MemoryViewerWindow::refreshNodeValues(std::vector<DissectNode>& nodes,
 
         // POINTER 类型提取目标地址
         if (node.type == FieldType::POINTER && node.offset + 8 <= (int)buffer.size()) {
-            node.pointerTarget = *(uint64_t*)&buffer[node.offset];
+            uint64_t rawPointer = 0;
+            memcpy(&rawPointer, &buffer[node.offset], sizeof(rawPointer));
+            node.pointerTarget = normalizePointerAddress(rawPointer);
         }
 
         // 递归刷新已展开的子节点
         if (node.expanded && !node.children.empty() && node.pointerTarget != 0) {
-            ReadProcessMemoryBytes(node.pointerTarget, dissectTotalSize, node.childBuffer);
-            refreshNodeValues(node.children, node.childBuffer, node.pointerTarget);
+            if (readDissectMemory(node.pointerTarget, dissectTotalSize, node.childBuffer)) {
+                refreshNodeValues(node.children, node.childBuffer, node.pointerTarget);
+            } else {
+                markNodesUnavailable(node.children);
+            }
         }
     }
 }
@@ -620,7 +889,7 @@ void MemoryViewerWindow::expandPointerNode(DissectNode& node, uint64_t baseAddr)
     }
 
     node.childBuffer.clear();
-    if (!ReadProcessMemoryBytes(node.pointerTarget, dissectTotalSize, node.childBuffer)) {
+    if (!readDissectMemory(node.pointerTarget, dissectTotalSize, node.childBuffer)) {
         Gui::log("读取指针目标内存失败: 0x%llX", (unsigned long long)node.pointerTarget);
         return;
     }
@@ -638,15 +907,13 @@ void MemoryViewerWindow::expandPointerNode(DissectNode& node, uint64_t baseAddr)
         child.depth = childDepth;
 
         // 检查指针
-        if (offset + 7 < (int)data.size()) {
-            uint64_t val64 = *(uint64_t*)&data[offset];
-            uint64_t tmp = val64;
-            if ((val64 & 0xffff00000000) == 0xb40000000000)
-                tmp = val64 & 0xffffffffffff;
-            if (tmp > 0x4FFFFFFFFF && tmp < 0x7FFFFFFFFFFF) {
+        uint64_t val64 = 0;
+        if (readDissectScalar(data, offset, val64)) {
+            uint64_t target = normalizePointerAddress(val64);
+            if (isLikelyPointerAddress(target)) {
                 child.type = FieldType::POINTER;
                 child.storedSize = 8;
-                child.pointerTarget = val64;
+                child.pointerTarget = target;
                 char nb[32]; snprintf(nb, sizeof(nb), "ptr_%d", fieldIndex++);
                 child.name = nb;
                 node.children.push_back(std::move(child));
@@ -656,10 +923,10 @@ void MemoryViewerWindow::expandPointerNode(DissectNode& node, uint64_t baseAddr)
         }
 
         // 检查浮点
-        if (offset + 3 < (int)data.size()) {
-            float fval = *(float*)&data[offset];
+        float fval = 0.0f;
+        uint32_t ival = 0;
+        if (readDissectScalar(data, offset, fval) && readDissectScalar(data, offset, ival)) {
             if (!std::isnan(fval) && !std::isinf(fval) && fval > -1000000 && fval < 1000000) {
-                uint32_t ival = *(uint32_t*)&data[offset];
                 if (ival > 0x1000 && (ival & 0xFF) != 0) {
                     child.type = FieldType::FLOAT;
                     child.storedSize = 4;
@@ -720,7 +987,8 @@ void MemoryViewerWindow::collapsePointerNode(DissectNode& node)
 // onDissectNodeTypeChanged — 类型变更，处理合并/拆分
 // ============================================================
 void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& nodes,
-                                                  int nodeIndex, FieldType newType)
+                                                  int nodeIndex, FieldType newType,
+                                                  int stringSize)
 {
     if (nodeIndex < 0 || nodeIndex >= (int)nodes.size()) return;
     auto& node = nodes[nodeIndex];
@@ -734,12 +1002,16 @@ void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& node
 
     if (newType == FieldType::STRING || newType == FieldType::STRING_UTF8 ||
         newType == FieldType::STRING_UTF16) {
-        node.storedSize = 32;
+        if (stringSize < 1) stringSize = 1;
+        if (stringSize > 4096) stringSize = 4096;
+        node.storedSize = stringSize;
     } else {
         node.storedSize = 0;
     }
 
     int newSize = node.getSize();
+    int nodeOffset = node.offset;
+    int nodeDepth = node.depth;
 
     if (newSize > oldSize) {
         // 吸收后续行
@@ -752,7 +1024,7 @@ void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& node
     } else if (newSize < oldSize) {
         // 释放空间，用默认大小填充
         int freed = oldSize - newSize;
-        int fillOffset = node.offset + newSize;
+        int fillOffset = nodeOffset + newSize;
         FieldType fillType;
         switch (dissectDefaultSize) {
             case 1: fillType = FieldType::BYTE; break;
@@ -765,7 +1037,7 @@ void MemoryViewerWindow::onDissectNodeTypeChanged(std::vector<DissectNode>& node
             DissectNode nr;
             nr.offset = fillOffset;
             nr.type = fillType;
-            nr.depth = node.depth;
+            nr.depth = nodeDepth;
             char nb[32];
             snprintf(nb, sizeof(nb), "field_%04X", fillOffset);
             nr.name = nb;
@@ -889,39 +1161,55 @@ bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseA
     try {
         switch (node.type) {
             case FieldType::BYTE: {
-                int val = std::stoi(valueStr);
-                data.push_back((unsigned char)val);
+                uint64_t val = 0;
+                if (!parseUnsignedValue(valueStr, val) || val > 0xFF) {
+                    return false;
+                }
+                data.push_back(static_cast<unsigned char>(val));
                 break;
             }
             case FieldType::WORD: {
-                uint16_t val = (uint16_t)std::stoul(valueStr);
-                data.resize(2);
-                *(uint16_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseUnsignedValue(valueStr, val) || val > 0xFFFF) {
+                    return false;
+                }
+                appendDissectScalar(data, static_cast<uint16_t>(val));
                 break;
             }
             case FieldType::DWORD: {
-                uint32_t val = (uint32_t)std::stoul(valueStr);
-                data.resize(4);
-                *(uint32_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseUnsignedValue(valueStr, val) || val > 0xFFFFFFFFULL) {
+                    return false;
+                }
+                appendDissectScalar(data, static_cast<uint32_t>(val));
                 break;
             }
             case FieldType::QWORD:
             case FieldType::POINTER: {
-                uint64_t val = std::stoull(valueStr, nullptr, 16);
-                data.resize(8);
-                *(uint64_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseUnsignedValue(valueStr, val, 16)) {
+                    return false;
+                }
+                appendDissectScalar(data, val);
                 break;
             }
             case FieldType::FLOAT: {
                 float val = std::stof(valueStr);
-                data.resize(4);
-                *(float*)&data[0] = val;
+                appendDissectScalar(data, val);
                 break;
             }
             case FieldType::DOUBLE: {
                 double val = std::stod(valueStr);
-                data.resize(8);
-                *(double*)&data[0] = val;
+                appendDissectScalar(data, val);
+                break;
+            }
+            case FieldType::STRING:
+            case FieldType::STRING_UTF8: {
+                appendDissectString(data, valueStr, static_cast<size_t>(node.getSize()));
+                break;
+            }
+            case FieldType::STRING_UTF16: {
+                appendDissectUtf16String(data, valueStr, static_cast<size_t>(node.getSize()));
                 break;
             }
             default:
@@ -931,8 +1219,11 @@ bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseA
         if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
             Gui::log("写入 %s @ 0x%llX: %s", node.name.c_str(), (unsigned long long)addr, valueStr.c_str());
             // 刷新整棵树的值
-            ReadProcessMemoryBytes(structBaseAddress, dissectTotalSize, structBuffer);
-            refreshDissectValues();
+            if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
+                refreshDissectValues();
+            } else {
+                markNodesUnavailable(dissectNodes);
+            }
             return true;
         }
     } catch (const std::exception& e) {
@@ -970,7 +1261,10 @@ void MemoryViewerWindow::loadTemplateIntoDissector(int index)
 
     if (structBaseAddress != 0) {
         int needed = def.totalSize > dissectTotalSize ? def.totalSize : dissectTotalSize;
-        ReadProcessMemoryBytes(structBaseAddress, needed, structBuffer);
+        if (!readDissectMemory(structBaseAddress, needed, structBuffer)) {
+            structBuffer.clear();
+            Gui::log("读取结构分析地址失败: 0x%llX", (unsigned long long)structBaseAddress);
+        }
     }
 
     dissectNodes.clear();
@@ -1007,15 +1301,13 @@ void MemoryViewerWindow::autoAnalyzeNodes(const std::vector<unsigned char>& data
         node.depth = 0;
 
         // 检查指针（ARM64 用户空间地址范围）
-        if (offset + 7 < (int)data.size()) {
-            uint64_t val64 = *(uint64_t*)&data[offset];
-            uint64_t tmp = val64;
-            if ((val64 & 0xffff00000000) == 0xb40000000000)
-                tmp = val64 & 0xffffffffffff;
-            if (tmp > 0x4FFFFFFFFF && tmp < 0x7FFFFFFFFFFF) {
+        uint64_t val64 = 0;
+        if (readDissectScalar(data, offset, val64)) {
+            uint64_t target = normalizePointerAddress(val64);
+            if (isLikelyPointerAddress(target)) {
                 node.type = FieldType::POINTER;
                 node.storedSize = 8;
-                node.pointerTarget = val64;
+                node.pointerTarget = target;
                 char nb[32]; snprintf(nb, sizeof(nb), "ptr_%d", fieldIndex++);
                 node.name = nb;
                 dissectNodes.push_back(std::move(node));
@@ -1025,10 +1317,10 @@ void MemoryViewerWindow::autoAnalyzeNodes(const std::vector<unsigned char>& data
         }
 
         // 检查浮点
-        if (offset + 3 < (int)data.size()) {
-            float fval = *(float*)&data[offset];
+        float fval = 0.0f;
+        uint32_t ival = 0;
+        if (readDissectScalar(data, offset, fval) && readDissectScalar(data, offset, ival)) {
             if (!std::isnan(fval) && !std::isinf(fval) && fval > -1000000 && fval < 1000000) {
-                uint32_t ival = *(uint32_t*)&data[offset];
                 if (ival > 0x1000 && (ival & 0xFF) != 0) {
                     node.type = FieldType::FLOAT;
                     node.storedSize = 4;
@@ -1156,16 +1448,16 @@ std::string MemoryViewerWindow::readSingleFieldValue(const std::vector<unsigned 
             break;
         }
         case FieldType::WORD: {
-            if (offset + 1 < (int)data.size()) {
-                uint16_t val = *(uint16_t*)&data[offset];
+            uint16_t val = 0;
+            if (readDissectScalar(data, offset, val)) {
                 ss << "0x" << std::hex << std::uppercase << val
                    << " (" << std::dec << val << ")";
             }
             break;
         }
         case FieldType::DWORD: {
-            if (offset + 3 < (int)data.size()) {
-                uint32_t val = *(uint32_t*)&data[offset];
+            uint32_t val = 0;
+            if (readDissectScalar(data, offset, val)) {
                 ss << "0x" << std::hex << std::uppercase << val
                    << " (" << std::dec << val << ")";
             }
@@ -1173,22 +1465,22 @@ std::string MemoryViewerWindow::readSingleFieldValue(const std::vector<unsigned 
         }
         case FieldType::QWORD:
         case FieldType::POINTER: {
-            if (offset + 7 < (int)data.size()) {
-                uint64_t val = *(uint64_t*)&data[offset];
+            uint64_t val = 0;
+            if (readDissectScalar(data, offset, val)) {
                 ss << "0x" << std::hex << std::uppercase << val;
             }
             break;
         }
         case FieldType::FLOAT: {
-            if (offset + 3 < (int)data.size()) {
-                float val = *(float*)&data[offset];
+            float val = 0.0f;
+            if (readDissectScalar(data, offset, val)) {
                 ss << std::fixed << std::setprecision(6) << val;
             }
             break;
         }
         case FieldType::DOUBLE: {
-            if (offset + 7 < (int)data.size()) {
-                double val = *(double*)&data[offset];
+            double val = 0.0;
+            if (readDissectScalar(data, offset, val)) {
                 ss << std::fixed << std::setprecision(6) << val;
             }
             break;
@@ -1257,38 +1549,76 @@ void MemoryViewerWindow::loadStructDefinitions()
     if (!file.is_open()) return;
     size_t count;
     if (!file.read((char*)&count, sizeof(count))) return;
+    if (count > kMaxStructDefinitionCount) return;
+
     structDefinitions.clear();
     structDefinitions.reserve(count);
     for (size_t i = 0; i < count; i++) {
         StructDefinition structDef;
+        bool structValid = true;
+
         size_t nameLen;
-        if (!file.read((char*)&nameLen, sizeof(nameLen))) break;
+        if (!file.read((char*)&nameLen, sizeof(nameLen)) || nameLen > kMaxStructStringLength) break;
         structDef.name.resize(nameLen);
-        if (!file.read(&structDef.name[0], nameLen)) break;
+        if (nameLen > 0 && !file.read(&structDef.name[0], nameLen)) break;
+
         size_t fieldCount;
-        if (!file.read((char*)&fieldCount, sizeof(fieldCount))) break;
+        if (!file.read((char*)&fieldCount, sizeof(fieldCount)) || fieldCount > kMaxStructFieldCount) break;
         for (size_t j = 0; j < fieldCount; j++) {
             StructField field;
             size_t fieldNameLen;
-            if (!file.read((char*)&fieldNameLen, sizeof(fieldNameLen))) break;
+            if (!file.read((char*)&fieldNameLen, sizeof(fieldNameLen)) ||
+                fieldNameLen > kMaxStructStringLength) {
+                structValid = false;
+                break;
+            }
             field.name.resize(fieldNameLen);
-            if (!file.read(&field.name[0], fieldNameLen)) break;
-            if (!file.read((char*)&field.type, sizeof(field.type))) break;
-            if (!file.read((char*)&field.offset, sizeof(field.offset))) break;
-            if (!file.read((char*)&field.size, sizeof(field.size))) break;
-            if (!file.read((char*)&field.arrayCount, sizeof(field.arrayCount))) break;
-            if (!file.read((char*)&field.isPointer, sizeof(field.isPointer))) break;
+            if (fieldNameLen > 0 && !file.read(&field.name[0], fieldNameLen)) {
+                structValid = false;
+                break;
+            }
+            if (!file.read((char*)&field.type, sizeof(field.type)) ||
+                !file.read((char*)&field.offset, sizeof(field.offset)) ||
+                !file.read((char*)&field.size, sizeof(field.size)) ||
+                !file.read((char*)&field.arrayCount, sizeof(field.arrayCount)) ||
+                !file.read((char*)&field.isPointer, sizeof(field.isPointer))) {
+                structValid = false;
+                break;
+            }
+            if ((int)field.type < (int)FieldType::BYTE || (int)field.type > (int)FieldType::STRUCT ||
+                field.size < 0 || field.arrayCount < 1) {
+                structValid = false;
+                break;
+            }
+
             size_t descLen;
-            if (!file.read((char*)&descLen, sizeof(descLen))) break;
+            if (!file.read((char*)&descLen, sizeof(descLen)) ||
+                descLen > kMaxStructStringLength) {
+                structValid = false;
+                break;
+            }
             field.description.resize(descLen);
-            if (descLen > 0 && !file.read(&field.description[0], descLen)) break;
+            if (descLen > 0 && !file.read(&field.description[0], descLen)) {
+                structValid = false;
+                break;
+            }
+
             size_t structTypeLen;
-            if (!file.read((char*)&structTypeLen, sizeof(structTypeLen))) break;
+            if (!file.read((char*)&structTypeLen, sizeof(structTypeLen)) ||
+                structTypeLen > kMaxStructStringLength) {
+                structValid = false;
+                break;
+            }
             field.structTypeName.resize(structTypeLen);
-            if (structTypeLen > 0 && !file.read(&field.structTypeName[0], structTypeLen)) break;
+            if (structTypeLen > 0 && !file.read(&field.structTypeName[0], structTypeLen)) {
+                structValid = false;
+                break;
+            }
             structDef.fields.push_back(field);
         }
+        if (!structValid) break;
         if (!file.read((char*)&structDef.totalSize, sizeof(structDef.totalSize))) break;
+        if (structDef.totalSize < 0) break;
         structDefinitions.push_back(structDef);
     }
 }
@@ -1395,12 +1725,50 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
     std::vector<unsigned char> data;
     try {
         switch (field.type) {
-            case FieldType::BYTE: { data.push_back((unsigned char)std::stoi(value)); break; }
-            case FieldType::WORD: { data.resize(2); *(uint16_t*)&data[0] = (uint16_t)std::stoul(value); break; }
-            case FieldType::DWORD: { data.resize(4); *(uint32_t*)&data[0] = (uint32_t)std::stoul(value); break; }
-            case FieldType::QWORD: case FieldType::POINTER: { data.resize(8); *(uint64_t*)&data[0] = std::stoull(value, nullptr, 16); break; }
-            case FieldType::FLOAT: { data.resize(4); *(float*)&data[0] = std::stof(value); break; }
-            case FieldType::DOUBLE: { data.resize(8); *(double*)&data[0] = std::stod(value); break; }
+            case FieldType::BYTE: {
+                uint64_t parsed = 0;
+                if (!parseUnsignedValue(value, parsed) || parsed > 0xFF) return false;
+                data.push_back(static_cast<unsigned char>(parsed));
+                break;
+            }
+            case FieldType::WORD: {
+                uint64_t parsed = 0;
+                if (!parseUnsignedValue(value, parsed) || parsed > 0xFFFF) return false;
+                appendDissectScalar(data, static_cast<uint16_t>(parsed));
+                break;
+            }
+            case FieldType::DWORD: {
+                uint64_t parsed = 0;
+                if (!parseUnsignedValue(value, parsed) || parsed > 0xFFFFFFFFULL) return false;
+                appendDissectScalar(data, static_cast<uint32_t>(parsed));
+                break;
+            }
+            case FieldType::QWORD:
+            case FieldType::POINTER: {
+                uint64_t parsed = 0;
+                if (!parseUnsignedValue(value, parsed, 16)) return false;
+                appendDissectScalar(data, parsed);
+                break;
+            }
+            case FieldType::FLOAT: {
+                float parsed = std::stof(value);
+                appendDissectScalar(data, parsed);
+                break;
+            }
+            case FieldType::DOUBLE: {
+                double parsed = std::stod(value);
+                appendDissectScalar(data, parsed);
+                break;
+            }
+            case FieldType::STRING:
+            case FieldType::STRING_UTF8: {
+                appendDissectString(data, value, static_cast<size_t>(field.size));
+                break;
+            }
+            case FieldType::STRING_UTF16: {
+                appendDissectUtf16String(data, value, static_cast<size_t>(field.size));
+                break;
+            }
             default: return false;
         }
         if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
