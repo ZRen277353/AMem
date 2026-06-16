@@ -102,13 +102,19 @@ bool FreezeGetList(std::vector<CeFreezeItem> &outList, bool &isPaused,
             return false;
         if (!isValidCount(output.count, kMaxFreezeItemCount))
             return false;
+        std::vector<CeFreezeItem> receivedItems;
+        if (output.count > 0) {
+            receivedItems.resize(static_cast<size_t>(output.count));
+            if (!client->Receive(receivedItems.data(), static_cast<size_t>(output.count) * sizeof(CeFreezeItem)))
+                return false;
+            for (const auto &item : receivedItems) {
+                if (!isValidFreezeDataSize(item.dataSize))
+                    return false;
+            }
+        }
+        outList = std::move(receivedItems);
         isPaused = output.isPaused != 0;
         interval_ms = output.interval_ms;
-        if (output.count > 0) {
-            outList.resize(static_cast<size_t>(output.count));
-            if (!client->Receive(outList.data(), static_cast<size_t>(output.count) * sizeof(CeFreezeItem)))
-                return false;
-        }
         return true;
     });
 }

@@ -123,14 +123,15 @@ bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type) {
         CeVersion version{};
         if (!client->Receive(&version, sizeof(version)))
             return false;
-        outInfo.version = version.version;
-        outInfo.versionString.clear();
+        ServerVersionInfo info{};
+        info.version = version.version;
         if (version.stringsize > 0) {
             std::vector<char> versionString(version.stringsize);
-            if (client->Receive(versionString.data(), versionString.size())) {
-                outInfo.versionString.assign(versionString.data(), versionString.size());
-            }
+            if (!client->Receive(versionString.data(), versionString.size()))
+                return false;
+            info.versionString.assign(versionString.data(), versionString.size());
         }
+        outInfo = std::move(info);
         return true;
     });
 }
