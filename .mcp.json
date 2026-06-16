@@ -1,8 +1,11 @@
 {
-    "mcpServers": {
-      "amem": {
-        "command": "python",
-        "args": ["D:/AndroidMEM/AMem/mcp/server.py"]
+  "mcpServers": {
+    "amem": {
+      "command": "python",
+      "args": ["-m", "amem_mcp"],
+      "env": {
+        "PYTHONPATH": "D:/AndroidMEM/AMem/mcp"
       }
     }
+  }
 }
