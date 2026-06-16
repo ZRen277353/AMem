@@ -4,9 +4,12 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cmath>
 #include <limits>
 
 namespace {
+constexpr uint32_t kMaxLuaMemoryTransferSize = 65536;
+
 template <typename T>
 bool readScalar(const std::vector<unsigned char>& data, T& value) {
     if (data.size() != sizeof(T)) {
@@ -23,9 +26,9 @@ std::vector<unsigned char> scalarToBytes(const T& value) {
     return data;
 }
 
-uint32_t checkSize(lua_State* L, int index, uint32_t defaultValue = 0, uint32_t maxValue = 65536) {
+uint32_t checkSize(lua_State* L, int index, uint32_t defaultValue = 0, uint32_t maxValue = kMaxLuaMemoryTransferSize) {
     lua_Integer raw = defaultValue == 0 ? luaL_checkinteger(L, index) : luaL_optinteger(L, index, defaultValue);
-    if (raw < 0 || raw > static_cast<lua_Integer>(maxValue)) {
+    if (raw <= 0 || raw > static_cast<lua_Integer>(maxValue)) {
         luaL_error(L, "memory size out of range");
         return 0;
     }
@@ -40,6 +43,17 @@ lua_Integer checkIntegerRange(lua_State* L, int index, lua_Integer minValue, lua
     }
     return value;
 }
+
+double checkFiniteNumber(lua_State* L, int index, const char* name) {
+    lua_Number value = luaL_checknumber(L, index);
+    double number = static_cast<double>(value);
+    if (!std::isfinite(number)) {
+        luaL_error(L, "%s must be finite", name);
+        return 0.0;
+    }
+    return number;
+}
+
 }
 
 // ==================== 注册内存操作API ====================
@@ -107,20 +121,16 @@ int LuaAPI_Memory::WriteMemory(lua_State* L) {
     
     std::vector<unsigned char> data;
     if (lua_istable(L, 2)) {
-        lua_objlen(L, 2);
-        lua_Integer rawLen = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        if (rawLen < 0 || rawLen > 65536) {
+        const size_t len = lua_objlen(L, 2);
+        if (len == 0 || len > kMaxLuaMemoryTransferSize) {
             luaL_error(L, "memory write table length out of range");
         }
-        int len = static_cast<int>(rawLen);
         data.resize(len);
-        for (int i = 0; i < len; ++i) {
-            lua_pushinteger(L, i + 1);
-            lua_gettable(L, 2);
-            lua_Integer byteValue = lua_tointeger(L, -1);
+        for (size_t i = 0; i < len; ++i) {
+            lua_rawgeti(L, 2, static_cast<int>(i + 1));
+            lua_Integer byteValue = luaL_checkinteger(L, -1);
             if (byteValue < 0 || byteValue > 0xFF) {
-                luaL_error(L, "memory write byte out of range at index %d", i + 1);
+                luaL_error(L, "memory write byte out of range at index %d", static_cast<int>(i + 1));
             }
             data[i] = static_cast<unsigned char>(byteValue);
             lua_pop(L, 1);
@@ -128,7 +138,7 @@ int LuaAPI_Memory::WriteMemory(lua_State* L) {
     } else if (lua_isstring(L, 2)) {
         size_t len;
         const char* str = lua_tolstring(L, 2, &len);
-        if (len > 65536) {
+        if (len == 0 || len > kMaxLuaMemoryTransferSize) {
             luaL_error(L, "memory write string length out of range");
         }
         data.assign(reinterpret_cast<const unsigned char*>(str), 
@@ -186,7 +196,8 @@ int LuaAPI_Memory::ReadLong(lua_State* L) {
 
 int LuaAPI_Memory::WriteLong(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    int64_t value = static_cast<int64_t>(luaL_checknumber(L, 2));
+    int64_t value = static_cast<int64_t>(
+        checkIntegerRange(L, 2, (std::numeric_limits<lua_Integer>::min)(), (std::numeric_limits<lua_Integer>::max)(), "long"));
     std::vector<unsigned char> data = scalarToBytes(value);
     bool success = WriteProcessMemoryBytes(address, 8, data);
     lua_pushboolean(L, success ? 1 : 0);
@@ -257,7 +268,12 @@ int LuaAPI_Memory::ReadFloat(lua_State* L) {
 
 int LuaAPI_Memory::WriteFloat(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    float value = static_cast<float>(luaL_checknumber(L, 2));
+    double number = checkFiniteNumber(L, 2, "float");
+    if (number < -(std::numeric_limits<float>::max)() || number > (std::numeric_limits<float>::max)()) {
+        luaL_error(L, "float out of range");
+        return 0;
+    }
+    float value = static_cast<float>(number);
     std::vector<unsigned char> data = scalarToBytes(value);
     bool success = WriteProcessMemoryBytes(address, 4, data);
     lua_pushboolean(L, success ? 1 : 0);
@@ -282,7 +298,7 @@ int LuaAPI_Memory::ReadDouble(lua_State* L) {
 
 int LuaAPI_Memory::WriteDouble(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    double value = luaL_checknumber(L, 2);
+    double value = checkFiniteNumber(L, 2, "double");
     std::vector<unsigned char> data = scalarToBytes(value);
     bool success = WriteProcessMemoryBytes(address, 8, data);
     lua_pushboolean(L, success ? 1 : 0);
