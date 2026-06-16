@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
+#include <cmath>
 #include <exception>
 #include <initializer_list>
 #include <string>
@@ -273,7 +274,7 @@ float parseFloatValueStrict(const std::string& text, const std::string& typeName
     char* end = nullptr;
     errno = 0;
     const float value = std::strtof(s.c_str(), &end);
-    if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE || !std::isfinite(value)) {
         throw std::runtime_error("invalid " + typeName + " value");
     }
     return value;
@@ -288,7 +289,7 @@ double parseDoubleValueStrict(const std::string& text, const std::string& typeNa
     char* end = nullptr;
     errno = 0;
     const double value = std::strtod(s.c_str(), &end);
-    if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE || !std::isfinite(value)) {
         throw std::runtime_error("invalid " + typeName + " value");
     }
     return value;
@@ -394,6 +395,14 @@ uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
             ? args["scan_type"].get<std::string>()
             : std::string("exact");
     return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
+}
+
+void parseScanRange(const json& args, uint64_t& start, uint64_t& end) {
+    start = parseOptionalAddress(args, "start", 0);
+    end = parseOptionalAddress(args, "end", UINT64_MAX);
+    if (start > end) {
+        throw std::runtime_error("scan start must be <= end");
+    }
 }
 
 uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) {
@@ -718,8 +727,9 @@ std::string execScanValue(const std::string& argsJson) {
         std::vector<unsigned char> bytes = scanBytesFromArgs(args, valueType, "value");
 
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
-        const uint64_t start = parseOptionalAddress(args, "start", 0);
-        const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        uint64_t start = 0;
+        uint64_t end = UINT64_MAX;
+        parseScanRange(args, start, end);
         const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
                                    ? args["memory_type_raw"].get<int>()
                                    : memoryTypeToFlag(args.value("memory_type", std::string("all")));
@@ -747,13 +757,18 @@ std::string execScanNext(const std::string& argsJson) {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string valueType = valueTypeFromArgs(args);
         std::vector<unsigned char> bytes = scanBytesFromArgs(args, valueType, "value");
-        const int flag = args.contains("scan_flag") && args["scan_flag"].is_number_integer()
-                             ? args["scan_flag"].get<int>()
-                             : static_cast<int>(scanFlagsFromArgs(args, valueType));
-        const uint64_t start = parseOptionalAddress(args, "start", 0);
-        const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        uint32_t rawFlag = 0;
+        const uint32_t flags = readRawFlagArg(args, "scan_flag", rawFlag)
+                                   ? rawFlag
+                                   : scanFlagsFromArgs(args, valueType);
+        if (flags > static_cast<uint32_t>(INT32_MAX)) {
+            return makeError("scan_flag out of range");
+        }
+        uint64_t start = 0;
+        uint64_t end = UINT64_MAX;
+        parseScanRange(args, start, end);
 
-        const int count = ScanNextValue(bytes, flag, start, end, PORT_MAIN);
+        const int count = ScanNextValue(bytes, static_cast<int>(flags), start, end, PORT_MAIN);
         if (count < 0) {
             return makeError("socket communication error: scan_next");
         }
@@ -773,8 +788,9 @@ std::string execScanFuzzy(const std::string& argsJson) {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string valueType = valueTypeFromArgs(args);
         const uint32_t flags = fuzzyScanFlagsFromArgs(args, valueType);
-        const uint64_t start = parseOptionalAddress(args, "start", 0);
-        const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        uint64_t start = 0;
+        uint64_t end = UINT64_MAX;
+        parseScanRange(args, start, end);
         const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
                                    ? args["memory_type_raw"].get<int>()
                                    : memoryTypeToFlag(args.value("memory_type", std::string("all")));
@@ -806,8 +822,9 @@ std::string execScanHex(const std::string& argsJson) {
         if (bytes.empty()) {
             return makeError("hex_pattern must contain at least one byte");
         }
-        const uint64_t start = parseOptionalAddress(args, "start", 0);
-        const uint64_t end = parseOptionalAddress(args, "end", UINT64_MAX);
+        uint64_t start = 0;
+        uint64_t end = UINT64_MAX;
+        parseScanRange(args, start, end);
         const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
                                    ? args["memory_type_raw"].get<int>()
                                    : memoryTypeToFlag(args.value("memory_type", std::string("all")));
