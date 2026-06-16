@@ -116,7 +116,7 @@ void ServerConnectWindow::drawConnectionControls() {
     }
   } else {
     if (ImGui::Button("断开连接")) {
-      client->Close();
+      GetSocketMgr().DisconnectMultiPort();
       updateStatus(false, "断开连接");
     }
   }
@@ -215,4 +215,4 @@ void ServerConnectWindow::onDraw()
 {
 	drawConnectionControls();
 	drawDriverControls();
-} 
+}

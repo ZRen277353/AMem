@@ -8,6 +8,7 @@
 struct ProcessSelectedEvent {
     int pid;
     std::string name;
+    bool hasProcess;
 };
 
 struct NavigateToAddressEvent {
