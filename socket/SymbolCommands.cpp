@@ -2,6 +2,7 @@
 #include "SocketCommand.h"
 
 namespace {
+constexpr int kMaxSymbolTotalCount = 1000000;
 constexpr int kMaxSymbolPageCount = 1000;
 constexpr int kMaxSymbolNameSize = 64 * 1024;
 
@@ -25,7 +26,7 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
         CeSymbolInitOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        if (output.totalCount < 0)
+        if (!isValidCount(output.totalCount, kMaxSymbolTotalCount))
             return false;
         outTotalCount = output.totalCount;
         return output.result == 0;
@@ -54,7 +55,7 @@ bool SymbolGetList(int offset, int count,
         CeGetSymbolListOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        if (output.totalCount < 0 ||
+        if (!isValidCount(output.totalCount, kMaxSymbolTotalCount) ||
             output.actualCount < 0 ||
             output.actualCount > count)
             return false;
@@ -84,6 +85,9 @@ bool SymbolGetList(int offset, int count,
 bool SymbolFind(uint64_t moduleBase, const std::string &name,
                 uint64_t &outAddress, PortType port) {
     outAddress = 0;
+    if (name.empty() || name.size() > static_cast<size_t>(kMaxSymbolNameSize))
+        return false;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SYMBOL_FIND;
         if (!client->Send(&command, sizeof(command)))

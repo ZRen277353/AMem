@@ -132,7 +132,10 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
             return false;
         if (!client->Receive(&TotalCount, sizeof(TotalCount)))
             return false;
-        if (result < 0 || result > kMaxBreakpointHitCount)
+        if (result < 0 ||
+            result > kMaxBreakpointHitCount ||
+            TotalCount > static_cast<uint64_t>(kMaxBreakpointHitCount) ||
+            static_cast<uint64_t>(result) > TotalCount)
             return false;
         if (result > 0) {
             std::vector<HW_HIT_INFO> receivedInfos(static_cast<size_t>(result));
