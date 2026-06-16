@@ -6,9 +6,20 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <array>
+#include <cstring>
+#include <utility>
 
 // 全局窗口管理器：窗口ID -> 窗口指针
 static std::map<int, LuaImGuiWindow*> luaWindows;
+
+struct LuaInputTextState {
+    std::array<char, 256> buffer{};
+    std::string lastExternalValue;
+    bool activeLastFrame = false;
+};
+
+static std::map<std::pair<lua_State*, ImGuiID>, LuaInputTextState> luaInputTextStates;
 
 // ==================== 辅助函数 ====================
 ImVec4 LuaAPI_ImGui::ParseColor(lua_State* L, int index) {
@@ -353,22 +364,29 @@ int LuaAPI_ImGui::Checkbox(lua_State* L) {
 
 int LuaAPI_ImGui::InputText(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
-    
+
     size_t len;
     const char* str = luaL_checklstring(L, 2, &len);
-    
-    static char buffer[256];
-    size_t copyLen = (len < sizeof(buffer) - 1) ? len : sizeof(buffer) - 1;
-    memcpy(buffer, str, copyLen);
-    buffer[copyLen] = '\0';
-    
+    std::string externalValue(str, len);
+
+    ImGuiID id = ImGui::GetID(label);
+    LuaInputTextState& state = luaInputTextStates[{L, id}];
+    if (state.lastExternalValue != externalValue && !state.activeLastFrame) {
+        size_t copyLen = (externalValue.size() < state.buffer.size() - 1) ? externalValue.size() : state.buffer.size() - 1;
+        std::memcpy(state.buffer.data(), externalValue.data(), copyLen);
+        state.buffer[copyLen] = '\0';
+        state.lastExternalValue = externalValue.substr(0, copyLen);
+    }
+
     int flags = static_cast<int>(luaL_optinteger(L, 3, 0));
-    bool result = ImGui::InputText(label, buffer, sizeof(buffer), flags);
-    
+    bool result = ImGui::InputText(label, state.buffer.data(), state.buffer.size(), flags);
+    state.activeLastFrame = ImGui::IsItemActive();
+
     if (result) {
-        lua_pushstring(L, buffer);
+        state.lastExternalValue = state.buffer.data();
+        lua_pushstring(L, state.buffer.data());
     } else {
-        lua_pushvalue(L, 2);
+        lua_pushstring(L, state.buffer.data());
     }
     lua_pushboolean(L, result ? 1 : 0);
     return 2;
