@@ -194,9 +194,9 @@ bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortT
     return false;
 }
 
-static bool read_u64(uint64_t address, uint64_t &value) {
+static bool read_u64(uint64_t address, uint64_t &value, PortType port) {
     std::vector<unsigned char> buf;
-    if (!ReadProcessMemoryBytes(address, 8, buf))
+    if (!ReadProcessMemoryBytes(address, 8, buf, port))
         return false;
     if (buf.size() < 8)
         return false;
@@ -220,13 +220,13 @@ bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleNam
     }
     for (size_t i = 0; i < offsets.size(); ++i) {
         uint64_t ptr = 0;
-        if (!read_u64(addr, ptr))
+        if (!read_u64(addr, ptr, port))
             return false;
         addr = ptr + offsets[i];
     }
     if (derefFinal) {
         uint64_t finalPtr = 0;
-        if (!read_u64(addr, finalPtr))
+        if (!read_u64(addr, finalPtr, port))
             return false;
         addr = finalPtr;
     }

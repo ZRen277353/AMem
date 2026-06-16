@@ -43,13 +43,13 @@ bool executeNoHandle(PortType port, Func&& fn) {
 
 // 需要句柄的命令，返回 int 结果（扫描类）
 template<typename Func>
-int executeWithResult(PortType port, Func&& fn) {
+int executeWithResult(PortType port, Func&& fn, int failureValue = 0) {
     auto* client = GetSocketMgr().GetClient(port);
     if (!client || !client->IsConnected())
-        return 0;
+        return failureValue;
     int handle = 0;
     if (!EnsureOpenHandle(handle, port))
-        return 0;
+        return failureValue;
     int result = 0;
     auto* portMutex = GetSocketMgr().GetMutex(port);
     bool success = SocketRequestManager::GetInstance().ExecuteRequestWithLock(
@@ -57,7 +57,7 @@ int executeWithResult(PortType port, Func&& fn) {
             client->DrainPending();
             return fn(client, handle, result);
         });
-    return success ? result : 0;
+    return success ? result : failureValue;
 }
 
 // 发送命令字节+句柄的 helper
@@ -77,6 +77,9 @@ inline bool receiveProgressLoop(WindowsSocketClient* client, ScanProgressCallbac
     while (true) {
         ScanProgress progress;
         if (!client->Receive(&progress, sizeof(progress)))
+            return false;
+
+        if (progress.msgType != 1 && progress.msgType != 2 && progress.msgType != 3)
             return false;
 
         bool isTerminal = (progress.msgType == 2 || progress.msgType == 3);

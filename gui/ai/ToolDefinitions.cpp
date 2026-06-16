@@ -854,6 +854,9 @@ std::string execGetScanResults(const std::string& argsJson) {
             return makeError("socket communication error: get_scan_results");
         }
         const int total = GetScanResultCount(PORT_MAIN);
+        if (total < 0) {
+            return makeError("socket communication error: get_scan_count");
+        }
 
         json entries = json::array();
         for (const auto& kv : raw) {
@@ -864,7 +867,7 @@ std::string execGetScanResults(const std::string& argsJson) {
         }
 
         json result;
-        result["total"] = total < 0 ? static_cast<int>(raw.size()) : total;
+        result["total"] = total;
         result["offset"] = offset;
         result["results"] = std::move(entries);
         result["items"] = result["results"];

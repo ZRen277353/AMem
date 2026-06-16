@@ -430,6 +430,8 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanValueWithProgress(flags, valBytes, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -438,11 +440,13 @@ void IpcServer::RegisterBuiltinMethods() {
         uint32_t flags = p.at("flags").get<uint32_t>();
         std::string hexVal = p.at("value_hex").get<std::string>();
         auto valBytes = HexToBytes(hexVal);
-        int flag = p.value("scan_flag", 0);
+        int flag = p.value("scan_flag", static_cast<int>(flags));
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanNextValueWithProgress(valBytes, flag, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "再次扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -453,6 +457,8 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanFuzzyValueWithProgress(flags, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "模糊扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -464,18 +470,24 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanHEXValueWithProgress(start, end, patternBytes, nullptr, nullptr);
+        if (count < 0)
+            return {{"success", false}, {"error", "HEX 扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
     // ── get_scan_count ───────────────────────────────────────────
     RegisterMethod("get_scan_count", [](const json&) -> json {
         int count = GetScanResultCount();
+        if (count < 0)
+            return {{"success", false}, {"error", "获取扫描结果数量失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
     // ── get_scan_results ─────────────────────────────────────────
     RegisterMethod("get_scan_results", [](const json& p) -> json {
         int total = GetScanResultCount();
+        if (total < 0)
+            return {{"success", false}, {"error", "获取扫描结果数量失败"}};
         int offset = p.value("offset", 0);
         int count = p.value("count", 20);
         if (count > 1000) count = 1000;
@@ -497,7 +509,8 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── clear_scan ───────────────────────────────────────────────
     RegisterMethod("clear_scan", [](const json&) -> json {
-        ClearScanResult();
+        if (!ClearScanResult())
+            return {{"success", false}, {"error", "清空扫描结果失败"}};
         return {{"success", true}, {"result", nullptr}};
     });
     // ── set_breakpoint ────────────────────────────────────────────

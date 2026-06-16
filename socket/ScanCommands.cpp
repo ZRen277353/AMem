@@ -39,16 +39,18 @@ int ScanValue(uint32_t flags, std::vector<unsigned char> &Value, uint64_t start,
             return false;
         while (true) {
             ScanProgress progress;
-            if (!client->Receive(&progress, sizeof(progress))) break;
+            if (!client->Receive(&progress, sizeof(progress)))
+                return false;
             if (progress.msgType == 1) {
                 std::cout << "\r进度: " << std::fixed << std::setprecision(2)
                           << progress.percent << "%, 命中: " << progress.matchCount << std::flush;
             } else if (progress.msgType == 2) { break; }
             else if (progress.msgType == 3) { return false; }
+            else { return false; }
         }
         if (!client->Receive(&len, 4)) return false;
         return true;
-    });
+    }, -1);
 }
 
 int ScanNextValue(std::vector<unsigned char> &Value, int flag, uint64_t start,
@@ -68,13 +70,16 @@ int ScanNextValue(std::vector<unsigned char> &Value, int flag, uint64_t start,
             return false;
         while (true) {
             ScanProgress progress;
-            if (!client->Receive(&progress, sizeof(progress))) break;
+            if (!client->Receive(&progress, sizeof(progress)))
+                return false;
+            if (progress.msgType == 1) continue;
             if (progress.msgType == 2) break;
             else if (progress.msgType == 3) return false;
+            else return false;
         }
         if (!client->Receive(&len, 4)) return false;
         return true;
-    });
+    }, -1);
 }
 
 int GetScanResultCount(PortType port) {
@@ -85,7 +90,7 @@ int GetScanResultCount(PortType port) {
         if (!client->Receive(&count, sizeof(count)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 bool GetScanResult(int offset, int count,
@@ -160,7 +165,7 @@ int ScanValueWithProgress(uint32_t flags, std::vector<unsigned char> &Value,
         if (!client->Receive(&len, sizeof(len)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 int ScanNextValueWithProgress(std::vector<unsigned char> &Value, int flag,
@@ -184,7 +189,7 @@ int ScanNextValueWithProgress(std::vector<unsigned char> &Value, int flag,
         if (!client->Receive(&len, sizeof(len)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 int ScanFuzzyValueWithProgress(uint32_t flags, ScanProgressCallback callback,
@@ -205,7 +210,7 @@ int ScanFuzzyValueWithProgress(uint32_t flags, ScanProgressCallback callback,
         if (!client->Receive(&len, sizeof(len)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 int ScanGroupValueWithProgress(
@@ -239,7 +244,7 @@ int ScanGroupValueWithProgress(
         if (!client->Receive(&SearchCount, sizeof(SearchCount)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
@@ -263,7 +268,7 @@ int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
         if (!client->Receive(&len, sizeof(len)))
             return false;
         return true;
-    });
+    }, -1);
 }
 
 bool GetTypedScanResult(int offset, int count,
