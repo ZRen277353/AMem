@@ -11,6 +11,14 @@ constexpr int kMaxBreakpointHitCount = 100000;
 std::mutex g_trackedBreakpointMutex;
 std::vector<uint64_t> g_trackedBreakpointAddresses;
 
+bool isValidBreakpointType(uint32_t bpType) {
+    return bpType >= 1 && bpType <= 4;
+}
+
+bool isValidBreakpointSize(uint32_t bpSize) {
+    return bpSize == 1 || bpSize == 2 || bpSize == 4 || bpSize == 8;
+}
+
 void trackBreakpointAddress(uint64_t address) {
     std::lock_guard<std::mutex> lock(g_trackedBreakpointMutex);
     if (std::find(g_trackedBreakpointAddresses.begin(), g_trackedBreakpointAddresses.end(), address) ==
@@ -38,6 +46,9 @@ void clearTrackedBreakpointAddresses() {
 } // namespace
 
 bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
+    if (!isValidBreakpointType(bpType) || !isValidBreakpointSize(bpSize))
+        return false;
+
     const bool success = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_SETBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -107,6 +118,8 @@ bool ResumeKernelBreakpoint(uint64_t address, PortType port) {
 }
 
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos, PortType port) {
+    infos.clear();
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_READHWBPINFO;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -122,9 +135,10 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
         if (result < 0 || result > kMaxBreakpointHitCount)
             return false;
         if (result > 0) {
-            infos.resize(static_cast<size_t>(result));
-            if (!client->Receive(infos.data(), static_cast<size_t>(result) * sizeof(HW_HIT_INFO)))
+            std::vector<HW_HIT_INFO> receivedInfos(static_cast<size_t>(result));
+            if (!client->Receive(receivedInfos.data(), static_cast<size_t>(result) * sizeof(HW_HIT_INFO)))
                 return false;
+            infos.swap(receivedInfos);
         }
         return true;
     });

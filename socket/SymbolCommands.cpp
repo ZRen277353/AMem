@@ -11,6 +11,8 @@ bool isValidCount(int value, int maxValue) {
 } // namespace
 
 bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
+    outTotalCount = 0;
+
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SYMBOL_INIT;
         if (!client->Send(&command, sizeof(command)))
@@ -23,6 +25,8 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
         CeSymbolInitOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
+        if (output.totalCount < 0)
+            return false;
         outTotalCount = output.totalCount;
         return output.result == 0;
     });
@@ -31,6 +35,10 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
 bool SymbolGetList(int offset, int count,
                    std::vector<std::pair<uint64_t, std::string>> &outSymbols,
                    int *outTotalCount, PortType port) {
+    outSymbols.clear();
+    if (outTotalCount)
+        *outTotalCount = 0;
+
     if (offset < 0 || count < 0 || count > kMaxSymbolPageCount)
         return false;
 
@@ -50,10 +58,8 @@ bool SymbolGetList(int offset, int count,
             output.actualCount < 0 ||
             output.actualCount > count)
             return false;
-        if (outTotalCount)
-            *outTotalCount = output.totalCount;
-        outSymbols.clear();
-        outSymbols.reserve(static_cast<size_t>(output.actualCount));
+        std::vector<std::pair<uint64_t, std::string>> receivedSymbols;
+        receivedSymbols.reserve(static_cast<size_t>(output.actualCount));
         for (int i = 0; i < output.actualCount; ++i) {
             CeSymbolEntry entry{};
             if (!client->Receive(&entry, sizeof(entry)))
@@ -66,8 +72,11 @@ bool SymbolGetList(int offset, int count,
                 if (!client->Receive(name.data(), static_cast<size_t>(entry.nameSize)))
                     return false;
             }
-            outSymbols.emplace_back(entry.address, std::move(name));
+            receivedSymbols.emplace_back(entry.address, std::move(name));
         }
+        if (outTotalCount)
+            *outTotalCount = output.totalCount;
+        outSymbols.swap(receivedSymbols);
         return true;
     });
 }
