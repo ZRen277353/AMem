@@ -33,6 +33,13 @@ bool parseTimestampMs(const std::string& text, uint64_t& value) {
     }
     return *end == '\0';
 }
+
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& out) {
+    if (base > UINT64_MAX - offset)
+        return false;
+    out = base + offset;
+    return true;
+}
 } // namespace
 
 bool GetMemType(int &outType, PortType type) {
@@ -245,7 +252,9 @@ bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleNam
     uint64_t base = 0;
     if (!GetModuleBaseByName(moduleName, base, port))
         return false;
-    uint64_t addr = base + baseOffset;
+    uint64_t addr = 0;
+    if (!addAddressOffset(base, baseOffset, addr))
+        return false;
     if (offsets.empty()) {
         outAddress = addr;
         return true;
@@ -254,7 +263,8 @@ bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleNam
         uint64_t ptr = 0;
         if (!read_u64(addr, ptr, port))
             return false;
-        addr = ptr + offsets[i];
+        if (!addAddressOffset(ptr, offsets[i], addr))
+            return false;
     }
     if (derefFinal) {
         uint64_t finalPtr = 0;
