@@ -695,6 +695,7 @@ void IpcServer::RegisterBuiltinMethods() {
             return {{"success", false}, {"error", "获取扫描结果数量失败"}};
         int offset = p.value("offset", 0);
         int count = p.value("count", 20);
+        if (count < 1) count = 1;
         if (count > 1000) count = 1000;
         if (offset < 0) offset = 0;
         if (offset >= total) {

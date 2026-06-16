@@ -107,6 +107,16 @@ std::string toHexAddress(uint64_t addr) {
     return std::string(buf);
 }
 
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& result) {
+    if (base > UINT64_MAX - offset) {
+        result = 0;
+        return false;
+    }
+
+    result = base + offset;
+    return true;
+}
+
 std::string lowerCopy(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1162,6 +1172,10 @@ std::string execReadDisassembly(const std::string& argsJson) {
         // the AI can still operate on the bytes.
         json instructions = json::array();
         for (size_t i = 0; i + 4 <= bytes.size(); i += 4) {
+            uint64_t instructionAddress = 0;
+            if (!addAddressOffset(address, static_cast<uint64_t>(i), instructionAddress)) {
+                break;
+            }
             uint32_t insn = static_cast<uint32_t>(bytes[i]) |
                             (static_cast<uint32_t>(bytes[i + 1]) << 8) |
                             (static_cast<uint32_t>(bytes[i + 2]) << 16) |
@@ -1169,7 +1183,7 @@ std::string execReadDisassembly(const std::string& argsJson) {
             char hexBuf[16];
             std::snprintf(hexBuf, sizeof(hexBuf), "0x%08X", insn);
             json entry;
-            entry["address"] = toHexAddress(address + static_cast<uint64_t>(i));
+            entry["address"] = toHexAddress(instructionAddress);
             entry["encoding"] = hexBuf;
             instructions.push_back(std::move(entry));
         }
