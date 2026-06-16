@@ -8,6 +8,62 @@
 #include "../socket/client_singleton.h"
 #include "../gui/Gui.h"
 
+namespace {
+constexpr size_t kMaxLuaAssemblyBytes = 65536;
+constexpr size_t kMaxLuaDisassemblyInstructions = 4096;
+
+uint64_t checkOptionalAddress(lua_State* L, int index, uint64_t defaultValue = 0) {
+    if (lua_isnoneornil(L, index)) {
+        return defaultValue;
+    }
+    return LuaAPI::CheckAddress(L, index);
+}
+
+size_t checkOptionalCount(lua_State* L, int index, size_t defaultValue, size_t maxValue, const char* name) {
+    if (lua_isnoneornil(L, index)) {
+        return defaultValue;
+    }
+
+    lua_Integer raw = luaL_checkinteger(L, index);
+    if (raw < 0 || static_cast<uint64_t>(raw) > maxValue) {
+        luaL_error(L, "%s out of range", name);
+        return 0;
+    }
+    return static_cast<size_t>(raw);
+}
+
+size_t checkRequiredCount(lua_State* L, int index, size_t maxValue, const char* name) {
+    lua_Integer raw = luaL_checkinteger(L, index);
+    if (raw <= 0 || static_cast<uint64_t>(raw) > maxValue) {
+        luaL_error(L, "%s out of range", name);
+        return 0;
+    }
+    return static_cast<size_t>(raw);
+}
+
+std::vector<uint8_t> readByteTable(lua_State* L, int index) {
+    const size_t len = lua_objlen(L, index);
+    if (len == 0 || len > kMaxLuaAssemblyBytes) {
+        luaL_error(L, "byte table length out of range");
+        return {};
+    }
+
+    std::vector<uint8_t> bytes;
+    bytes.reserve(len);
+    for (size_t i = 0; i < len; ++i) {
+        lua_rawgeti(L, index, static_cast<int>(i + 1));
+        lua_Integer value = luaL_checkinteger(L, -1);
+        if (value < 0 || value > 0xFF) {
+            luaL_error(L, "byte value out of range at index %d", static_cast<int>(i + 1));
+            return {};
+        }
+        bytes.push_back(static_cast<uint8_t>(value));
+        lua_pop(L, 1);
+    }
+    return bytes;
+}
+} // namespace
+
 // Lua 专用的 AssemblyHelper 单例
 static AssemblyHelper& GetLuaAssemblyHelper() {
     static AssemblyHelper helper;
@@ -57,7 +113,7 @@ int LuaAPI_Assembly::IsAvailable(lua_State* L) {
 
 int LuaAPI_Assembly::Assemble(lua_State* L) {
     const char* asmStr = luaL_checkstring(L, 1);
-    uint64_t address = static_cast<uint64_t>(luaL_optnumber(L, 2, 0));
+    uint64_t address = checkOptionalAddress(L, 2);
 
     auto& helper = GetLuaAssemblyHelper();
     AssemblyResult result = helper.assemble(asmStr, address);
@@ -113,26 +169,17 @@ int LuaAPI_Assembly::Disassemble(lua_State* L) {
 
     if (lua_istable(L, 1)) {
         // 用法1: asm.disassemble(bytes_table, address, [maxInstructions])
-        int len = static_cast<int>(lua_objlen(L, 1));
-        codeBytes.reserve(len);
-        for (int i = 1; i <= len; ++i) {
-            lua_rawgeti(L, 1, i);
-            codeBytes.push_back(static_cast<uint8_t>(lua_tointeger(L, -1)));
-            lua_pop(L, 1);
-        }
-        address = static_cast<uint64_t>(luaL_optnumber(L, 2, 0));
-        maxInstructions = static_cast<size_t>(luaL_optinteger(L, 3, 0));
+        codeBytes = readByteTable(L, 1);
+        address = checkOptionalAddress(L, 2);
+        maxInstructions = checkOptionalCount(
+            L, 3, 0, kMaxLuaDisassemblyInstructions, "max instructions");
     } else {
         // 用法2: asm.disassemble(address, size, [maxInstructions])
         // 从进程内存读取字节
         address = LuaAPI::CheckAddress(L, 1);
-        size_t size = static_cast<size_t>(luaL_checkinteger(L, 2));
-        maxInstructions = static_cast<size_t>(luaL_optinteger(L, 3, 0));
-
-        if (size == 0 || size > 65536) {
-            LuaAPI::PushError(L, "读取大小无效 (1-65536)");
-            return 2;
-        }
+        size_t size = checkRequiredCount(L, 2, kMaxLuaAssemblyBytes, "read size");
+        maxInstructions = checkOptionalCount(
+            L, 3, 0, kMaxLuaDisassemblyInstructions, "max instructions");
 
         std::vector<unsigned char> buffer(size);
         if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), buffer)) {
