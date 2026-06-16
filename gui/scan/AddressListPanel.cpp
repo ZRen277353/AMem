@@ -9,6 +9,44 @@
 #include <iomanip>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
+#include <cerrno>
+#include <cstdlib>
+
+static uint32_t GetAddressValueSize(int valueType)
+{
+    switch (valueType) {
+        case 0: return 1;
+        case 1: return 2;
+        case 2: return 4;
+        case 3: return 8;
+        case 4: return 4;
+        case 5: return 8;
+        default: return 4;
+    }
+}
+
+static bool ParseAddressListUnsigned(const std::string& input, uint64_t maxValue, uint64_t& value)
+{
+    size_t begin = input.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos || input[begin] == '-') {
+        return false;
+    }
+
+    const char* str = input.c_str() + begin;
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, 0);
+    if (end == str || errno == ERANGE || value > maxValue) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+
+    return *end == '\0';
+}
 
 void ScanWindow::drawAddressListPanel()
 {
@@ -16,6 +54,10 @@ void ScanWindow::drawAddressListPanel()
         "1字节", "2字节", "4字节", "8字节", "浮点", "双精度"
     };
     ImGui::BeginChild("AddressList", ImVec2(0, 0), ImGuiChildFlags_Borders);
+
+    if (addressListRefreshInterval < 0.1f) {
+        addressListRefreshInterval = 0.1f;
+    }
 
     // 自动刷新控制（使用异步版本，避免卡顿）
     // 注意：扫描进行时不允许刷新，防止Socket操作冲突
@@ -37,9 +79,9 @@ void ScanWindow::drawAddressListPanel()
             ImGui::Button("刷新中...");
         }
         ImGui::EndDisabled();
-        if (refreshTotal > 0 && addressListRefreshThread.running()) {
+        if (addressListRefreshTotal.load() > 0 && addressListRefreshThread.running()) {
             ImGui::SameLine();
-            ImGui::Text("(%d/%d)", refreshProgress.load(), refreshTotal.load());
+            ImGui::Text("(%d/%d)", addressListRefreshProgress.load(), addressListRefreshTotal.load());
         }
     } else {
         if (ImGui::Button("立即刷新")) {
@@ -61,6 +103,9 @@ void ScanWindow::drawAddressListPanel()
         ImGui::SameLine();
         ImGui::SetNextItemWidth(60);
         ImGui::InputFloat("##interval", &addressListRefreshInterval, 0, 0, "%.1f");
+        if (addressListRefreshInterval < 0.1f) {
+            addressListRefreshInterval = 0.1f;
+        }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("自动刷新间隔（秒）\n建议值: 0.5-2.0秒");
         }
@@ -125,9 +170,8 @@ void ScanWindow::drawAddressListPanel()
             ImGui::TableSetColumnIndex(0);
             ImGui::Checkbox("##active", &addressList[i].active);
             ImGui::TableSetColumnIndex(1);
-            static char descBuf[256];
-            strncpy(descBuf, addressList[i].description.c_str(), sizeof(descBuf) - 1);
-            descBuf[sizeof(descBuf) - 1] = '\0';
+            char descBuf[256];
+            std::snprintf(descBuf, sizeof(descBuf), "%s", addressList[i].description.c_str());
             if (ImGui::InputText("##desc", descBuf, sizeof(descBuf))) {
                 addressList[i].description = descBuf;
             }
@@ -195,25 +239,49 @@ void ScanWindow::drawAddressListPanel()
             ImGui::TextColored(typeColor, "%s", value_types[itemValueType]);
             ImGui::TableSetColumnIndex(4);
 
-            // 复制当前值字符串，避免引用失效
-            std::string currentValue = addressList[i].currentValue;
-
-            // 可编辑的数值显示
-            static char editBuf[64];
-            std::snprintf(editBuf, sizeof(editBuf), "%s", currentValue.c_str());
+            auto& item = addressList[i];
+            if (!item.valueEditActive) {
+                std::snprintf(item.editValueBuffer, sizeof(item.editValueBuffer), "%s", item.currentValue.c_str());
+            }
 
             ImGui::PushItemWidth(-1);
-            if (ImGui::InputText("##value", editBuf, sizeof(editBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                // 写入新值到内存
-                if (i < (int)addressList.size() && writeAddressValue(i, editBuf)) {
-                    Gui::log("成功写入地址 0x%016llX 的值: %s", itemAddress, editBuf);
-                    // 写入成功后刷新当前地址以验证
-                    if (i < (int)addressList.size()) {
-                        refreshSingleAddress(i);
+            bool valueSubmitted = ImGui::InputText(
+                "##value",
+                item.editValueBuffer,
+                sizeof(item.editValueBuffer),
+                ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemActivated()) {
+                item.valueEditActive = true;
+            }
+            bool valueDeactivated = ImGui::IsItemDeactivated();
+            if (valueSubmitted) {
+                std::string submittedValue = item.editValueBuffer;
+                item.valueEditActive = false;
+                lock.unlock();
+
+                bool writeOk = writeAddressValue(itemAddress, itemValueType, submittedValue);
+                std::string refreshedValue;
+                if (writeOk) {
+                    refreshedValue = readAddressValue(itemAddress, itemValueType);
+                }
+
+                lock.lock();
+                if (i < (int)addressList.size() &&
+                    addressList[i].address == itemAddress &&
+                    addressList[i].valueType == itemValueType) {
+                    addressList[i].valueEditActive = false;
+                    if (writeOk) {
+                        addressList[i].currentValue = refreshedValue;
                     }
+                }
+
+                if (writeOk) {
+                    Gui::log("成功写入地址 0x%016llX 的值: %s", itemAddress, submittedValue.c_str());
                 } else {
                     Gui::log("写入失败：地址 0x%016llX", itemAddress);
                 }
+            } else if (valueDeactivated && i < (int)addressList.size()) {
+                addressList[i].valueEditActive = false;
             }
             ImGui::PopItemWidth();
 
@@ -237,12 +305,20 @@ void ScanWindow::drawAddressListPanel()
 
 void ScanWindow::refreshAddressValues()
 {
+    refreshAddressValuesForRevision(AppContext::Get().processRevision.load(std::memory_order_acquire));
+}
+
+void ScanWindow::refreshAddressValuesForRevision(uint64_t expectedProcessRevision)
+{
     // 检查是否有进程附加
     if (!AppContext::Get().hasProcess()) {
         std::lock_guard<std::mutex> lock(addressListMutex);
         for (auto& item : addressList) {
             item.currentValue = "N/A";
         }
+        return;
+    }
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
         return;
     }
 
@@ -260,13 +336,16 @@ void ScanWindow::refreshAddressValues()
     // 第一步：快速复制地址信息（锁持有时间 < 1ms）
     {
         std::lock_guard<std::mutex> lock(addressListMutex);
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
 
         if (addressList.empty()) {
             return;
         }
 
-        refreshProgress = 0;
-        refreshTotal = addressList.size();
+        addressListRefreshProgress = 0;
+        addressListRefreshTotal = static_cast<int>(addressList.size());
 
         refreshData.reserve(addressList.size());
         for (size_t i = 0; i < addressList.size(); i++) {
@@ -301,6 +380,9 @@ void ScanWindow::refreshAddressValues()
     // 批量读取所有地址（使用调试端口进行自动刷新）
     std::vector<std::pair<uint64_t, std::vector<uint8_t>>> batchResults;
     bool batchSuccess = ReadBratchAddr(batchAddrs, batchResults, PORT_DEBUG);
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+        return;
+    }
 
     if (batchSuccess && batchResults.size() == refreshData.size()) {
         // 批量读取成功，解析结果
@@ -315,7 +397,7 @@ void ScanWindow::refreshAddressValues()
                 data.newValue = "读取失败";
                 data.success = false;
             }
-            refreshProgress++;
+            addressListRefreshProgress++;
         }
     } else {
         // 批量读取失败，回退到逐个读取
@@ -341,17 +423,31 @@ void ScanWindow::refreshAddressValues()
                 data.success = false;
             }
 
-            refreshProgress++;
+            addressListRefreshProgress++;
         }
     }
 
     // 第三步：快速更新结果（锁持有时间 < 5ms）
     {
         std::lock_guard<std::mutex> lock(addressListMutex);
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
 
         for (const auto& data : refreshData) {
-            if (data.index >= addressList.size()) continue;
-            addressList[data.index].currentValue = data.newValue;
+            auto itemIt = addressList.end();
+            if (data.index < addressList.size() &&
+                addressList[data.index].address == data.address &&
+                addressList[data.index].valueType == data.valueType) {
+                itemIt = addressList.begin() + data.index;
+            } else {
+                itemIt = std::find_if(addressList.begin(), addressList.end(),
+                    [&data](const AddressListItem& item) {
+                        return item.address == data.address && item.valueType == data.valueType;
+                    });
+            }
+            if (itemIt == addressList.end()) continue;
+            itemIt->currentValue = data.newValue;
         }
     }  // 快速释放锁
 }
@@ -368,94 +464,81 @@ void ScanWindow::refreshAddressValuesAsync()
         return;
     }
 
+    const uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
+
     // 启动异步刷新线程
-    addressListRefreshThread.launch([this](const std::atomic<bool>& /*cancel*/) {
-        refreshAddressValues();  // 调用同步版本（已有互斥锁保护）
+    addressListRefreshThread.launch([this, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) {
+        refreshAddressValuesForRevision(expectedProcessRevision);  // 调用同步版本（已有互斥锁保护）
     });
 }
 
-void ScanWindow::refreshSingleAddress(int index)
+std::string ScanWindow::readAddressValue(uint64_t address, int valueType)
 {
-    // 检查索引有效性
-    if (index < 0 || index >= (int)addressList.size()) {
-        return;
-    }
-
     // 检查是否有进程附加
     if (!AppContext::Get().hasProcess()) {
-        addressList[index].currentValue = "N/A";
-        return;
+        return "N/A";
     }
 
-    auto& item = addressList[index];
     std::vector<unsigned char> buffer;
-    uint32_t size = 0;
+    uint32_t size = GetAddressValueSize(valueType);
 
-    // 根据数值类型确定大小
-    switch (item.valueType) {
-        case 0: size = 1; break;  // 1字节
-        case 1: size = 2; break;  // 2字节
-        case 2: size = 4; break;  // 4字节
-        case 3: size = 8; break;  // 8字节
-        case 4: size = 4; break;  // 单精度浮点
-        case 5: size = 8; break;  // 双精度浮点
-        default: size = 4; break;
+    if (ReadProcessMemoryBytes(address, size, buffer, PORT_DEBUG) && buffer.size() >= size) {
+        return formatValueOutput(buffer.data(), valueType);
     }
 
-    if (ReadProcessMemoryBytes(item.address, size, buffer, PORT_DEBUG) && buffer.size() >= size) {
-        item.currentValue = formatValueOutput(buffer.data(), item.valueType);
-    } else {
-        item.currentValue = "读取失败";
-    }
+    return "读取失败";
 }
 
-bool ScanWindow::writeAddressValue(int index, const std::string& value)
+bool ScanWindow::writeAddressValue(uint64_t address, int valueType, const std::string& value)
 {
-    // 检查索引有效性
-    if (index < 0 || index >= (int)addressList.size()) {
-        return false;
-    }
-
     // 检查是否有进程附加
     if (!AppContext::Get().hasProcess()) {
         Gui::log("错误：未附加进程");
         return false;
     }
 
-    auto& item = addressList[index];
     std::vector<unsigned char> data;
 
     try {
         // 根据数值类型解析输入并转换为字节数组
-        switch (item.valueType) {
+        switch (valueType) {
             case 0: { // 1字节
-                int val = std::stoi(value);
-                if (val < 0 || val > 255) {
+                uint64_t parsed = 0;
+                if (!ParseAddressListUnsigned(value, 0xFF, parsed)) {
                     Gui::log("错误：值超出1字节范围 (0-255)");
                     return false;
                 }
-                data.push_back(static_cast<unsigned char>(val));
+                data.push_back(static_cast<unsigned char>(parsed));
                 break;
             }
             case 1: { // 2字节
-                int val = std::stoi(value);
-                if (val < 0 || val > 65535) {
+                uint64_t parsed = 0;
+                if (!ParseAddressListUnsigned(value, 0xFFFF, parsed)) {
                     Gui::log("错误：值超出2字节范围 (0-65535)");
                     return false;
                 }
-                uint16_t v = static_cast<uint16_t>(val);
+                uint16_t v = static_cast<uint16_t>(parsed);
                 data.resize(2);
                 std::memcpy(data.data(), &v, 2);
                 break;
             }
             case 2: { // 4字节
-                uint32_t val = static_cast<uint32_t>(std::stoul(value));
+                uint64_t parsed = 0;
+                if (!ParseAddressListUnsigned(value, 0xFFFFFFFFULL, parsed)) {
+                    Gui::log("错误：值超出4字节范围 (0-4294967295)");
+                    return false;
+                }
+                uint32_t val = static_cast<uint32_t>(parsed);
                 data.resize(4);
                 std::memcpy(data.data(), &val, 4);
                 break;
             }
             case 3: { // 8字节
-                uint64_t val = std::stoull(value);
+                uint64_t val = 0;
+                if (!ParseAddressListUnsigned(value, UINT64_MAX, val)) {
+                    Gui::log("错误：无效的8字节整数");
+                    return false;
+                }
                 data.resize(8);
                 std::memcpy(data.data(), &val, 8);
                 break;
@@ -478,10 +561,10 @@ bool ScanWindow::writeAddressValue(int index, const std::string& value)
         }
 
         // 写入内存
-        if (WriteProcessMemoryBytes(item.address, data.size(), data)) {
+        if (WriteProcessMemoryBytes(address, data.size(), data)) {
             return true;
         } else {
-            Gui::log("错误：写入内存失败 - 地址 0x%llX", (unsigned long long)item.address);
+            Gui::log("错误：写入内存失败 - 地址 0x%llX", (unsigned long long)address);
             return false;
         }
     } catch (const std::exception& e) {

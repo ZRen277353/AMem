@@ -75,4 +75,6 @@ struct AddressListItem {
     uint64_t address;
     int valueType;
     std::string currentValue;
-}; 
+    char editValueBuffer[64] = "";
+    bool valueEditActive = false;
+};

@@ -16,6 +16,7 @@
 ScanWindow::ScanWindow()
 {
     name = "数值扫描";
+    observedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
 }
 
 unsigned int ScanWindow::getWindowFlags() const
@@ -28,21 +29,74 @@ ScanWindow::~ScanWindow()
     // ScopedThread 析构时自动 requestStop + join
     // 但扫描线程依赖 scanCancelled 标志来中断服务端操作
     scanCancelled = true;
+    if (scanInProgress) {
+        StopSearchScan(PORT_DEBUG);
+    }
+}
+
+void ScanWindow::resetProcessState()
+{
+    scanCancelled = true;
+    if (scanInProgress) {
+        StopSearchScan(PORT_DEBUG);
+    }
+    scanThread.stop();
+    scanResultsRefreshThread.stop();
+    addressListRefreshThread.stop();
+
+    {
+        std::lock_guard<std::mutex> lock(scanResultsMutex);
+        scanResults.clear();
+        selectedScanResults.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(addressListMutex);
+        addressList.clear();
+    }
+
+    totalScanResults = 0;
+    resultOffset = 0;
+    scanCompleted = false;
+    scanError = false;
+    scanCancelled = false;
+    scanInProgress = false;
+    scanResultsRefreshProgress = 0;
+    scanResultsRefreshTotal = 0;
+    addressListRefreshProgress = 0;
+    addressListRefreshTotal = 0;
+    scanResultsFirstRefreshLog = true;
+    scanResultsLargePageWarningShown = false;
+    resultContextMenuAddress = 0;
+    resultContextMenuValue.clear();
+    resultContextMenuValueType = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(scanProgressMutex);
+        scanProgress = 0.0f;
+        scanMatchCount = 0;
+        scanTotalBytes = 0;
+        scanScannedBytes = 0;
+    }
 }
 
 void ScanWindow::onDraw()
 {
     auto& ctx = AppContext::Get();
+    const uint64_t processRevision = ctx.processRevision.load(std::memory_order_acquire);
+    if (processRevision != observedProcessRevision) {
+        observedProcessRevision = processRevision;
+        resetProcessState();
+    }
 
     // 窗口聚焦时的键盘快捷键
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
         // F5: 刷新地址值
         if (ImGui::IsKeyPressed(ImGuiKey_F5) && ctx.hasProcess()) {
-            refreshAddressValues();
+            refreshAddressValuesAsync();
         }
         // Enter/F9: 执行扫描（首次或再次）
         if (ImGui::IsKeyPressed(ImGuiKey_F9) && !scanInProgress && ctx.hasProcess()) {
-            if (totalScanResults == 0) {
+            if (totalScanResults.load() == 0) {
                 performFirstScanAsync();
             } else {
                 performNextScanAsync();
@@ -51,11 +105,12 @@ void ScanWindow::onDraw()
     }
 
     if (ctx.hasProcess()) {
+        const std::string processName = ctx.getSelectedName();
         ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)",
-            ctx.selectedName.c_str(), ctx.selectedPid.load());
+            processName.c_str(), ctx.selectedPid.load());
         ImGui::SameLine();
         if (ImGui::Button("刷新地址值")) {
-            refreshAddressValues();
+            refreshAddressValuesAsync();
         }
     } else {
         ImGui::TextDisabled("未附加进程");
