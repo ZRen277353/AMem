@@ -11,6 +11,10 @@
 #include <chrono>
 #include <cstring>
 #include <sstream>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 
 // 辅助函数：将 Lua 值转换为字符串（Lua 5.1 兼容版本）
 static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
@@ -85,11 +89,39 @@ static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
 // 辅助函数：检查地址参数
 uint64_t LuaAPI::CheckAddress(lua_State* L, int index) {
     if (lua_isnumber(L, index)) {
-        return static_cast<uint64_t>(lua_tonumber(L, index));
+        lua_Number number = lua_tonumber(L, index);
+        if (!std::isfinite(static_cast<double>(number)) || number < 0) {
+            luaL_error(L, "Address must be a non-negative finite number");
+            return 0;
+        }
+        return static_cast<uint64_t>(number);
     } else if (lua_isstring(L, index)) {
         // 支持十六进制字符串 "0x12345678"
         const char* str = lua_tostring(L, index);
-        return std::strtoull(str, nullptr, 0);
+        const char* begin = str;
+        while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+            ++begin;
+        }
+        if (*begin == '-' || *begin == '\0') {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+
+        char* end = nullptr;
+        errno = 0;
+        uint64_t address = std::strtoull(begin, &end, 0);
+        if (end == begin || errno == ERANGE) {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+        while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+            ++end;
+        }
+        if (*end != '\0') {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+        return address;
     }
     luaL_error(L, "Expected number or hex string for address");
     return 0;
@@ -386,7 +418,12 @@ int LuaAPI::Log(lua_State* L) {
 }
 
 int LuaAPI::Sleep(lua_State* L) {
-    int milliseconds = static_cast<int>(luaL_checkinteger(L, 1));
+    lua_Integer rawMilliseconds = luaL_checkinteger(L, 1);
+    if (rawMilliseconds < 0 || rawMilliseconds > (std::numeric_limits<int>::max)()) {
+        luaL_error(L, "sleep duration must be non-negative");
+        return 0;
+    }
+    int milliseconds = static_cast<int>(rawMilliseconds);
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
     return 0;
 }
