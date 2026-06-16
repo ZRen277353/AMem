@@ -219,6 +219,36 @@ bool parseUnsignedValue(const std::string& text, uint64_t& value, int defaultBas
     return true;
 }
 
+bool parseFloatValue(const std::string& text, float& value)
+{
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+bool parseDoubleValue(const std::string& text, double& value)
+{
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
 void markNodesUnavailable(std::vector<DissectNode>& nodes)
 {
     for (auto& node : nodes) {
@@ -1194,12 +1224,18 @@ bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseA
                 break;
             }
             case FieldType::FLOAT: {
-                float val = std::stof(valueStr);
+                float val = 0.0f;
+                if (!parseFloatValue(valueStr, val)) {
+                    return false;
+                }
                 appendDissectScalar(data, val);
                 break;
             }
             case FieldType::DOUBLE: {
-                double val = std::stod(valueStr);
+                double val = 0.0;
+                if (!parseDoubleValue(valueStr, val)) {
+                    return false;
+                }
                 appendDissectScalar(data, val);
                 break;
             }
@@ -1751,12 +1787,14 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
                 break;
             }
             case FieldType::FLOAT: {
-                float parsed = std::stof(value);
+                float parsed = 0.0f;
+                if (!parseFloatValue(value, parsed)) return false;
                 appendDissectScalar(data, parsed);
                 break;
             }
             case FieldType::DOUBLE: {
-                double parsed = std::stod(value);
+                double parsed = 0.0;
+                if (!parseDoubleValue(value, parsed)) return false;
                 appendDissectScalar(data, parsed);
                 break;
             }

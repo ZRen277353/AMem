@@ -169,6 +169,34 @@ static bool parseWatchUnsignedValue(const std::string& text, uint64_t maxValue, 
     return end != str && *end == '\0' && errno != ERANGE && value <= maxValue;
 }
 
+static bool parseWatchFloatValue(const std::string& text, float& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+static bool parseWatchDoubleValue(const std::string& text, double& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
 static std::vector<uint16_t> watchUtf8ToUtf16Units(const std::string& text) {
     std::vector<uint16_t> units;
     for (size_t i = 0; i < text.size();) {
@@ -790,13 +818,21 @@ bool MemoryViewerWindow::writeWatchItemValue(MemoryWatchItem& item, const std::s
             }
             
             case FieldType::FLOAT: {
-                float val = std::stof(value);
+                float val = 0.0f;
+                if (!parseWatchFloatValue(value, val)) {
+                    Gui::log("错误：无效的FLOAT值");
+                    return false;
+                }
                 appendWatchScalar(data, val);
                 break;
             }
             
             case FieldType::DOUBLE: {
-                double val = std::stod(value);
+                double val = 0.0;
+                if (!parseWatchDoubleValue(value, val)) {
+                    Gui::log("错误：无效的DOUBLE值");
+                    return false;
+                }
                 appendWatchScalar(data, val);
                 break;
             }

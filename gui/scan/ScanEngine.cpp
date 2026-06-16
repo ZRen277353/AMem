@@ -68,6 +68,36 @@ static bool ParseUnsignedIntegerStrict(const std::string& input, int base, uint6
     return *end == '\0';
 }
 
+static bool ParseFloatStrict(const std::string& input, float& value)
+{
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+static bool ParseDoubleStrict(const std::string& input, double& value)
+{
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
 std::vector<unsigned char> ScanWindow::parseValueInput(const std::string& input, int type)
 {
     std::vector<unsigned char> result;
@@ -118,13 +148,21 @@ std::vector<unsigned char> ScanWindow::parseValueInput(const std::string& input,
                 break;
             }
             case 4: { // 单精度浮点
-                float value = std::stof(input);
+                float value = 0.0f;
+                if (!ParseFloatStrict(input, value)) {
+                    result.clear();
+                    break;
+                }
                 result.resize(4);
                 std::memcpy(result.data(), &value, 4);
                 break;
             }
             case 5: { // 双精度浮点
-                double value = std::stod(input);
+                double value = 0.0;
+                if (!ParseDoubleStrict(input, value)) {
+                    result.clear();
+                    break;
+                }
                 result.resize(8);
                 std::memcpy(result.data(), &value, 8);
                 break;

@@ -48,6 +48,36 @@ static bool ParseAddressListUnsigned(const std::string& input, uint64_t maxValue
     return *end == '\0';
 }
 
+static bool ParseAddressListFloat(const std::string& input, float& value)
+{
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+static bool ParseAddressListDouble(const std::string& input, double& value)
+{
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
 void ScanWindow::drawAddressListPanel()
 {
     const char* value_types[] = {
@@ -544,13 +574,21 @@ bool ScanWindow::writeAddressValue(uint64_t address, int valueType, const std::s
                 break;
             }
             case 4: { // 单精度浮点
-                float val = std::stof(value);
+                float val = 0.0f;
+                if (!ParseAddressListFloat(value, val)) {
+                    Gui::log("错误：无效的浮点数");
+                    return false;
+                }
                 data.resize(4);
                 std::memcpy(data.data(), &val, 4);
                 break;
             }
             case 5: { // 双精度浮点
-                double val = std::stod(value);
+                double val = 0.0;
+                if (!ParseAddressListDouble(value, val)) {
+                    Gui::log("错误：无效的双精度浮点数");
+                    return false;
+                }
                 data.resize(8);
                 std::memcpy(data.data(), &val, 8);
                 break;
