@@ -12,6 +12,11 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <cctype>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
+#include <stdexcept>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -238,10 +243,27 @@ static std::string BytesToHex(const std::vector<unsigned char>& data) {
     return oss.str();
 }
 
+static int HexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static std::vector<unsigned char> HexToBytes(const std::string& hex) {
+    if ((hex.size() % 2) != 0) {
+        throw std::invalid_argument("hex string must contain an even number of digits");
+    }
+
     std::vector<unsigned char> out;
-    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
-        out.push_back((unsigned char)std::stoi(hex.substr(i, 2), nullptr, 16));
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int hi = HexNibble(hex[i]);
+        int lo = HexNibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) {
+            throw std::invalid_argument("hex string contains non-hex characters");
+        }
+        out.push_back(static_cast<unsigned char>((hi << 4) | lo));
     }
     return out;
 }
@@ -250,7 +272,31 @@ static uint64_t ParseAddress(const json& params, const std::string& key) {
     auto& v = params.at(key);
     if (v.is_string()) {
         std::string s = v.get<std::string>();
-        return std::stoull(s, nullptr, (s.size() > 2 && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10);
+        size_t begin = s.find_first_not_of(" \t\r\n");
+        size_t endPos = s.find_last_not_of(" \t\r\n");
+        if (begin == std::string::npos || s[begin] == '-') {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        s = s.substr(begin, endPos - begin + 1);
+
+        char* end = nullptr;
+        errno = 0;
+        const int base = (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10;
+        uint64_t parsed = std::strtoull(s.c_str(), &end, base);
+        if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        return parsed;
+    }
+    if (v.is_number_unsigned()) {
+        return v.get<uint64_t>();
+    }
+    if (v.is_number_integer()) {
+        int64_t parsed = v.get<int64_t>();
+        if (parsed < 0) {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        return static_cast<uint64_t>(parsed);
     }
     return v.get<uint64_t>();
 }

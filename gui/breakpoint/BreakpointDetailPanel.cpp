@@ -11,6 +11,16 @@
 #include <cmath>
 #include <memory>
 
+namespace {
+template <typename To, typename From>
+To bitCopy(const From& value) {
+    static_assert(sizeof(To) == sizeof(From), "bitCopy requires equal sizes");
+    To out{};
+    std::memcpy(&out, &value, sizeof(To));
+    return out;
+}
+}
+
 void BreakpointWindow::openBreakpointDetailWindow(int breakpointIndex)
 {
     if (breakpointIndex < 0 || breakpointIndex >= (int)breakpoints.size()) {
@@ -1068,7 +1078,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     if (fpDisplayMode == 1) {
                         // 双精度浮点数 (64位)
                         ImGui::TableSetColumnIndex(3);
-                        double dLow = *reinterpret_cast<double*>(&low64);
+                        double dLow = bitCopy<double>(low64);
                         int specialLow = highlightSpecial ? isFloatSpecial(dLow) : 0;
                         ImVec4 colorLow = ColorScheme::FloatValue;
                         if (specialLow == 1) colorLow = ColorScheme::WarningLight;      // 零值
@@ -1086,7 +1096,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         }
                         
                         ImGui::TableSetColumnIndex(4);
-                        double dHigh = *reinterpret_cast<double*>(&high64);
+                        double dHigh = bitCopy<double>(high64);
                         int specialHigh = highlightSpecial ? isFloatSpecial(dHigh) : 0;
                         ImVec4 colorHigh = ColorScheme::FloatValue;
                         if (specialHigh == 1) colorHigh = ColorScheme::WarningLight;
@@ -1112,7 +1122,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                         
                         for (int j = 0; j < 4; j++) {
                             ImGui::TableSetColumnIndex(3 + j);
-                            float fVal = *reinterpret_cast<float*>(&fValues[j]);
+                            float fVal = bitCopy<float>(fValues[j]);
                             int special = highlightSpecial ? isFloat32Special(fVal) : 0;
                             ImVec4 color = ColorScheme::FloatValue;
                             if (special == 1) color = ColorScheme::WarningLight;
