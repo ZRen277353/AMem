@@ -4,7 +4,26 @@
 #include "../imgui/imgui.h"
 #include <algorithm>
 
+void AppContext::cleanupCurrentProcessServices() {
+    if (!hasProcess()) {
+        return;
+    }
+
+    const int handle = processHandle.load(std::memory_order_relaxed);
+    StopSearchScan(PORT_DEBUG);
+    ClearTrackedKernelBreakpoints(PORT_MAIN);
+    FreezeClear(PORT_MAIN);
+    ClearScanResult(PORT_MAIN);
+    CloseProcessHandle(handle, PORT_MAIN);
+}
+
 void AppContext::selectProcess(int pid, const std::string& name) {
+    const bool hadProcess = hasProcess();
+    if (hadProcess) {
+        processRevision.fetch_add(1, std::memory_order_release);
+    }
+
+    cleanupCurrentProcessServices();
     selectedPid.store(0, std::memory_order_relaxed);
     processHandle.store(0, std::memory_order_relaxed);
     int handle = 0;
@@ -27,6 +46,28 @@ void AppContext::selectProcess(int pid, const std::string& name) {
     }
 
     moduleCache.invalidate();
+    if (!hadProcess) {
+        processRevision.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void AppContext::clearProcess() {
+    const bool hadProcess = hasProcess();
+    if (hadProcess) {
+        processRevision.fetch_add(1, std::memory_order_release);
+    }
+
+    cleanupCurrentProcessServices();
+    selectedPid.store(0, std::memory_order_relaxed);
+    processHandle.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(nameMutex_);
+        selectedName_.clear();
+    }
+    moduleCache.invalidate();
+    if (!hadProcess) {
+        processRevision.fetch_add(1, std::memory_order_release);
+    }
 }
 
 void AppContext::ModuleCache::refresh() {

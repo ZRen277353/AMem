@@ -26,9 +26,10 @@ std::mutex *WinSocketClientMgr::GetMutex(PortType type) {
 }
 
 bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port) {
+  DisconnectMultiPort();
   std::cout << "[MultiPort] Connecting to server..." << std::endl;
   std::cout << "  Main:  " << host << ":" << Port << std::endl;
-  AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
+  AppContext::Get().clearProcess();
 
   if (!m_main_client.Connect(host, Port)) {
     std::cerr << "[MultiPort] Failed to connect MAIN port" << std::endl;
@@ -52,14 +53,13 @@ bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port
 }
 
 void WinSocketClientMgr::DisconnectMultiPort() {
-  if (!m_connected.load(std::memory_order_acquire))
-    return;
+  bool wasConnected = m_connected.exchange(false, std::memory_order_acq_rel);
+  AppContext::Get().clearProcess();
   m_main_client.Close();
   m_debug_client.Close();
   m_error_client.Close();
-  AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
-  m_connected.store(false, std::memory_order_release);
-  std::cout << "[MultiPort] All ports disconnected" << std::endl;
+  if (wasConnected)
+    std::cout << "[MultiPort] All ports disconnected" << std::endl;
 }
 
 bool WinSocketClientMgr::IsMultiPortConnected() {
@@ -119,4 +119,28 @@ bool EnsureOpenHandle(int &outHandle, PortType type) {
   if (pid == 0)
     return false;
   return OpenProcessHandle(pid, outHandle, type);
+}
+
+bool CloseProcessHandle(int handle, PortType type) {
+  if (handle == 0)
+    return true;
+
+  auto client = GetSocketMgr().GetClient(type);
+  if (!client || !client->IsConnected())
+    return false;
+
+  auto portMutex = GetSocketMgr().GetMutex(type);
+  return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
+      portMutex, [&]() -> bool {
+        client->DrainPending();
+        unsigned char command = CMD_CLOSEHANDLE;
+        if (!client->Send(&command, sizeof(command)))
+          return false;
+        if (!client->Send(&handle, sizeof(handle)))
+          return false;
+        int result = 0;
+        if (!client->Receive(&result, sizeof(result)))
+          return false;
+        return result != 0;
+      });
 }

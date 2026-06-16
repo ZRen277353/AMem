@@ -3,6 +3,7 @@
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
 #include "../socket/client_singleton.h"
+#include "../gui/AppContext.h"
 #include "../gui/Gui.h"
 #include <string>
 #include <vector>
@@ -192,9 +193,8 @@ int LuaAPI::GetProcessList(lua_State* L) {
 
 int LuaAPI::AttachProcess(lua_State* L) {
     int pid = static_cast<int>(luaL_checkinteger(L, 1));
-    int handle;
-    if (OpenProcessHandle(pid, handle)) {
-        SetCurrentPid(pid);
+    AppContext::Get().selectProcess(pid, "");
+    if (AppContext::Get().hasProcess()) {
         lua_pushboolean(L, 1);
         return 1;
     }
