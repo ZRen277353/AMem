@@ -261,7 +261,9 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     
     uint64_t pageNumber = pageBaseAddress / pageSize;
     uint64_t pageEndAddress = pageBaseAddress;
-    addressSpanEndInclusive(pageBaseAddress, static_cast<size_t>(pageSize), pageEndAddress);
+    if (!addressSpanEndInclusive(pageBaseAddress, static_cast<size_t>(pageSize), pageEndAddress)) {
+        pageEndAddress = UINT64_MAX;
+    }
     ImGui::TextColored(ColorScheme::SuccessLight, "页#%llu", pageNumber);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("当前页号: %llu\n页首: 0x%llX\n页范围: 0x%llX - 0x%llX\n页大小: %d 字节", 
