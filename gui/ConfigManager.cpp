@@ -4,6 +4,29 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
+#include <cerrno>
+#include <limits>
+
+namespace {
+bool parseIntStrict(const std::string& text, int& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    long parsed = std::strtol(str, &end, 10);
+    if (end == str || errno == ERANGE ||
+        parsed < (std::numeric_limits<int>::min)() ||
+        parsed > (std::numeric_limits<int>::max)()) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    value = static_cast<int>(parsed);
+    return *end == '\0';
+}
+}
 
 bool ConfigManager::loadConfig(const std::string& filename) {
     configMap.clear();
@@ -47,11 +70,8 @@ std::string ConfigManager::getString(const std::string& key, const std::string& 
 int ConfigManager::getInt(const std::string& key, int defaultValue) const {
     auto it = configMap.find(key);
     if (it != configMap.end()) {
-        try {
-            return std::stoi(it->second);
-        } catch (...) {
-            return defaultValue;
-        }
+        int value = 0;
+        return parseIntStrict(it->second, value) ? value : defaultValue;
     }
     return defaultValue;
 }

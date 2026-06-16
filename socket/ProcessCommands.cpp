@@ -1,6 +1,8 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
 #include <ctime>
+#include <cerrno>
+#include <cstdlib>
 
 namespace {
 constexpr int kMaxProcessCount = 65536;
@@ -12,6 +14,20 @@ constexpr int kMaxDriverResponseSize = 64 * 1024;
 
 bool isValidCount(int value, int maxValue) {
     return value >= 0 && value <= maxValue;
+}
+
+bool parseTimestampMs(const std::string& text, uint64_t& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, 10);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
 }
 } // namespace
 
@@ -66,13 +82,23 @@ bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
     if (ret > 0) {
         try {
             std::string timestampStr(resStrVec.data(), resStrVec.size());
-            uint64_t timestamp_ms = std::stoull(timestampStr);
+            uint64_t timestamp_ms = 0;
+            if (!parseTimestampMs(timestampStr, timestamp_ms)) {
+                resStr = "时间戳解析失败";
+                return true;
+            }
             time_t timestamp = static_cast<time_t>(timestamp_ms / 1000);
             if (timestamp > 0) {
-                std::tm *timeinfo = std::localtime(&timestamp);
-                if (timeinfo != nullptr) {
+                std::tm timeinfo{};
+#ifdef _WIN32
+                if (localtime_s(&timeinfo, &timestamp) == 0) {
+#else
+                std::tm *local = std::localtime(&timestamp);
+                if (local != nullptr) {
+                    timeinfo = *local;
+#endif
                     char dateTime[20];
-                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", timeinfo);
+                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeinfo);
                     resStr = dateTime;
                 } else {
                     resStr = "时间格式化失败";

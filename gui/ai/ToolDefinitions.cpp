@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <exception>
 #include <initializer_list>
 #include <string>
@@ -263,6 +264,36 @@ uint64_t parseIntegerBits(const std::string& text, int bits, const std::string& 
     return static_cast<uint64_t>(v);
 }
 
+float parseFloatValueStrict(const std::string& text, const std::string& typeName) {
+    const std::string s = trimAsciiCopy(text);
+    if (s.empty()) {
+        throw std::runtime_error(typeName + " value is empty");
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const float value = std::strtof(s.c_str(), &end);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+        throw std::runtime_error("invalid " + typeName + " value");
+    }
+    return value;
+}
+
+double parseDoubleValueStrict(const std::string& text, const std::string& typeName) {
+    const std::string s = trimAsciiCopy(text);
+    if (s.empty()) {
+        throw std::runtime_error(typeName + " value is empty");
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const double value = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+        throw std::runtime_error("invalid " + typeName + " value");
+    }
+    return value;
+}
+
 std::string valueTypeFromArgs(const json& args, const std::string& fallback = "dword") {
     if (args.contains("value_type") && args["value_type"].is_string()) {
         return args["value_type"].get<std::string>();
@@ -411,11 +442,11 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
     } else if (t == "int64") {
         out = integerToLittleEndian(parseIntegerBits(asString(), 64, valueType), 8);
     } else if (t == "float") {
-        const float fv = std::stof(asString());
+        const float fv = parseFloatValueStrict(asString(), valueType);
         out.resize(sizeof(fv));
         std::memcpy(out.data(), &fv, sizeof(fv));
     } else if (t == "double") {
-        const double dv = std::stod(asString());
+        const double dv = parseDoubleValueStrict(asString(), valueType);
         out.resize(sizeof(dv));
         std::memcpy(out.data(), &dv, sizeof(dv));
     } else if (t == "bytes") {
