@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cmath>
+#include <cctype>
 #include <vector>
 
 CEWindow::CEWindow()
@@ -86,7 +87,8 @@ void CEWindow::drawSelectedProcessBanner()
     auto& ctx = AppContext::Get();
     int pid = ctx.selectedPid.load();
     if (pid != 0) {
-        ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", ctx.selectedName.c_str(), pid);
+        const std::string processName = ctx.getSelectedName();
+        ImGui::TextColored(ColorScheme::SuccessBright, "已附加: %s (PID %d)", processName.c_str(), pid);
         ImGui::SameLine();
         if (ImGui::Button("模块列表")) {
             openModulesWindow();
@@ -98,16 +100,18 @@ void CEWindow::drawSelectedProcessBanner()
 
 void CEWindow::drawProcessSelectModal()
 {
+    static std::vector<ProcessInfoItem> list;
+    static char filterText[256] = "";
+    static bool listLoadAttempted = false;
+
     if (openProcessModal)
         ImGui::OpenPopup("进程列表");
 
     if (ImGui::BeginPopupModal("进程列表", &openProcessModal, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        static std::vector<ProcessInfoItem> list;
-        static char filterText[256] = "";
-
         if (ImGui::Button("刷新")) {
             list.clear();
+            listLoadAttempted = true;
             if (!FetchProcessList(list))
                 Gui::log("获取进程列表失败，请检查服务器连接状态");
         }
@@ -116,27 +120,31 @@ void CEWindow::drawProcessSelectModal()
         ImGui::InputTextWithHint("##filter", "输入进程名称进行过滤...", filterText, sizeof(filterText));
 
         ImGui::Separator();
+        if (!listLoadAttempted) {
+            list.clear();
+            listLoadAttempted = true;
+            if (!FetchProcessList(list))
+                Gui::log("获取进程列表失败，请检查服务器连接状态");
+        }
+
         if (ImGui::BeginChild("proc_modal", ImVec2(600, 400), ImGuiChildFlags_Borders))
         {
             if (ImGui::BeginTable("proc_modal_tbl", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
                 ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 120.0f);
                 ImGui::TableSetupColumn("进程名", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableHeadersRow();
-                if (list.empty()) {
-                    FetchProcessList(list);
-                }
 
                 // 应用过滤器
                 std::string filterStr(filterText);
                 for (size_t i = 0; i < filterStr.length(); i++) {
-                    filterStr[i] = tolower(filterStr[i]);
+                    filterStr[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(filterStr[i])));
                 }
 
                 for (auto& it : list) {
                     if (filterStr.length() > 0) {
                         std::string nameLower = it.name;
                         for (size_t i = 0; i < nameLower.length(); i++) {
-                            nameLower[i] = tolower(nameLower[i]);
+                            nameLower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(nameLower[i])));
                         }
                         if (nameLower.find(filterStr) == std::string::npos) {
                             continue;
@@ -151,14 +159,21 @@ void CEWindow::drawProcessSelectModal()
                         AppContext::Get().selectProcess(it.pid, it.name);
                         ImGui::CloseCurrentPopup();
                         openProcessModal = false;
+                        listLoadAttempted = false;
                     }
                 }
                 ImGui::EndTable();
             }
         }
         ImGui::EndChild();
-        if (ImGui::Button("关闭")) { ImGui::CloseCurrentPopup(); openProcessModal = false; }
+        if (ImGui::Button("关闭")) {
+            ImGui::CloseCurrentPopup();
+            openProcessModal = false;
+            listLoadAttempted = false;
+        }
         ImGui::EndPopup();
+    } else if (!openProcessModal) {
+        listLoadAttempted = false;
     }
 }
 
@@ -192,7 +207,8 @@ void CEWindow::onDraw()
     ImGui::Text("CheatEngine 主控制面板");
     ImGui::Separator();
 
-    ImGui::Text("当前进程: %s (PID: %d)", ctx.selectedName.c_str(), ctx.selectedPid.load());
+    const std::string processName = ctx.getSelectedName();
+    ImGui::Text("当前进程: %s (PID: %d)", processName.c_str(), ctx.selectedPid.load());
     ImGui::Spacing();
 
     ImGui::Text("可用功能窗口:");

@@ -10,36 +10,116 @@
 #include <iomanip>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cerrno>
+
+namespace {
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& result)
+{
+    if (base > UINT64_MAX - offset) {
+        result = 0;
+        return false;
+    }
+
+    result = base + offset;
+    return true;
+}
+
+bool addressSpanEndInclusive(uint64_t start, size_t size, uint64_t& end)
+{
+    if (size == 0) {
+        end = start;
+        return true;
+    }
+
+    const uint64_t lastOffset = static_cast<uint64_t>(size - 1);
+    return addAddressOffset(start, lastOffset, end);
+}
+
+bool addressInSpan(uint64_t start, size_t size, uint64_t address)
+{
+    return address >= start && static_cast<uint64_t>(address - start) < static_cast<uint64_t>(size);
+}
+
+bool parseHexStrict(const char* text, uint64_t& value)
+{
+    if (!text) {
+        return false;
+    }
+
+    const char* begin = text;
+    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+        ++begin;
+    }
+    if (*begin == '\0' || *begin == '-') {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(begin, &end, 16);
+    if (end == begin || errno == ERANGE) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+
+    return *end == '\0';
+}
+
+void resetHexInput(char* buffer, size_t size)
+{
+    std::snprintf(buffer, size, "%s", "0");
+}
+
+template <typename T>
+bool readScalar(const std::vector<unsigned char>& data, int offset, T& value)
+{
+    if (offset < 0 || (size_t)offset + sizeof(T) > data.size()) {
+        return false;
+    }
+
+    std::memcpy(&value, data.data() + offset, sizeof(T));
+    return true;
+}
+}
 
 void MemoryViewerWindow::drawMemoryViewerPanel()
 {
+    auto navigateToHistoryIndex = [this](int newHistoryIndex) {
+        if (newHistoryIndex < 0 || newHistoryIndex >= (int)addressHistory.size()) {
+            return;
+        }
+
+        historyIndex = newHistoryIndex;
+        uint64_t historyAddr = addressHistory[historyIndex];
+        targetAddress = historyAddr;
+        pageBaseAddress = (historyAddr / pageSize) * pageSize;
+        viewAddress = pageBaseAddress;
+        viewSize = pageSize;
+        buffer.resize(viewSize);
+
+        if (!ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer, PORT_DEBUG)) {
+            std::fill(buffer.begin(), buffer.end(), 0);
+            Gui::log("读取历史地址失败: 0x%llX", (unsigned long long)historyAddr);
+        }
+        scrollToTarget = true;
+    };
+
     // 窗口聚焦时的键盘快捷键
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::GetIO().WantTextInput) {
         ImGuiIO& io = ImGui::GetIO();
         if (io.KeyAlt) {
             // Alt+Left: 后退
             if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && historyIndex > 0) {
-                historyIndex--;
-                uint64_t historyAddr = addressHistory[historyIndex];
-                targetAddress = historyAddr;
-                pageBaseAddress = (historyAddr / pageSize) * pageSize;
-                viewAddress = pageBaseAddress;
-                viewSize = pageSize;
-                buffer.resize(viewSize);
-                ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
-                scrollToTarget = true;
+                navigateToHistoryIndex(historyIndex - 1);
             }
             // Alt+Right: 前进
             if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && historyIndex < (int)addressHistory.size() - 1) {
-                historyIndex++;
-                uint64_t historyAddr = addressHistory[historyIndex];
-                targetAddress = historyAddr;
-                pageBaseAddress = (historyAddr / pageSize) * pageSize;
-                viewAddress = pageBaseAddress;
-                viewSize = pageSize;
-                buffer.resize(viewSize);
-                ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
-                scrollToTarget = true;
+                navigateToHistoryIndex(historyIndex + 1);
             }
         }
         if (io.KeyCtrl) {
@@ -85,15 +165,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::BeginDisabled(historyIndex <= 0);
     if (ImGui::ArrowButton("##back", ImGuiDir_Left)) {
         if (historyIndex > 0) {
-            historyIndex--;
-            uint64_t historyAddr = addressHistory[historyIndex];
-            targetAddress = historyAddr;
-            pageBaseAddress = (historyAddr / pageSize) * pageSize;
-            viewAddress = pageBaseAddress;
-            viewSize = pageSize;
-            buffer.resize(viewSize);
-            ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
-            scrollToTarget = true;
+            navigateToHistoryIndex(historyIndex - 1);
         }
     }
     ImGui::EndDisabled();
@@ -103,15 +175,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::BeginDisabled(historyIndex >= (int)addressHistory.size() - 1);
     if (ImGui::ArrowButton("##forward", ImGuiDir_Right)) {
         if (historyIndex < (int)addressHistory.size() - 1) {
-            historyIndex++;
-            uint64_t historyAddr = addressHistory[historyIndex];
-            targetAddress = historyAddr;
-            pageBaseAddress = (historyAddr / pageSize) * pageSize;
-            viewAddress = pageBaseAddress;
-            viewSize = pageSize;
-            buffer.resize(viewSize);
-            ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer);
-            scrollToTarget = true;
+            navigateToHistoryIndex(historyIndex + 1);
         }
     }
     ImGui::EndDisabled();
@@ -127,26 +191,23 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::SetNextItemWidth(200);
     
     // 使用targetAddress作为显示地址（目标地址而不是页首）
-    static char addressInputBuf[64] = "";
-    static uint64_t lastTargetAddress = 0;
-    
     // 当目标地址改变时，更新输入框显示
-    if (targetAddress != lastTargetAddress) {
-        snprintf(addressInputBuf, sizeof(addressInputBuf), "%llX", targetAddress);
-        lastTargetAddress = targetAddress;
+    if (targetAddress != lastHexAddressInputTarget) {
+        snprintf(hexAddressInputBuf, sizeof(hexAddressInputBuf), "%llX", targetAddress);
+        lastHexAddressInputTarget = targetAddress;
     }
     
-    if (ImGui::InputText("##addr", addressInputBuf, sizeof(addressInputBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (ImGui::InputText("##addr", hexAddressInputBuf, sizeof(hexAddressInputBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
         // 解析地址表达式
         uint64_t newAddress = 0;
-        if (parseAddressExpression(addressInputBuf, newAddress)) {
+        if (parseAddressExpression(hexAddressInputBuf, newAddress)) {
             jumpToAddress(newAddress);
             // 更新输入框显示为计算后的地址
-            snprintf(addressInputBuf, sizeof(addressInputBuf), "%llX", newAddress);
+            snprintf(hexAddressInputBuf, sizeof(hexAddressInputBuf), "%llX", newAddress);
         } else {
-            Gui::log("无效的地址表达式: %s", addressInputBuf);
+            Gui::log("无效的地址表达式: %s", hexAddressInputBuf);
             // 恢复为上次有效的地址
-            snprintf(addressInputBuf, sizeof(addressInputBuf), "%llX", targetAddress);
+            snprintf(hexAddressInputBuf, sizeof(hexAddressInputBuf), "%llX", targetAddress);
         }
     }
     
@@ -157,7 +218,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::SameLine();
     if (ImGui::Button("读取")) {
         uint64_t addr = 0;
-        if (parseAddressExpression(addressInputBuf, addr)) {
+        if (parseAddressExpression(hexAddressInputBuf, addr)) {
             jumpToAddress(addr);
         }
     }
@@ -184,8 +245,12 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     
     ImGui::SameLine();
     if (ImGui::Button("下一页")) {
-        uint64_t newAddress = pageBaseAddress + pageSize;
-        jumpToAddress(newAddress);
+        if (pageBaseAddress <= UINT64_MAX - (uint64_t)pageSize) {
+            uint64_t newAddress = pageBaseAddress + pageSize;
+            jumpToAddress(newAddress);
+        } else {
+            Gui::log("已到达地址空间末尾，无法继续下一页");
+        }
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("向下翻页");
     
@@ -195,14 +260,18 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
     ImGui::SameLine();
     
     uint64_t pageNumber = pageBaseAddress / pageSize;
+    uint64_t pageEndAddress = pageBaseAddress;
+    if (!addressSpanEndInclusive(pageBaseAddress, static_cast<size_t>(pageSize), pageEndAddress)) {
+        pageEndAddress = UINT64_MAX;
+    }
     ImGui::TextColored(ColorScheme::SuccessLight, "页#%llu", pageNumber);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("当前页号: %llu\n页首: 0x%llX\n页范围: 0x%llX - 0x%llX\n页大小: %d 字节", 
                          pageNumber, pageBaseAddress, 
-                         pageBaseAddress, pageBaseAddress + pageSize - 1, pageSize);
+                         pageBaseAddress, pageEndAddress, pageSize);
     }
     
-    if (targetAddress >= pageBaseAddress && targetAddress < pageBaseAddress + pageSize) {
+    if (addressInSpan(pageBaseAddress, static_cast<size_t>(pageSize), targetAddress)) {
         ImGui::SameLine();
         uint64_t offsetInPage = targetAddress - pageBaseAddress;
         ImGui::TextColored(ColorScheme::WarningLight, "+0x%llX", offsetInPage);
@@ -298,6 +367,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         ImGui::SameLine();
         ImGui::SetNextItemWidth(50);
         ImGui::InputFloat("##interval", &refreshInterval, 0, 0, "%.1f");
+        if (refreshInterval < 0.1f) refreshInterval = 0.1f;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("刷新间隔(秒)");
         ImGui::SameLine();
         ImGui::Text("秒");
@@ -342,10 +412,12 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         ImGui::SameLine();
         if (ImGui::SmallButton("添加偏移")) {
             uint64_t newOffset = 0;
-            std::sscanf(newOffsetBuf, "%llx", &newOffset);
-            offsetChain.push_back(newOffset);
-            memset(newOffsetBuf, 0, sizeof(newOffsetBuf));
-            strcpy(newOffsetBuf, "0");
+            if (parseHexStrict(newOffsetBuf, newOffset)) {
+                offsetChain.push_back(newOffset);
+                resetHexInput(newOffsetBuf, sizeof(newOffsetBuf));
+            } else {
+                Gui::log("无效的偏移值: %s", newOffsetBuf);
+            }
         }
         
         ImGui::SameLine();
@@ -367,16 +439,19 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                 chainPath += " + 0x" + std::string(baseOffsetBuf);
                 for (size_t i = 0; i < offsetChain.size(); i++) {
                     char offsetStr[32];
-                    sprintf(offsetStr, " -> [+0x%llX]", offsetChain[i]);
+                    std::snprintf(offsetStr, sizeof(offsetStr), " -> [+0x%llX]", offsetChain[i]);
                     chainPath += offsetStr;
                 }
                 ImGui::TextWrapped("%s", chainPath.c_str());
                 
                 ImGui::Separator();
                 
-                // 偏移项列表
+                int pendingDeleteOffsetIndex = -1;
+                int pendingMoveOffsetIndex = -1;
+                int pendingMoveDirection = 0;
                 for (size_t i = 0; i < offsetChain.size(); i++) {
                     ImGui::PushID((int)i);
+                // 偏移项列表
                     
                     bool isSelected = (selectedOffsetIndex == (int)i);
                     if (isSelected) {
@@ -384,14 +459,14 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                     }
                     
                     char label[64];
-                    sprintf(label, "[%d] +0x%llX", (int)i, offsetChain[i]);
+                    std::snprintf(label, sizeof(label), "[%d] +0x%llX", (int)i, offsetChain[i]);
                     
                     if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_AllowDoubleClick)) {
                         selectedOffsetIndex = (int)i;
                         
                         // 双击编辑
                         if (ImGui::IsMouseDoubleClicked(0)) {
-                            sprintf(newOffsetBuf, "%llX", offsetChain[i]);
+                            std::snprintf(newOffsetBuf, sizeof(newOffsetBuf), "%llX", offsetChain[i]);
                         }
                     }
                     
@@ -407,31 +482,43 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                         ImGui::Separator();
                         
                         if (ImGui::MenuItem("编辑")) {
-                            sprintf(newOffsetBuf, "%llX", offsetChain[i]);
+                            std::snprintf(newOffsetBuf, sizeof(newOffsetBuf), "%llX", offsetChain[i]);
                             selectedOffsetIndex = (int)i;
                         }
                         
                         if (ImGui::MenuItem("删除")) {
-                            offsetChain.erase(offsetChain.begin() + i);
-                            if (selectedOffsetIndex >= (int)offsetChain.size()) {
-                                selectedOffsetIndex = -1;
-                            }
+                            pendingDeleteOffsetIndex = (int)i;
                         }
                         
                         if (ImGui::MenuItem("上移", nullptr, false, i > 0)) {
-                            std::swap(offsetChain[i], offsetChain[i - 1]);
-                            selectedOffsetIndex = (int)(i - 1);
+                            pendingMoveOffsetIndex = (int)i;
+                            pendingMoveDirection = -1;
                         }
                         
                         if (ImGui::MenuItem("下移", nullptr, false, i < offsetChain.size() - 1)) {
-                            std::swap(offsetChain[i], offsetChain[i + 1]);
-                            selectedOffsetIndex = (int)(i + 1);
+                            pendingMoveOffsetIndex = (int)i;
+                            pendingMoveDirection = 1;
                         }
                         
                         ImGui::EndPopup();
                     }
                     
                     ImGui::PopID();
+                }
+
+                if (pendingDeleteOffsetIndex >= 0 && pendingDeleteOffsetIndex < (int)offsetChain.size()) {
+                    offsetChain.erase(offsetChain.begin() + pendingDeleteOffsetIndex);
+                    if (selectedOffsetIndex == pendingDeleteOffsetIndex) {
+                        selectedOffsetIndex = -1;
+                    } else if (selectedOffsetIndex > pendingDeleteOffsetIndex) {
+                        --selectedOffsetIndex;
+                    }
+                } else if (pendingMoveOffsetIndex >= 0) {
+                    int targetIndex = pendingMoveOffsetIndex + pendingMoveDirection;
+                    if (targetIndex >= 0 && targetIndex < (int)offsetChain.size()) {
+                        std::swap(offsetChain[pendingMoveOffsetIndex], offsetChain[targetIndex]);
+                        selectedOffsetIndex = targetIndex;
+                    }
                 }
             }
         }
@@ -447,21 +534,25 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         ImGui::SameLine();
         if (ImGui::Button("添加##offset")) {
             uint64_t newOffset = 0;
-            std::sscanf(newOffsetBuf, "%llx", &newOffset);
-            offsetChain.push_back(newOffset);
-            memset(newOffsetBuf, 0, sizeof(newOffsetBuf));
-            strcpy(newOffsetBuf, "0");
+            if (parseHexStrict(newOffsetBuf, newOffset)) {
+                offsetChain.push_back(newOffset);
+                resetHexInput(newOffsetBuf, sizeof(newOffsetBuf));
+            } else {
+                Gui::log("无效的偏移值: %s", newOffsetBuf);
+            }
         }
         
         ImGui::SameLine();
         if (selectedOffsetIndex >= 0 && selectedOffsetIndex < (int)offsetChain.size()) {
             if (ImGui::Button("更新选中")) {
                 uint64_t updatedOffset = 0;
-                std::sscanf(newOffsetBuf, "%llx", &updatedOffset);
-                offsetChain[selectedOffsetIndex] = updatedOffset;
-                selectedOffsetIndex = -1;
-                memset(newOffsetBuf, 0, sizeof(newOffsetBuf));
-                strcpy(newOffsetBuf, "0");
+                if (parseHexStrict(newOffsetBuf, updatedOffset)) {
+                    offsetChain[selectedOffsetIndex] = updatedOffset;
+                    selectedOffsetIndex = -1;
+                    resetHexInput(newOffsetBuf, sizeof(newOffsetBuf));
+                } else {
+                    Gui::log("无效的偏移值: %s", newOffsetBuf);
+                }
             }
             
             ImGui::SameLine();
@@ -480,20 +571,24 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         ImGui::Spacing();
         if (ImGui::Button("解析 & 读取", ImVec2(-1, 0))) {
             uint64_t baseOff = 0;
-            std::sscanf(baseOffsetBuf, "%llx", &baseOff);
             uint64_t addr = 0;
             
-            if (ResolveModuleOffsetChain(addr, moduleNameBuf, baseOff, offsetChain, derefFinal)) {
+            if (!parseHexStrict(baseOffsetBuf, baseOff)) {
+                Gui::log("无效的基址偏移: %s", baseOffsetBuf);
+            } else if (ResolveModuleOffsetChain(addr, moduleNameBuf, baseOff, offsetChain, derefFinal)) {
                 jumpToAddress(addr);
                 
                 // 构建日志信息
                 std::string logMsg = "解析成功: " + std::string(moduleNameBuf) + " + 0x" + std::string(baseOffsetBuf);
                 for (size_t i = 0; i < offsetChain.size(); i++) {
                     char offsetStr[32];
-                    sprintf(offsetStr, " -> [+0x%llX]", offsetChain[i]);
+                    std::snprintf(offsetStr, sizeof(offsetStr), " -> [+0x%llX]", offsetChain[i]);
                     logMsg += offsetStr;
                 }
-                logMsg += " = 0x" + std::to_string(addr);
+                char resolvedAddrStr[32];
+                std::snprintf(resolvedAddrStr, sizeof(resolvedAddrStr), "%llX", (unsigned long long)addr);
+                logMsg += " = 0x";
+                logMsg += resolvedAddrStr;
                 Gui::log("%s", logMsg.c_str());
             } else {
                 Gui::log("解析失败 (模块未找到或读取错误)");
@@ -532,7 +627,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Hex_2Bytes:
             if (bufferIndex + 1 < buffer.size()) {
-                uint16_t val = *(uint16_t*)&buffer[bufferIndex];
+                uint16_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%04X", val);
             } else {
                 snprintf(output, outputSize, "    ");
@@ -541,7 +637,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Hex_4Bytes:
             if (bufferIndex + 3 < buffer.size()) {
-                uint32_t val = *(uint32_t*)&buffer[bufferIndex];
+                uint32_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%08X", val);
             } else {
                 snprintf(output, outputSize, "        ");
@@ -550,7 +647,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Hex_8Bytes:
             if (bufferIndex + 7 < buffer.size()) {
-                uint64_t val = *(uint64_t*)&buffer[bufferIndex];
+                uint64_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%016llX", val);
             } else {
                 snprintf(output, outputSize, "                ");
@@ -568,7 +666,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Dec_2Bytes:
             if (bufferIndex + 1 < buffer.size()) {
-                uint16_t val = *(uint16_t*)&buffer[bufferIndex];
+                uint16_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%5u", val);  // 固定宽度5字符 (0-65535)
             } else {
                 snprintf(output, outputSize, "     ");
@@ -577,7 +676,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Dec_4Bytes:
             if (bufferIndex + 3 < buffer.size()) {
-                uint32_t val = *(uint32_t*)&buffer[bufferIndex];
+                uint32_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%10u", val);  // 固定宽度10字符，显示为无符号
             } else {
                 snprintf(output, outputSize, "          ");
@@ -586,7 +686,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Dec_8Bytes:
             if (bufferIndex + 7 < buffer.size()) {
-                uint64_t val = *(uint64_t*)&buffer[bufferIndex];
+                uint64_t val = 0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 snprintf(output, outputSize, "%20llu", val);  // 固定宽度20字符，显示为无符号
             } else {
                 snprintf(output, outputSize, "                    ");
@@ -595,7 +696,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Float_4Bytes:
             if (bufferIndex + 3 < buffer.size()) {
-                float val = *(float*)&buffer[bufferIndex];
+                float val = 0.0f;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 if (std::isnan(val)) {
                     snprintf(output, outputSize, "%11s", "NaN");
                 } else if (std::isinf(val)) {
@@ -616,7 +718,8 @@ void MemoryViewerWindow::formatValueString(char* output, size_t outputSize, size
             
         case DisplayFormat::Double_8Bytes:
             if (bufferIndex + 7 < buffer.size()) {
-                double val = *(double*)&buffer[bufferIndex];
+                double val = 0.0;
+                readScalar(buffer, static_cast<int>(bufferIndex), val);
                 if (std::isnan(val)) {
                     snprintf(output, outputSize, "%15s", "NaN");
                 } else if (std::isinf(val)) {
@@ -709,6 +812,8 @@ void MemoryViewerWindow::drawMemoryHexEditor()
     
     // 使用表格显示，包含地址列
     int columnCount = showAscii ? 3 : 2;
+    bool openAddressContextMenu = false;
+    bool openByteContextMenu = false;
     if (ImGui::BeginTable("hexeditor", columnCount, ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV))
     {
         ImGui::TableSetupColumn("地址", ImGuiTableColumnFlags_WidthFixed, 140.0f);
@@ -725,22 +830,23 @@ void MemoryViewerWindow::drawMemoryHexEditor()
         // 检测滚动位置，实现连续滚动
         float scrollY = ImGui::GetScrollY();
         float scrollMaxY = ImGui::GetScrollMaxY();
-        static bool isAutoScrolling = false;
-        
         // 滚动到底部 - 自动加载下一页
-        if (scrollY >= scrollMaxY - 10.0f && scrollMaxY > 0 && !isAutoScrolling) {
-            isAutoScrolling = true;
+        if (scrollY >= scrollMaxY - 10.0f && scrollMaxY > 0 && !hexAutoScrolling) {
+            hexAutoScrolling = true;
             
             // 扩展buffer，读取下一页数据
             size_t currentSize = buffer.size();
+            uint64_t safeNextPageAddr = 0;
+            const bool hasNextPageAddress =
+                addAddressOffset(viewAddress, static_cast<uint64_t>(currentSize), safeNextPageAddr);
             size_t newSize = currentSize + pageSize;
             
             // 限制最大缓冲区大小（例如最多10页）
-            if (newSize <= pageSize * 10) {
+            if (hasNextPageAddress && newSize <= pageSize * 10) {
                 buffer.resize(newSize);
                 
                 // 读取下一页数据
-                uint64_t nextPageAddr = viewAddress + currentSize;
+                uint64_t nextPageAddr = safeNextPageAddr;
                 std::vector<unsigned char> nextPageData;
                 if (ReadProcessMemoryBytes(nextPageAddr, pageSize, nextPageData, PORT_DEBUG)) {
                     // 复制数据到buffer末尾
@@ -753,12 +859,12 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 }
             }
             
-            isAutoScrolling = false;
+            hexAutoScrolling = false;
         }
         
         // 滚动到顶部 - 自动加载上一页
-        if (scrollY <= 10.0f && viewAddress >= pageSize && !isAutoScrolling) {
-            isAutoScrolling = true;
+        if (scrollY <= 10.0f && viewAddress >= pageSize && !hexAutoScrolling) {
+            hexAutoScrolling = true;
             
             // 在buffer前面插入数据
             uint64_t prevPageAddr = viewAddress - pageSize;
@@ -781,7 +887,7 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 }
             }
             
-            isAutoScrolling = false;
+            hexAutoScrolling = false;
         }
         
         // 在ASCII列标题下方添加文本模式切换
@@ -797,10 +903,13 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 地址列
             ImGui::TableSetColumnIndex(0);
-            uint64_t rowAddress = viewAddress + row;
+            uint64_t rowAddress = 0;
+            if (!addAddressOffset(viewAddress, static_cast<uint64_t>(row), rowAddress)) {
+                break;
+            }
             
             // 检查当前行是否包含目标地址
-            bool isTargetRow = (targetAddress >= rowAddress && targetAddress < rowAddress + bytesPerRow);
+            bool isTargetRow = addressInSpan(rowAddress, static_cast<size_t>(bytesPerRow), targetAddress);
             
             // 如果需要滚动到目标地址，并且当前行包含目标地址
             if (scrollToTarget && isTargetRow) {
@@ -825,8 +934,8 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 右键菜单
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                ImGui::OpenPopup("AddressContextMenu");
                 selectedByteAddress = rowAddress;
+                openAddressContextMenu = true;
             }
             
             // 数据列（根据格式显示）
@@ -860,8 +969,11 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 bool isSelected = (selectedByteOffset >= (int)idx && selectedByteOffset < (int)(idx + bytesPerUnit));
                 
                 // 检查当前单元是否包含目标地址
-                uint64_t unitAddress = viewAddress + idx;
-                bool isTargetUnit = (targetAddress >= unitAddress && targetAddress < unitAddress + bytesPerUnit);
+                uint64_t unitAddress = 0;
+                const bool hasUnitAddress =
+                    addAddressOffset(viewAddress, static_cast<uint64_t>(idx), unitAddress);
+                bool isTargetUnit = hasUnitAddress &&
+                    addressInSpan(unitAddress, static_cast<size_t>(bytesPerUnit), targetAddress);
                 
                 // 设置按钮样式
                 if (isSelected) {
@@ -916,16 +1028,20 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 ImVec2 buttonSize(minButtonWidth, 0);
                 if (ImGui::Button(valueStr, buttonSize)) {
                     selectedByteOffset = (int)idx;
-                    selectedByteAddress = viewAddress + idx;
+                    if (hasUnitAddress) {
+                        selectedByteAddress = unitAddress;
+                    }
                 }
                 
                 ImGui::PopStyleColor(3);
                 
                 // 右键菜单
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    ImGui::OpenPopup("ByteContextMenu");
                     selectedByteOffset = (int)idx;
-                    selectedByteAddress = viewAddress + idx;
+                    if (hasUnitAddress) {
+                        selectedByteAddress = unitAddress;
+                        openByteContextMenu = true;
+                    }
                 }
                 
                 // 双击编辑
@@ -933,7 +1049,7 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                     editMode = true;
                     editingRow = (int)(row / bytesPerRow);
                     editingCol = i;
-                    sprintf(editBuffer, "%02X", buffer[idx]);
+                    std::snprintf(editBuffer, sizeof(editBuffer), "%02X", buffer[idx]);
                 }
                 
                 ImGui::PopID();
@@ -988,24 +1104,50 @@ void MemoryViewerWindow::drawMemoryHexEditor()
     }
     
     // 上下文菜单
+    if (openAddressContextMenu) {
+        ImGui::OpenPopup("AddressContextMenu");
+    }
+    if (ImGui::BeginPopup("AddressContextMenu")) {
+        ImGui::Text("地址: 0x%llX", selectedByteAddress);
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("复制地址")) {
+            char addrStr[32];
+            std::snprintf(addrStr, sizeof(addrStr), "%llX", selectedByteAddress);
+            ImGui::SetClipboardText(addrStr);
+        }
+
+        if (ImGui::MenuItem("跳转到此地址")) {
+            jumpToAddress(selectedByteAddress);
+        }
+
+        ImGui::EndPopup();
+    }
+
+    if (openByteContextMenu) {
+        ImGui::OpenPopup("ByteContextMenu");
+    }
     if (ImGui::BeginPopup("ByteContextMenu")) {
         ImGui::Text("地址: 0x%llX", selectedByteAddress);
         ImGui::Separator();
         
         if (ImGui::MenuItem("编辑")) {
+            if (selectedByteOffset >= 0 && selectedByteOffset < (int)buffer.size()) {
+                std::snprintf(editBuffer, sizeof(editBuffer), "%02X", buffer[selectedByteOffset]);
+            }
             editMode = true;
         }
         
         if (ImGui::MenuItem("复制地址")) {
             char addrStr[32];
-            sprintf(addrStr, "%llX", selectedByteAddress);
+            std::snprintf(addrStr, sizeof(addrStr), "%llX", selectedByteAddress);
             ImGui::SetClipboardText(addrStr);
         }
         
         if (ImGui::MenuItem("复制值")) {
             if (selectedByteOffset >= 0 && selectedByteOffset < (int)buffer.size()) {
                 char valueStr[8];
-                sprintf(valueStr, "%02X", buffer[selectedByteOffset]);
+                std::snprintf(valueStr, sizeof(valueStr), "%02X", buffer[selectedByteOffset]);
                 ImGui::SetClipboardText(valueStr);
             }
         }
@@ -1024,24 +1166,32 @@ void MemoryViewerWindow::drawMemoryHexEditor()
     }
     
     if (ImGui::BeginPopupModal("编辑字节", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("地址: 0x%llX", selectedByteAddress);
-        ImGui::Text("当前值: 0x%02X (%d)", buffer[selectedByteOffset], buffer[selectedByteOffset]);
-        ImGui::Separator();
-        
-        ImGui::InputText("新值 (十六进制)", editBuffer, sizeof(editBuffer), ImGuiInputTextFlags_CharsHexadecimal);
-        
-        if (ImGui::Button("确定", ImVec2(120, 0))) {
-            unsigned int newValue = 0;
-            if (sscanf(editBuffer, "%x", &newValue) == 1) {
-                buffer[selectedByteOffset] = (unsigned char)newValue;
-                writeMemoryByte(selectedByteAddress, (unsigned char)newValue);
+        if (selectedByteOffset < 0 || selectedByteOffset >= (int)buffer.size()) {
+            ImGui::TextDisabled("选中的字节已失效");
+            if (ImGui::Button("关闭", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
             }
-            ImGui::CloseCurrentPopup();
-        }
-        
-        ImGui::SameLine();
-        if (ImGui::Button("取消", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
+        } else {
+            ImGui::Text("地址: 0x%llX", selectedByteAddress);
+            ImGui::Text("当前值: 0x%02X (%d)", buffer[selectedByteOffset], buffer[selectedByteOffset]);
+            ImGui::Separator();
+
+            ImGui::InputText("新值 (十六进制)", editBuffer, sizeof(editBuffer), ImGuiInputTextFlags_CharsHexadecimal);
+
+            if (ImGui::Button("确定", ImVec2(120, 0))) {
+                char* end = nullptr;
+                unsigned long newValue = std::strtoul(editBuffer, &end, 16);
+                if (end != editBuffer && newValue <= 0xFF) {
+                    buffer[selectedByteOffset] = (unsigned char)newValue;
+                    writeMemoryByte(selectedByteAddress, (unsigned char)newValue);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SameLine();
+            if (ImGui::Button("取消", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
         }
         
         ImGui::EndPopup();
@@ -1132,8 +1282,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Word");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 1 < (int)buffer.size()) {
-            uint16_t val = *(uint16_t*)&buffer[selectedByteOffset];
+        uint16_t wordVal = 0;
+        if (readScalar(buffer, selectedByteOffset, wordVal)) {
+            uint16_t val = wordVal;
             ImGui::Text("%u (0x%04X)", val, val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1144,8 +1295,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Int16");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 1 < (int)buffer.size()) {
-            int16_t val = *(int16_t*)&buffer[selectedByteOffset];
+        int16_t int16Val = 0;
+        if (readScalar(buffer, selectedByteOffset, int16Val)) {
+            int16_t val = int16Val;
             ImGui::Text("%d", val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1156,8 +1308,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("DWord");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 3 < (int)buffer.size()) {
-            uint32_t val = *(uint32_t*)&buffer[selectedByteOffset];
+        uint32_t dwordVal = 0;
+        if (readScalar(buffer, selectedByteOffset, dwordVal)) {
+            uint32_t val = dwordVal;
             ImGui::Text("%u (0x%08X)", val, val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1168,8 +1321,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Int32");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 3 < (int)buffer.size()) {
-            int32_t val = *(int32_t*)&buffer[selectedByteOffset];
+        int32_t int32Val = 0;
+        if (readScalar(buffer, selectedByteOffset, int32Val)) {
+            int32_t val = int32Val;
             ImGui::Text("%d", val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1180,8 +1334,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("QWord");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 7 < (int)buffer.size()) {
-            uint64_t val = *(uint64_t*)&buffer[selectedByteOffset];
+        uint64_t qwordVal = 0;
+        if (readScalar(buffer, selectedByteOffset, qwordVal)) {
+            uint64_t val = qwordVal;
             ImGui::Text("%llu (0x%016llX)", val, val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1192,8 +1347,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Int64");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 7 < (int)buffer.size()) {
-            int64_t val = *(int64_t*)&buffer[selectedByteOffset];
+        int64_t int64Val = 0;
+        if (readScalar(buffer, selectedByteOffset, int64Val)) {
+            int64_t val = int64Val;
             ImGui::Text("%lld", val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1204,8 +1360,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Float");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 3 < (int)buffer.size()) {
-            float val = *(float*)&buffer[selectedByteOffset];
+        float floatVal = 0.0f;
+        if (readScalar(buffer, selectedByteOffset, floatVal)) {
+            float val = floatVal;
             ImGui::Text("%.6f", val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1216,8 +1373,9 @@ void MemoryViewerWindow::drawDataInspector()
         ImGui::TableSetColumnIndex(0);
         ImGui::Text("Double");
         ImGui::TableSetColumnIndex(1);
-        if (selectedByteOffset + 7 < (int)buffer.size()) {
-            double val = *(double*)&buffer[selectedByteOffset];
+        double doubleVal = 0.0;
+        if (readScalar(buffer, selectedByteOffset, doubleVal)) {
+            double val = doubleVal;
             ImGui::Text("%.10f", val);
         } else {
             ImGui::TextDisabled("超出范围");
@@ -1303,8 +1461,8 @@ void MemoryViewerWindow::drawDataInspector()
     
     // 快速操作按钮
     if (ImGui::Button("跟随指针", ImVec2(-1, 0))) {
-        if (selectedByteOffset + 7 < (int)buffer.size()) {
-            uint64_t ptrVal = *(uint64_t*)&buffer[selectedByteOffset];
+        uint64_t ptrVal = 0;
+        if (readScalar(buffer, selectedByteOffset, ptrVal)) {
             if (ptrVal != 0) {
                 jumpToAddress(ptrVal);
             }

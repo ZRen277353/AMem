@@ -9,10 +9,32 @@
 #include <iomanip>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
+#include <utility>
+
+namespace {
+const char* getScanValueTypeLabel(int valueType)
+{
+    static constexpr const char* kLabels[] = {
+        "1字节", "2字节", "4字节", "8字节", "浮点", "双精度"
+    };
+    const int labelCount = static_cast<int>(sizeof(kLabels) / sizeof(kLabels[0]));
+    return (valueType >= 0 && valueType < labelCount) ? kLabels[valueType] : "Unknown";
+}
+
+bool isIntegerScanValueType(int valueType)
+{
+    return valueType >= 0 && valueType <= 3;
+}
+} // namespace
 
 void ScanWindow::drawResultsPanel()
 {
     ImGui::BeginChild("ScanResults", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.5f), ImGuiChildFlags_Borders);
+
+    if (scanResultsRefreshInterval < 0.1f) {
+        scanResultsRefreshInterval = 0.1f;
+    }
 
     // 自动刷新控制（使用异步版本，避免卡顿）
     // 注意：扫描进行时不允许刷新，防止Socket操作冲突
@@ -30,11 +52,11 @@ void ScanWindow::drawResultsPanel()
         }
     }
 
-    // 添加结果显示选项
-    static bool showHexValues = false;
-    static bool sortByValue = false;
+    const int totalResults = totalScanResults.load();
+    const int currentResultOffset = resultOffset.load();
+    const int resultValueType = scanResultValueType.load();
 
-    if (totalScanResults > 0) {
+    if (totalResults > 0) {
         // 刷新控制工具栏
         // 注意：扫描进行时禁用刷新按钮
         if (scanResultsRefreshThread.running() || scanInProgress) {
@@ -46,9 +68,9 @@ void ScanWindow::drawResultsPanel()
             }
             ImGui::EndDisabled();
             // 显示进度
-            if (refreshTotal > 0 && scanResultsRefreshThread.running()) {
+            if (scanResultsRefreshTotal.load() > 0 && scanResultsRefreshThread.running()) {
                 ImGui::SameLine();
-                ImGui::Text("(%d/%d)", refreshProgress.load(), refreshTotal.load());
+                ImGui::Text("(%d/%d)", scanResultsRefreshProgress.load(), scanResultsRefreshTotal.load());
             }
         } else {
             if (ImGui::Button("立即刷新值")) {
@@ -75,6 +97,9 @@ void ScanWindow::drawResultsPanel()
             ImGui::SameLine();
             ImGui::SetNextItemWidth(60);
             ImGui::InputFloat("##scanInterval", &scanResultsRefreshInterval, 0, 0, "%.1f");
+            if (scanResultsRefreshInterval < 0.1f) {
+                scanResultsRefreshInterval = 0.1f;
+            }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("自动刷新间隔（秒）\n建议值: 3.0-10.0秒\n默认: 5.0秒");
             }
@@ -124,23 +149,18 @@ void ScanWindow::drawResultsPanel()
         ImGui::Separator();
 
         // 显示选项
-        ImGui::Checkbox("十六进制显示", &showHexValues);
+        ImGui::Checkbox("十六进制显示", &showScanResultHexValues);
         ImGui::SameLine();
-        if (ImGui::Checkbox("按数值排序", &sortByValue)) {
-            // 如果启用排序，重新加载结果
+        if (ImGui::Checkbox("按数值排序", &sortScanResultsByValue)) {
             loadScanResults();
         }
     }
 
-    const char* value_types[] = {
-        "1字节", "2字节", "4字节", "8字节", "浮点", "双精度"
-    };
+    if (totalResults > 0) {
+        int totalPages = (totalResults + resultPageSize - 1) / resultPageSize;
+        int currentPage = currentResultOffset / resultPageSize + 1;
 
-    if (totalScanResults > 0) {
-        int totalPages = (totalScanResults + resultPageSize - 1) / resultPageSize;
-        int currentPage = resultOffset / resultPageSize + 1;
-
-        ImGui::Text("第 %d 页，共 %d 页 (总共 %d 个结果)", currentPage, totalPages, totalScanResults);
+        ImGui::Text("第 %d 页，共 %d 页 (总共 %d 个结果)", currentPage, totalPages, totalResults);
 
         // 显示当前页的数值范围信息
         {
@@ -150,33 +170,37 @@ void ScanWindow::drawResultsPanel()
                 for (const auto& result : scanResults) {
                     uint64_t val = result.value;
                     // 根据数值类型截断
-                    switch (valueType) {
+                    switch (resultValueType) {
                         case 0: val &= 0xFF; break;
                         case 1: val &= 0xFFFF; break;
                         case 2: val &= 0xFFFFFFFF; break;
                         case 3: break; // 8字节不需要截断
                         case 4: case 5: break; // 浮点数单独处理
                     }
-                    if (valueType <= 3) { // 整数类型
+                    if (isIntegerScanValueType(resultValueType)) { // 整数类型
                         if (val < minVal) minVal = val;
                         if (val > maxVal) maxVal = val;
                     }
                 }
 
-                if (valueType <= 3 && minVal != UINT64_MAX) {
+                if (isIntegerScanValueType(resultValueType) && minVal != UINT64_MAX) {
                     ImGui::SameLine();
                     ImGui::TextColored(ColorScheme::TextSecondary, " | 范围: %llu - %llu", minVal, maxVal);
                 }
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("上一页") && resultOffset > 0) {
-            resultOffset = (0 > (resultOffset - resultPageSize)) ? 0 : (resultOffset - resultPageSize);
+        if (ImGui::Button("上一页") && currentResultOffset > 0) {
+            int previousOffset = currentResultOffset - resultPageSize;
+            resultOffset = previousOffset > 0 ? previousOffset : 0;
             loadScanResults();
         }
         ImGui::SameLine();
-        if (ImGui::Button("下一页") && resultOffset + resultPageSize < totalScanResults) {
-            resultOffset = ((totalScanResults - resultPageSize) < (resultOffset + resultPageSize)) ? (totalScanResults - resultPageSize) : (resultOffset + resultPageSize);
+        if (ImGui::Button("下一页") && currentResultOffset + resultPageSize < totalResults) {
+            int lastOffset = totalResults - resultPageSize;
+            if (lastOffset < 0) lastOffset = 0;
+            int nextOffset = currentResultOffset + resultPageSize;
+            resultOffset = nextOffset < lastOffset ? nextOffset : lastOffset;
             loadScanResults();
         }
         ImGui::Separator();
@@ -213,17 +237,16 @@ void ScanWindow::drawResultsPanel()
         // 保存当前大小，避免在循环中重复访问
         int scanResultsSize = (int)scanResults.size();
 
-        // 用于右键菜单的临时存储
-        static uint64_t contextMenuAddress = 0;
-        static std::string contextMenuValue;
-        static int contextMenuValueType = 0;
-
         ImGuiListClipper clipper;
         clipper.Begin(scanResultsSize);
         while (clipper.Step())
         {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd && i < scanResultsSize; i++)
             {
+                if (i >= (int)scanResults.size() || i >= (int)selectedScanResults.size()) {
+                    break;
+                }
+
                 ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -236,7 +259,7 @@ void ScanWindow::drawResultsPanel()
                 ImGui::TableSetColumnIndex(2);
                 // 根据数值类型显示不同颜色（增强对比度）
                 ImVec4 typeColor = ColorScheme::TextPrimary; // 默认白色
-                switch (valueType) {
+                switch (resultValueType) {
                     case 0: typeColor = ColorScheme::SuccessBright; break; // 1字节（增强可见性）
                     case 1: typeColor = ColorScheme::InfoBright; break; // 2字节（增强可见性）
                     case 2: typeColor = ColorScheme::WarningBright; break; // 4字节（增强可见性）
@@ -244,7 +267,7 @@ void ScanWindow::drawResultsPanel()
                     case 4: typeColor = ColorScheme::WarningBright; break; // 浮点（增强可见性）
                     case 5: typeColor = ColorScheme::ErrorBright; break; // 双精度（增强可见性）
                 }
-                ImGui::TextColored(typeColor, "%s", value_types[valueType]);
+                ImGui::TextColored(typeColor, "%s", getScanValueTypeLabel(resultValueType));
                 ImGui::TableSetColumnIndex(3);
 
                 // 检查值是否最近改变（2秒内）
@@ -259,8 +282,8 @@ void ScanWindow::drawResultsPanel()
                     ImVec4 highlightColor = ColorScheme::WarningBright;  // 高亮
                     highlightColor.w = alpha;
 
-                    if (showHexValues && valueType <= 3) {
-                        std::string hexStr = formatScanResultValueHex(scanResults[i].value, valueType);
+                    if (showScanResultHexValues && isIntegerScanValueType(resultValueType)) {
+                        std::string hexStr = formatScanResultValueHex(scanResults[i].value, resultValueType);
                         ImGui::TextColored(highlightColor, "%s", hexStr.c_str());
                     } else {
                         ImGui::TextColored(highlightColor, "%s", scanResults[i].valueStr.c_str());
@@ -277,8 +300,8 @@ void ScanWindow::drawResultsPanel()
                         scanResults[i].valueChanged = false;
                     }
                 } else {
-                    if (showHexValues && valueType <= 3) {
-                        std::string hexStr = formatScanResultValueHex(scanResults[i].value, valueType);
+                    if (showScanResultHexValues && isIntegerScanValueType(resultValueType)) {
+                        std::string hexStr = formatScanResultValueHex(scanResults[i].value, resultValueType);
                         ImGui::Text("%s", hexStr.c_str());
                     } else {
                         ImGui::Text("%s", scanResults[i].valueStr.c_str());
@@ -293,7 +316,7 @@ void ScanWindow::drawResultsPanel()
                     if (i < scanResultsSize && i < scanResults.size()) {
                         uint64_t clickedAddress = scanResults[i].address;
                         std::string clickedValue = scanResults[i].valueStr;
-                        int clickedValueType = valueType;
+                        int clickedValueType = resultValueType;
 
                         // 临时释放 scanResultsMutex，避免死锁
                         lock.unlock();
@@ -336,33 +359,33 @@ void ScanWindow::drawResultsPanel()
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                     // 保存选中项的数据，避免在菜单显示时访问可能已失效的 vector
                     if (i < scanResultsSize && i < scanResults.size()) {
-                        contextMenuAddress = scanResults[i].address;
-                        contextMenuValue = scanResults[i].valueStr;
-                        contextMenuValueType = valueType;
+                        resultContextMenuAddress = scanResults[i].address;
+                        resultContextMenuValue = scanResults[i].valueStr;
+                        resultContextMenuValueType = resultValueType;
                         ImGui::OpenPopup("ResultContext");
                     }
                 }
 
                 // 使用固定的 popup ID，从存储的数据中读取
                 if (ImGui::BeginPopup("ResultContext")) {
-                    ImGui::Text("地址: 0x%016llX", contextMenuAddress);
-                    ImGui::Text("数值: %s", contextMenuValue.c_str());
+                    ImGui::Text("地址: 0x%016llX", resultContextMenuAddress);
+                    ImGui::Text("数值: %s", resultContextMenuValue.c_str());
                     ImGui::Separator();
 
                     if (ImGui::MenuItem("添加到地址列表")) {
                         std::lock_guard<std::mutex> addrLock(addressListMutex);
                         bool alreadyExists = false;
                         for (const auto& item : addressList) {
-                            if (item.address == contextMenuAddress) {
+                            if (item.address == resultContextMenuAddress) {
                                 alreadyExists = true;
                                 break;
                             }
                         }
                         if (!alreadyExists) {
                             AddressListItem newItem;
-                            newItem.address = contextMenuAddress;
-                            newItem.valueType = contextMenuValueType;
-                            newItem.currentValue = contextMenuValue;
+                            newItem.address = resultContextMenuAddress;
+                            newItem.valueType = resultContextMenuValueType;
+                            newItem.currentValue = resultContextMenuValue;
                             newItem.description = "地址 " + std::to_string(addressList.size() + 1);
                             addressList.push_back(newItem);
                             Gui::log("已添加地址: 0x%016llX", newItem.address);
@@ -373,21 +396,21 @@ void ScanWindow::drawResultsPanel()
 
                     if (ImGui::MenuItem("复制地址")) {
                         char addrStr[32];
-                        sprintf(addrStr, "%016llX", contextMenuAddress);
+                        std::snprintf(addrStr, sizeof(addrStr), "%016llX", resultContextMenuAddress);
                         ImGui::SetClipboardText(addrStr);
-                        Gui::log("已复制地址: 0x%016llX", contextMenuAddress);
+                        Gui::log("已复制地址: 0x%016llX", resultContextMenuAddress);
                     }
 
                     if (ImGui::MenuItem("复制数值")) {
-                        ImGui::SetClipboardText(contextMenuValue.c_str());
-                        Gui::log("已复制数值: %s", contextMenuValue.c_str());
+                        ImGui::SetClipboardText(resultContextMenuValue.c_str());
+                        Gui::log("已复制数值: %s", resultContextMenuValue.c_str());
                     }
 
                     if (ImGui::MenuItem("在内存查看器中打开")) {
                         // 临时释放锁，避免死锁
                         lock.unlock();
 
-                        navigateToAddress(contextMenuAddress);
+                        navigateToAddress(resultContextMenuAddress);
 
                         // 重新获取锁
                         lock.lock();
@@ -403,22 +426,79 @@ void ScanWindow::drawResultsPanel()
     ImGui::EndChild();
 }
 
+void ScanWindow::sortScanResultsForDisplay()
+{
+    if (!sortScanResultsByValue || scanResults.size() < 2) {
+        return;
+    }
+
+    if (selectedScanResults.size() != scanResults.size()) {
+        selectedScanResults.resize(scanResults.size(), 0);
+    }
+
+    std::vector<std::pair<ScanResultItem, char>> sorted;
+    sorted.reserve(scanResults.size());
+    for (size_t i = 0; i < scanResults.size(); ++i) {
+        sorted.emplace_back(std::move(scanResults[i]), selectedScanResults[i]);
+    }
+
+    std::stable_sort(sorted.begin(), sorted.end(),
+        [](const auto& lhs, const auto& rhs) {
+            if (lhs.first.value != rhs.first.value) {
+                return lhs.first.value < rhs.first.value;
+            }
+            return lhs.first.address < rhs.first.address;
+        });
+
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        scanResults[i] = std::move(sorted[i].first);
+        selectedScanResults[i] = sorted[i].second;
+    }
+}
+
 void ScanWindow::loadScanResults()
 {
-    if (totalScanResults == 0) return;
+    loadScanResultsForRevision(AppContext::Get().processRevision.load(std::memory_order_acquire));
+}
 
-    int count = (resultPageSize < (totalScanResults - resultOffset)) ? resultPageSize : (totalScanResults - resultOffset);
+void ScanWindow::loadScanResultsForRevision(uint64_t expectedProcessRevision)
+{
+    int totalResults = totalScanResults.load();
+    if (totalResults <= 0) return;
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+        return;
+    }
+
+    int offset = resultOffset.load();
+    if (offset < 0) {
+        offset = 0;
+        resultOffset = 0;
+    }
+    if (offset >= totalResults) {
+        offset = totalResults - resultPageSize;
+        if (offset < 0) offset = 0;
+        resultOffset = offset;
+    }
+
+    int remaining = totalResults - offset;
+    int count = resultPageSize < remaining ? resultPageSize : remaining;
     if (count <= 0) return;  // 防止无效的count值
 
     std::vector<std::pair<uint64_t, uint64_t>> rawResults;
     // 不预先resize，让GetScanResult根据实际返回的数量来设置大小
     // rawResults.clear();
     rawResults.reserve(count);
-    Gui::log("loadScanResults: resultOffset %d, count %d", resultOffset, count);
+    Gui::log("loadScanResults: resultOffset %d, count %d", offset, count);
 
-    if (GetScanResult(resultOffset, count, rawResults)) {
+    if (GetScanResult(offset, count, rawResults)) {
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
         // 使用互斥锁保护，因为此函数可能从扫描线程中调用
         std::lock_guard<std::mutex> lock(scanResultsMutex);
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
 
         scanResults.clear();
         scanResults.reserve(rawResults.size());
@@ -432,25 +512,37 @@ void ScanWindow::loadScanResults()
             item.changeTime = 0.0f;
 
             // 根据数值类型正确截断和格式化数据
-            item.valueStr = formatScanResultValue(result.second, valueType);
+            item.valueStr = formatScanResultValue(result.second, scanResultValueType.load());
             scanResults.push_back(item);
         }
 
         // 重置选择状态
         selectedScanResults.clear();
         selectedScanResults.resize(scanResults.size(), 0);
+        sortScanResultsForDisplay();
 
-        Gui::log("已加载 %d 个扫描结果 (偏移: %d)", (int)scanResults.size(), resultOffset);
+        Gui::log("已加载 %d 个扫描结果 (偏移: %d)", (int)scanResults.size(), offset);
     } else {
         Gui::log("加载扫描结果失败");
     }
 }
 
-void ScanWindow::refreshScanResultsValues()
+void ScanWindow::refreshScanResultsValues(int refreshValueType, bool warnLargePage)
+{
+    refreshScanResultsValuesForRevision(
+        refreshValueType,
+        warnLargePage,
+        AppContext::Get().processRevision.load(std::memory_order_acquire));
+}
+
+void ScanWindow::refreshScanResultsValuesForRevision(int refreshValueType, bool warnLargePage, uint64_t expectedProcessRevision)
 {
     // 检查是否有进程附加
     if (!AppContext::Get().hasProcess()) {
         Gui::log("未附加进程，无法刷新");
+        return;
+    }
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
         return;
     }
 
@@ -472,13 +564,19 @@ void ScanWindow::refreshScanResultsValues()
     // 第一步：快速复制地址列表（锁持有时间 < 1ms）
     {
         std::lock_guard<std::mutex> lock(scanResultsMutex);
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
 
         if (scanResults.empty()) {
             return;
         }
+        if (refreshValueType != scanResultValueType.load()) {
+            return;
+        }
 
-        refreshProgress = 0;
-        refreshTotal = scanResults.size();
+        scanResultsRefreshProgress = 0;
+        scanResultsRefreshTotal = static_cast<int>(scanResults.size());
 
         // 快速复制地址（只复制需要的数据）
         results.reserve(scanResults.size());
@@ -496,7 +594,7 @@ void ScanWindow::refreshScanResultsValues()
     int errorCount = 0;
 
     uint32_t size = 0;
-    switch (valueType) {
+    switch (refreshValueType) {
         case 0: size = 1; break;
         case 1: size = 2; break;
         case 2: size = 4; break;
@@ -516,6 +614,9 @@ void ScanWindow::refreshScanResultsValues()
     // 批量读取所有地址（使用调试端口进行自动刷新）
     std::vector<std::pair<uint64_t, std::vector<uint8_t>>> batchResults;
     bool batchSuccess = ReadBratchAddr(batchAddrs, batchResults, PORT_DEBUG);
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+        return;
+    }
 
     if (batchSuccess && batchResults.size() == results.size()) {
         // 批量读取成功，解析结果
@@ -527,7 +628,7 @@ void ScanWindow::refreshScanResultsValues()
                 uint64_t newValue = 0;
                 memcpy(&newValue, batch.second.data(), size);
                 r.newValue = newValue;
-                r.newValueStr = formatValueOutput(batch.second.data(), valueType);
+                r.newValueStr = formatValueOutput(batch.second.data(), refreshValueType);
                 r.success = true;
                 refreshCount++;
             } else {
@@ -535,7 +636,7 @@ void ScanWindow::refreshScanResultsValues()
                 r.success = false;
                 errorCount++;
             }
-            refreshProgress++;
+            scanResultsRefreshProgress++;
         }
     } else {
         // 批量读取失败，回退到逐个读取（使用调试端口）
@@ -545,7 +646,7 @@ void ScanWindow::refreshScanResultsValues()
                 uint64_t newValue = 0;
                 memcpy(&newValue, buffer.data(), size);
                 r.newValue = newValue;
-                r.newValueStr = formatValueOutput(buffer.data(), valueType);
+                r.newValueStr = formatValueOutput(buffer.data(), refreshValueType);
                 r.success = true;
                 refreshCount++;
             } else {
@@ -554,19 +655,34 @@ void ScanWindow::refreshScanResultsValues()
                 errorCount++;
             }
 
-            refreshProgress++;
+            scanResultsRefreshProgress++;
         }
     }
 
     // 第三步：快速更新所有结果（锁持有时间 < 10ms）
     {
         std::lock_guard<std::mutex> lock(scanResultsMutex);
+        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
+            return;
+        }
+        if (refreshValueType != scanResultValueType.load()) {
+            return;
+        }
 
         float currentTime = ImGui::GetTime();
         for (const auto& r : results) {
-            if (r.index >= scanResults.size()) continue;
+            auto resultIt = scanResults.end();
+            if (r.index < scanResults.size() && scanResults[r.index].address == r.address) {
+                resultIt = scanResults.begin() + r.index;
+            } else {
+                resultIt = std::find_if(scanResults.begin(), scanResults.end(),
+                    [&r](const ScanResultItem& item) {
+                        return item.address == r.address;
+                    });
+            }
+            if (resultIt == scanResults.end()) continue;
 
-            auto& result = scanResults[r.index];
+            auto& result = *resultIt;
 
             if (r.success) {
                 // 检测值是否改变
@@ -582,22 +698,22 @@ void ScanWindow::refreshScanResultsValues()
                 result.valueStr = r.newValueStr;
             }
         }
+
+        sortScanResultsForDisplay();
     }  // 快速释放锁！
 
     // 日志和提示（不需要加锁）
     if (refreshCount > 0 || errorCount > 0) {
-        static bool firstRefresh = true;
-        if (firstRefresh || errorCount > 0) {
+        if (scanResultsFirstRefreshLog || errorCount > 0) {
             Gui::log("已刷新当前页: %d 成功, %d 失败 (共 %d 项)", refreshCount, errorCount, (int)results.size());
-            firstRefresh = false;
+            scanResultsFirstRefreshLog = false;
         }
     }
 
     if (results.size() > 500) {
-        static bool warningShown = false;
-        if (!warningShown && autoRefreshScanResults) {
+        if (!scanResultsLargePageWarningShown && warnLargePage) {
             Gui::log("提示：当前页结果较多(%d个)，建议减少每页数量或增加刷新间隔。", (int)results.size());
-            warningShown = true;
+            scanResultsLargePageWarningShown = true;
         }
     }
 }
@@ -614,8 +730,12 @@ void ScanWindow::refreshScanResultsValuesAsync()
         return;
     }
 
+    const int refreshValueType = scanResultValueType.load();
+    const bool warnLargePage = autoRefreshScanResults;
+    const uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
+
     // 启动异步刷新线程
-    scanResultsRefreshThread.launch([this](const std::atomic<bool>& /*cancel*/) {
-        refreshScanResultsValues();  // 调用同步版本（已有互斥锁保护）
+    scanResultsRefreshThread.launch([this, refreshValueType, warnLargePage, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) {
+        refreshScanResultsValuesForRevision(refreshValueType, warnLargePage, expectedProcessRevision);  // 调用同步版本（已有互斥锁保护）
     });
 }

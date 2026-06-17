@@ -7,6 +7,18 @@
 #include "version.h"
 #include "ConfigManager.h"
 
+namespace {
+bool isValidPort(int port)
+{
+	return port > 0 && port <= 65535;
+}
+
+const char* getMemTypeName(const std::string (&names)[5], int memType)
+{
+	return (memType >= 0 && memType < 5) ? names[memType].c_str() : "Unknown";
+}
+} // namespace
+
 ServerConnectWindow::ServerConnectWindow()
 {
 	name = "服务器连接";
@@ -59,8 +71,10 @@ void ServerConnectWindow::updateMemType()
 {
 	auto client = GetSocketMgr().GetClient(PORT_MAIN);
 	if (client->IsConnected()) {
-		if (GetMemType(currentMemType)) {
-			Gui::log("当前内存类型: %s (%d)", memTypeNames[currentMemType].c_str(), currentMemType);
+		int memType = 0;
+		if (GetMemType(memType)) {
+			currentMemType = memType;
+			Gui::log("当前内存类型: %s (%d)", getMemTypeName(memTypeNames, currentMemType), currentMemType);
 		} else {
 			Gui::log("获取内存类型失败，请检查连接状态");
 			currentMemType = 0;
@@ -111,17 +125,26 @@ void ServerConnectWindow::drawConnectionControls() {
   auto client = GetSocketMgr().GetClient(PORT_MAIN);
   if (!client->IsConnected()) {
     if (ImGui::Button("连接")) {
+      if (!isValidPort(port)) {
+        status = "连接: 失败 -> invalid port";
+        Gui::log("连接失败: invalid port %d", port);
+        return;
+      }
       bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
       updateStatus(ok, "连接");
     }
   } else {
     if (ImGui::Button("断开连接")) {
-      client->Close();
+      GetSocketMgr().DisconnectMultiPort();
       updateStatus(false, "断开连接");
     }
   }
 
   if (autoReconnect && !client->IsConnected()) {
+    if (!isValidPort(port)) {
+      status = "自动重连: 失败 -> invalid port";
+      return;
+    }
     bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
     if (ok)
       updateStatus(true, "自动重连");
@@ -133,7 +156,7 @@ void ServerConnectWindow::drawDriverControls() {
   ImGui::Text("驱动控制");
 
   // 显示当前内存类型
-  ImGui::Text("当前内存类型: %s", memTypeNames[currentMemType].c_str());
+  ImGui::Text("当前内存类型: %s", getMemTypeName(memTypeNames, currentMemType));
 
   ImGui::SameLine();
   if (ImGui::Button("刷新类型")) {
@@ -215,4 +238,4 @@ void ServerConnectWindow::onDraw()
 {
 	drawConnectionControls();
 	drawDriverControls();
-} 
+}

@@ -3,45 +3,107 @@
 #include <iomanip>
 #include <cstring>
 #include <cmath>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 
 namespace ValueFormatter {
+
+namespace {
+bool parseUnsignedStrict(const std::string& input, int base, uint64_t maxValue, uint64_t& value) {
+    size_t begin = input.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos || input[begin] == '-') {
+        return false;
+    }
+
+    const char* str = input.c_str() + begin;
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, base);
+    if (end == str || errno == ERANGE || value > maxValue) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+bool parseFloatStrict(const std::string& input, float& value) {
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+bool parseDoubleStrict(const std::string& input, double& value) {
+    const char* str = input.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+}
 
 std::vector<unsigned char> parseInput(const std::string& input, int valueType, bool hexInput) {
     std::vector<unsigned char> result;
     try {
         switch (valueType) {
             case Byte1: {
-                uint8_t v = hexInput ? (uint8_t)std::stoul(input, nullptr, 16) : (uint8_t)std::stoul(input);
+                uint64_t parsed = 0;
+                if (!parseUnsignedStrict(input, hexInput ? 16 : 10, 0xFF, parsed)) break;
+                uint8_t v = static_cast<uint8_t>(parsed);
                 result.resize(1);
                 result[0] = v;
                 break;
             }
             case Byte2: {
-                uint16_t v = hexInput ? (uint16_t)std::stoul(input, nullptr, 16) : (uint16_t)std::stoul(input);
+                uint64_t parsed = 0;
+                if (!parseUnsignedStrict(input, hexInput ? 16 : 10, 0xFFFF, parsed)) break;
+                uint16_t v = static_cast<uint16_t>(parsed);
                 result.resize(2);
                 std::memcpy(result.data(), &v, 2);
                 break;
             }
             case Byte4: {
-                uint32_t v = hexInput ? (uint32_t)std::stoul(input, nullptr, 16) : (uint32_t)std::stoul(input);
+                uint64_t parsed = 0;
+                if (!parseUnsignedStrict(input, hexInput ? 16 : 10, 0xFFFFFFFFULL, parsed)) break;
+                uint32_t v = static_cast<uint32_t>(parsed);
                 result.resize(4);
                 std::memcpy(result.data(), &v, 4);
                 break;
             }
             case Byte8: {
-                uint64_t v = hexInput ? std::stoull(input, nullptr, 16) : std::stoull(input);
+                uint64_t v = 0;
+                if (!parseUnsignedStrict(input, hexInput ? 16 : 10, UINT64_MAX, v)) break;
                 result.resize(8);
                 std::memcpy(result.data(), &v, 8);
                 break;
             }
             case Float: {
-                float v = std::stof(input);
+                float v = 0.0f;
+                if (!parseFloatStrict(input, v)) break;
                 result.resize(4);
                 std::memcpy(result.data(), &v, 4);
                 break;
             }
             case Double: {
-                double v = std::stod(input);
+                double v = 0.0;
+                if (!parseDoubleStrict(input, v)) break;
                 result.resize(8);
                 std::memcpy(result.data(), &v, 8);
                 break;

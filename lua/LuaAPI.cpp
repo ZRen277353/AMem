@@ -3,6 +3,7 @@
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
 #include "../socket/client_singleton.h"
+#include "../gui/AppContext.h"
 #include "../gui/Gui.h"
 #include <string>
 #include <vector>
@@ -10,6 +11,10 @@
 #include <chrono>
 #include <cstring>
 #include <sstream>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 
 // 辅助函数：将 Lua 值转换为字符串（Lua 5.1 兼容版本）
 static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
@@ -82,13 +87,64 @@ static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
 }
 
 // 辅助函数：检查地址参数
+namespace {
+constexpr size_t kMaxLuaOffsetCount = 1024;
+
+bool isValidBreakpointSize(uint32_t size) {
+    return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
+uint32_t checkBreakpointSize(lua_State* L, int index, uint32_t defaultValue) {
+    lua_Integer raw = luaL_optinteger(L, index, defaultValue);
+    if (raw < 0 || raw > (std::numeric_limits<uint32_t>::max)()) {
+        luaL_error(L, "Breakpoint size out of range");
+        return 0;
+    }
+
+    const uint32_t size = static_cast<uint32_t>(raw);
+    if (!isValidBreakpointSize(size)) {
+        luaL_error(L, "Breakpoint size must be 1, 2, 4, or 8");
+        return 0;
+    }
+    return size;
+}
+} // namespace
+
 uint64_t LuaAPI::CheckAddress(lua_State* L, int index) {
     if (lua_isnumber(L, index)) {
-        return static_cast<uint64_t>(lua_tonumber(L, index));
+        lua_Number number = lua_tonumber(L, index);
+        if (!std::isfinite(static_cast<double>(number)) || number < 0) {
+            luaL_error(L, "Address must be a non-negative finite number");
+            return 0;
+        }
+        return static_cast<uint64_t>(number);
     } else if (lua_isstring(L, index)) {
         // 支持十六进制字符串 "0x12345678"
         const char* str = lua_tostring(L, index);
-        return std::strtoull(str, nullptr, 0);
+        const char* begin = str;
+        while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+            ++begin;
+        }
+        if (*begin == '-' || *begin == '\0') {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+
+        char* end = nullptr;
+        errno = 0;
+        uint64_t address = std::strtoull(begin, &end, 0);
+        if (end == begin || errno == ERANGE) {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+        while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+            ++end;
+        }
+        if (*end != '\0') {
+            luaL_error(L, "Invalid address string");
+            return 0;
+        }
+        return address;
     }
     luaL_error(L, "Expected number or hex string for address");
     return 0;
@@ -191,10 +247,15 @@ int LuaAPI::GetProcessList(lua_State* L) {
 }
 
 int LuaAPI::AttachProcess(lua_State* L) {
-    int pid = static_cast<int>(luaL_checkinteger(L, 1));
-    int handle;
-    if (OpenProcessHandle(pid, handle)) {
-        SetCurrentPid(pid);
+    lua_Integer rawPid = luaL_checkinteger(L, 1);
+    if (rawPid <= 0 || rawPid > (std::numeric_limits<int>::max)()) {
+        luaL_error(L, "PID out of range");
+        return 0;
+    }
+
+    int pid = static_cast<int>(rawPid);
+    AppContext::Get().selectProcess(pid, "");
+    if (AppContext::Get().hasProcess()) {
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -246,14 +307,17 @@ int LuaAPI::ResolveOffsetChain(lua_State* L) {
         luaL_error(L, "Expected table for offsets");
     }
 
+    const size_t len = lua_objlen(L, 2);
+    if (len > kMaxLuaOffsetCount) {
+        luaL_error(L, "Offset chain is too long");
+        return 0;
+    }
+
     std::vector<uint64_t> offsets;
-        lua_objlen(L, 2);
-    int len = lua_tointeger(L, -1);
-    lua_pop(L, 1);
-    for (int i = 0; i < len; ++i) {
-        lua_pushinteger(L, i + 1);
-        lua_gettable(L, 2);
-        offsets.push_back(static_cast<uint64_t>(lua_tonumber(L, -1)));
+    offsets.reserve(len);
+    for (size_t i = 0; i < len; ++i) {
+        lua_rawgeti(L, 2, static_cast<int>(i + 1));
+        offsets.push_back(LuaAPI::CheckAddress(L, -1));
         lua_pop(L, 1);
     }
 
@@ -306,7 +370,7 @@ int LuaAPI::ScanFuzzy(lua_State* L) {
 int LuaAPI::SetBreakpoint(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     const char* bpType = luaL_checkstring(L, 2);
-    uint32_t bpSize = static_cast<uint32_t>(luaL_optinteger(L, 3, 4));
+    uint32_t bpSize = checkBreakpointSize(L, 3, 4);
 
     uint32_t typeFlag = 0;
     if (strcmp(bpType, "execute") == 0) typeFlag = 4;
@@ -386,7 +450,12 @@ int LuaAPI::Log(lua_State* L) {
 }
 
 int LuaAPI::Sleep(lua_State* L) {
-    int milliseconds = static_cast<int>(luaL_checkinteger(L, 1));
+    lua_Integer rawMilliseconds = luaL_checkinteger(L, 1);
+    if (rawMilliseconds < 0 || rawMilliseconds > (std::numeric_limits<int>::max)()) {
+        luaL_error(L, "sleep duration must be non-negative");
+        return 0;
+    }
+    int milliseconds = static_cast<int>(rawMilliseconds);
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
     return 0;
 }

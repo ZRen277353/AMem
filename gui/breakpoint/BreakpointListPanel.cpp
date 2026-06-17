@@ -7,6 +7,38 @@
 #include "../../socket/client_singleton.h"
 #include <algorithm>
 #include <cstring>
+#include <cerrno>
+#include <cstdlib>
+
+namespace {
+bool parseBreakpointAddress(const char* text, uint64_t& address)
+{
+    if (!text) {
+        return false;
+    }
+
+    const char* begin = text;
+    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+        ++begin;
+    }
+    if (*begin == '\0' || *begin == '-') {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    address = std::strtoull(begin, &end, 16);
+    if (end == begin || errno == ERANGE || address == 0) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+
+    return *end == '\0';
+}
+}
 
 void BreakpointWindow::drawBreakpointControls()
 {
@@ -16,7 +48,7 @@ void BreakpointWindow::drawBreakpointControls()
 
     ImGui::SameLine();
     if (ImGui::Button("清除所有断点")) {
-        for (int i = breakpoints.size() - 1; i >= 0; i--) {
+        for (int i = static_cast<int>(breakpoints.size()); i-- > 0;) {
             removeBreakpoint(i);
         }
         refreshAllDetailWindows();
@@ -194,7 +226,7 @@ void BreakpointWindow::drawAddBreakpointDialog()
 
         if (ImGui::Button("添加")) {
             uint64_t address = 0;
-            if (sscanf(newBreakpointAddress, "%llx", &address) == 1) {
+            if (parseBreakpointAddress(newBreakpointAddress, address)) {
                 BreakpointType type = (BreakpointType)(newBreakpointType+1);
                 BreakpointSize size = (BreakpointSize)(1 << newBreakpointSize);
 
@@ -208,7 +240,7 @@ void BreakpointWindow::drawAddBreakpointDialog()
 
                 showAddBreakpointDialog = false;
             } else {
-                Gui::log("无效的地址格式");
+                Gui::log("无效的断点地址: %s", newBreakpointAddress);
             }
         }
 

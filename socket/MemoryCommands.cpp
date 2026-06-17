@@ -7,9 +7,31 @@
 namespace {
 constexpr size_t kBatchPageSize = 4096;
 constexpr uint32_t kMaxNetworkAllocSize = 256u * 1024u * 1024u;
+constexpr size_t kMaxBatchAddressCount = 100000;
 
 bool isValidReadSize(uint32_t size) {
     return size > 0 && size <= kMaxNetworkAllocSize;
+}
+
+bool validateBatchReadAddresses(const std::vector<std::pair<uint64_t, int32_t>> &addrs) {
+    if (addrs.empty() || addrs.size() > kMaxBatchAddressCount ||
+        addrs.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+
+    uint64_t totalBytes = 0;
+    for (const auto &entry : addrs) {
+        if (entry.second <= 0 ||
+            static_cast<uint64_t>(entry.second) > kMaxNetworkAllocSize) {
+            return false;
+        }
+        totalBytes += static_cast<uint64_t>(entry.second);
+        if (totalBytes > kMaxNetworkAllocSize) {
+            return false;
+        }
+    }
+
+    return true;
 }
 } // namespace
 
@@ -130,7 +152,8 @@ bool ReadBratchMemory(uint64_t address, uint32_t size,
         if (static_cast<uint64_t>(len) > expectedPages)
             return false;
 
-        out.resize(len);
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> receivedPages;
+        receivedPages.reserve(static_cast<size_t>(len));
         for (int i = 0; i < len; i++) {
             uint64_t addr = 0;
             std::vector<unsigned char> data(kBatchPageSize);
@@ -138,8 +161,9 @@ bool ReadBratchMemory(uint64_t address, uint32_t size,
                 return false;
             if (!client->Receive(data.data(), data.size()))
                 return false;
-            out[i] = {addr, data};
+            receivedPages.emplace_back(addr, std::move(data));
         }
+        out.swap(receivedPages);
         return true;
     });
 }
@@ -148,8 +172,7 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
                     std::vector<std::pair<uint64_t, std::vector<uint8_t>>> &out,
                     PortType port) {
     out.clear();
-    if (addrs.empty() ||
-        addrs.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+    if (!validateBatchReadAddresses(addrs))
         return false;
 
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
@@ -174,7 +197,8 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
         if (result < 0 || result > len)
             return false;
 
-        out.reserve(static_cast<size_t>(result));
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> receivedItems;
+        receivedItems.reserve(static_cast<size_t>(result));
         for (int i = 0; i < result; i++) {
             uint64_t addr = 0;
             uint32_t sz = input[i].size;
@@ -183,8 +207,9 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
                 return false;
             if (!client->Receive(data.data(), data.size()))
                 return false;
-            out.emplace_back(addr, std::move(data));
+            receivedItems.emplace_back(addr, std::move(data));
         }
+        out.swap(receivedItems);
         return true;
     });
 }

@@ -33,18 +33,18 @@ public:
     std::vector<char> selectedScanResults;
 
     // 扫描状态
-    bool scanInProgress = false;
-    bool scanCancelled = false;
+    std::atomic<bool> scanInProgress{false};
+    std::atomic<bool> scanCancelled{false};
     float scanProgress = 0.0f;
     uint64_t scanMatchCount = 0;
     uint64_t scanTotalBytes = 0;
     uint64_t scanScannedBytes = 0;
-    int totalScanResults = 0;
-    bool scanCompleted = false;
-    bool scanError = false;
+    std::atomic<int> totalScanResults{0};
+    std::atomic<bool> scanCompleted{false};
+    std::atomic<bool> scanError{false};
 
     // 结果分页
-    int resultOffset = 0;
+    std::atomic<int> resultOffset{0};
     int resultPageSize = 1000;
 
     // 地址列表自动刷新控制
@@ -66,8 +66,26 @@ public:
     std::mutex scanProgressMutex;
 
     // 刷新进度
-    std::atomic<int> refreshProgress{0};
-    std::atomic<int> refreshTotal{0};
+    std::atomic<int> scanResultsRefreshProgress{0};
+    std::atomic<int> scanResultsRefreshTotal{0};
+    std::atomic<int> addressListRefreshProgress{0};
+    std::atomic<int> addressListRefreshTotal{0};
+
+    // 扫描结果显示状态
+    bool showScanResultHexValues = false;
+    bool sortScanResultsByValue = false;
+    std::atomic<int> scanResultValueType{0};
+    std::atomic<int> activeScanType{0};
+    std::atomic<int> activeScanValueType{0};
+    uint64_t resultContextMenuAddress = 0;
+    std::string resultContextMenuValue;
+    int resultContextMenuValueType = 0;
+    bool scanResultsFirstRefreshLog = true;
+    bool scanResultsLargePageWarningShown = false;
+    uint64_t progressLastScannedBytes = 0;
+    float progressLastUpdateTime = 0.0f;
+    float progressStartTime = 0.0f;
+    uint64_t observedProcessRevision = 0;
 
     void onDraw() override;
     void updateScanProgress(float progress, uint64_t matchCount, uint64_t scannedBytes, uint64_t totalBytes);
@@ -79,6 +97,7 @@ private:
     void drawScanRangeSettings();
     void drawScanProgressBar();
     void drawMemoryTypeSelectionModal();
+    void resetProcessState();
 
     // 扫描功能
     void performFirstScan();
@@ -87,12 +106,16 @@ private:
     void performNextScanAsync();
     void performNewScan();
     void loadScanResults();
+    void loadScanResultsForRevision(uint64_t expectedProcessRevision);
     void refreshAddressValues();
-    void refreshSingleAddress(int index);
-    bool writeAddressValue(int index, const std::string& value);
-    void refreshScanResultsValues();
+    void refreshAddressValuesForRevision(uint64_t expectedProcessRevision);
+    std::string readAddressValue(uint64_t address, int valueType);
+    bool writeAddressValue(uint64_t address, int valueType, const std::string& value);
+    void refreshScanResultsValues(int refreshValueType, bool warnLargePage);
+    void refreshScanResultsValuesForRevision(int refreshValueType, bool warnLargePage, uint64_t expectedProcessRevision);
     void refreshScanResultsValuesAsync();
     void refreshAddressValuesAsync();
+    void sortScanResultsForDisplay();
 
     // 扫描参数验证和处理
     bool validateScanParameters(bool isFirstScan);
@@ -110,4 +133,4 @@ private:
     uint32_t getValueTypeSize();
     const char* getScanTypeName(int scanType) const;
     const char* getValueTypeName(int valueType) const;
-}; 
+};

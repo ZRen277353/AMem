@@ -12,8 +12,134 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <cctype>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
+#include <stdexcept>
 
 #pragma comment(lib, "ws2_32.lib")
+
+namespace {
+constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
+constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
+constexpr size_t kMaxIpcBatchReadCount = 100000;
+
+bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const char* expected) {
+    size_t expectedLen = 0;
+    while (expected[expectedLen] != '\0') {
+        ++expectedLen;
+    }
+    if (end < begin || end - begin != expectedLen) {
+        return false;
+    }
+
+    for (size_t i = 0; i < expectedLen; ++i) {
+        if (std::tolower(static_cast<unsigned char>(text[begin + i])) !=
+            std::tolower(static_cast<unsigned char>(expected[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool parseContentLengthHeader(const std::string& headers, size_t& outLength) {
+    outLength = 0;
+    size_t lineStart = 0;
+    while (lineStart < headers.size()) {
+        size_t lineEnd = headers.find("\r\n", lineStart);
+        if (lineEnd == std::string::npos) {
+            lineEnd = headers.size();
+        }
+
+        const size_t colon = headers.find(':', lineStart);
+        if (colon != std::string::npos && colon < lineEnd) {
+            size_t nameBegin = lineStart;
+            size_t nameEnd = colon;
+            while (nameBegin < nameEnd &&
+                   std::isspace(static_cast<unsigned char>(headers[nameBegin]))) {
+                ++nameBegin;
+            }
+            while (nameEnd > nameBegin &&
+                   std::isspace(static_cast<unsigned char>(headers[nameEnd - 1]))) {
+                --nameEnd;
+            }
+
+            if (equalsIgnoreCase(headers, nameBegin, nameEnd, "content-length")) {
+                size_t valueBegin = colon + 1;
+                size_t valueEnd = lineEnd;
+                while (valueBegin < valueEnd &&
+                       std::isspace(static_cast<unsigned char>(headers[valueBegin]))) {
+                    ++valueBegin;
+                }
+                while (valueEnd > valueBegin &&
+                       std::isspace(static_cast<unsigned char>(headers[valueEnd - 1]))) {
+                    --valueEnd;
+                }
+                if (valueBegin == valueEnd) {
+                    return false;
+                }
+
+                size_t parsed = 0;
+                for (size_t i = valueBegin; i < valueEnd; ++i) {
+                    const unsigned char ch = static_cast<unsigned char>(headers[i]);
+                    if (!std::isdigit(ch)) {
+                        return false;
+                    }
+                    const size_t digit = static_cast<size_t>(ch - '0');
+                    if (parsed > ((std::numeric_limits<size_t>::max)() - digit) / 10) {
+                        return false;
+                    }
+                    parsed = parsed * 10 + digit;
+                }
+                outLength = parsed;
+                return true;
+            }
+        }
+
+        if (lineEnd == headers.size()) {
+            break;
+        }
+        lineStart = lineEnd + 2;
+    }
+    return true;
+}
+
+uint32_t getPositiveSizeParam(const json& params,
+                              const char* key,
+                              uint32_t defaultValue,
+                              uint32_t maxValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+
+    uint64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        value = raw.get<uint64_t>();
+    } else if (raw.is_number_integer()) {
+        const int64_t signedValue = raw.get<int64_t>();
+        if (signedValue <= 0) {
+            throw std::invalid_argument(std::string(key) + " must be positive");
+        }
+        value = static_cast<uint64_t>(signedValue);
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value == 0) {
+        throw std::invalid_argument(std::string(key) + " must be positive");
+    }
+    if (value > maxValue) {
+        value = maxValue;
+    }
+    return static_cast<uint32_t>(value);
+}
+
+bool isValidBreakpointSize(uint32_t size) {
+    return size == 1 || size == 2 || size == 4 || size == 8;
+}
+} // namespace
 
 // ── 单例 ─────────────────────────────────────────────────────────
 IpcServer& IpcServer::GetInstance() {
@@ -105,7 +231,10 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     std::string raw;
     raw.reserve(4096);
     char buf[4096];
-    int contentLength = -1;
+    size_t contentLength = 0;
+    bool contentLengthKnown = false;
+    bool badRequest = false;
+    bool requestTooLarge = false;
     size_t headerEnd = std::string::npos;
 
     while (true) {
@@ -117,30 +246,52 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         if (headerEnd == std::string::npos) {
             headerEnd = raw.find("\r\n\r\n");
             if (headerEnd != std::string::npos) {
-                // 解析 Content-Length
-                auto clPos = raw.find("Content-Length:");
-                if (clPos == std::string::npos)
-                    clPos = raw.find("content-length:");
-                if (clPos != std::string::npos) {
-                    contentLength = std::atoi(raw.c_str() + clPos + 15);
-                } else {
-                    contentLength = 0;
+                const std::string headers = raw.substr(0, headerEnd);
+                if (!parseContentLengthHeader(headers, contentLength)) {
+                    badRequest = true;
+                    break;
+                }
+                contentLengthKnown = true;
+                if (contentLength > kMaxHttpRequestBytes ||
+                    headerEnd + 4 > kMaxHttpRequestBytes - contentLength) {
+                    requestTooLarge = true;
+                    break;
                 }
             }
         }
 
-        if (headerEnd != std::string::npos) {
+        if (headerEnd != std::string::npos && contentLengthKnown) {
             size_t bodyStart = headerEnd + 4;
-            if ((int)(raw.size() - bodyStart) >= contentLength) break;
+            if (raw.size() >= bodyStart && raw.size() - bodyStart >= contentLength) break;
         }
 
-        if (raw.size() > 1024 * 1024) break; // 防止过大
+        if (raw.size() > kMaxHttpRequestBytes) {
+            requestTooLarge = true;
+            break;
+        }
+    }
+
+    if (badRequest || headerEnd == std::string::npos) {
+        json response = {{"success", false}, {"error", "Invalid HTTP request"}};
+        std::string httpResp = BuildHttpResponse(400, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
+    }
+
+    if (requestTooLarge) {
+        json response = {{"success", false}, {"error", "HTTP request too large"}};
+        std::string httpResp = BuildHttpResponse(413, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
     }
 
     // 提取 body
     std::string body;
-    if (headerEnd != std::string::npos)
-        body = raw.substr(headerEnd + 4);
+    const size_t bodyStart = headerEnd + 4;
+    if (raw.size() >= bodyStart)
+        body = raw.substr(bodyStart, contentLength);
 
     // 处理 CORS preflight
     if (raw.substr(0, 7) == "OPTIONS") {
@@ -182,6 +333,7 @@ std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body
     case 204: reason = "No Content"; break;
     case 400: reason = "Bad Request"; break;
     case 404: reason = "Not Found"; break;
+    case 413: reason = "Payload Too Large"; break;
     case 500: reason = "Internal Server Error"; break;
     default:  reason = "Unknown"; break;
     }
@@ -238,10 +390,27 @@ static std::string BytesToHex(const std::vector<unsigned char>& data) {
     return oss.str();
 }
 
+static int HexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static std::vector<unsigned char> HexToBytes(const std::string& hex) {
+    if ((hex.size() % 2) != 0) {
+        throw std::invalid_argument("hex string must contain an even number of digits");
+    }
+
     std::vector<unsigned char> out;
-    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
-        out.push_back((unsigned char)std::stoi(hex.substr(i, 2), nullptr, 16));
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int hi = HexNibble(hex[i]);
+        int lo = HexNibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) {
+            throw std::invalid_argument("hex string contains non-hex characters");
+        }
+        out.push_back(static_cast<unsigned char>((hi << 4) | lo));
     }
     return out;
 }
@@ -250,7 +419,31 @@ static uint64_t ParseAddress(const json& params, const std::string& key) {
     auto& v = params.at(key);
     if (v.is_string()) {
         std::string s = v.get<std::string>();
-        return std::stoull(s, nullptr, (s.size() > 2 && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10);
+        size_t begin = s.find_first_not_of(" \t\r\n");
+        size_t endPos = s.find_last_not_of(" \t\r\n");
+        if (begin == std::string::npos || s[begin] == '-') {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        s = s.substr(begin, endPos - begin + 1);
+
+        char* end = nullptr;
+        errno = 0;
+        const int base = (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10;
+        uint64_t parsed = std::strtoull(s.c_str(), &end, base);
+        if (end == s.c_str() || *end != '\0' || errno == ERANGE) {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        return parsed;
+    }
+    if (v.is_number_unsigned()) {
+        return v.get<uint64_t>();
+    }
+    if (v.is_number_integer()) {
+        int64_t parsed = v.get<int64_t>();
+        if (parsed < 0) {
+            throw std::invalid_argument("invalid address: " + key);
+        }
+        return static_cast<uint64_t>(parsed);
     }
     return v.get<uint64_t>();
 }
@@ -371,8 +564,7 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── read_memory ──────────────────────────────────────────────
     RegisterMethod("read_memory", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        uint32_t size = p.value("size", 256u);
-        if (size > 65536) size = 65536;
+        uint32_t size = getPositiveSizeParam(p, "size", 256u, kMaxIpcMemoryTransferBytes);
         std::vector<unsigned char> data;
         if (!ReadProcessMemoryBytes(addr, size, data))
             return {{"success", false}, {"error", "读取内存失败"}};
@@ -385,6 +577,12 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("write_memory", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         std::string hexStr = p.at("hex").get<std::string>();
+        if (hexStr.empty()) {
+            return {{"success", false}, {"error", "hex 不能为空"}};
+        }
+        if (hexStr.size() > static_cast<size_t>(kMaxIpcMemoryTransferBytes) * 2) {
+            return {{"success", false}, {"error", "写入数据超过 IPC 限制"}};
+        }
         auto data = HexToBytes(hexStr);
         uint32_t size = (uint32_t)data.size();
         if (!WriteProcessMemoryBytes(addr, size, data))
@@ -395,10 +593,17 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── read_batch ───────────────────────────────────────────────
     RegisterMethod("read_batch", [](const json& p) -> json {
         auto& addrsArr = p.at("addresses");
+        if (!addrsArr.is_array()) {
+            return {{"success", false}, {"error", "addresses 必须是数组"}};
+        }
+        if (addrsArr.empty() || addrsArr.size() > kMaxIpcBatchReadCount) {
+            return {{"success", false}, {"error", "addresses 数量超出限制"}};
+        }
         std::vector<std::pair<uint64_t, int32_t>> addrs;
+        addrs.reserve(addrsArr.size());
         for (auto& item : addrsArr) {
             uint64_t a = ParseAddress(item, "address");
-            int32_t s = item.value("size", 4);
+            uint32_t s = getPositiveSizeParam(item, "size", 4u, kMaxIpcMemoryTransferBytes);
             addrs.push_back({a, s});
         }
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> out;
@@ -430,6 +635,8 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanValueWithProgress(flags, valBytes, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -438,11 +645,13 @@ void IpcServer::RegisterBuiltinMethods() {
         uint32_t flags = p.at("flags").get<uint32_t>();
         std::string hexVal = p.at("value_hex").get<std::string>();
         auto valBytes = HexToBytes(hexVal);
-        int flag = p.value("scan_flag", 0);
+        int flag = p.value("scan_flag", static_cast<int>(flags));
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanNextValueWithProgress(valBytes, flag, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "再次扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -453,6 +662,8 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanFuzzyValueWithProgress(flags, nullptr, nullptr, start, end);
+        if (count < 0)
+            return {{"success", false}, {"error", "模糊扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
@@ -464,20 +675,27 @@ void IpcServer::RegisterBuiltinMethods() {
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
         int count = ScanHEXValueWithProgress(start, end, patternBytes, nullptr, nullptr);
+        if (count < 0)
+            return {{"success", false}, {"error", "HEX 扫描失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
     // ── get_scan_count ───────────────────────────────────────────
     RegisterMethod("get_scan_count", [](const json&) -> json {
         int count = GetScanResultCount();
+        if (count < 0)
+            return {{"success", false}, {"error", "获取扫描结果数量失败"}};
         return {{"success", true}, {"result", {{"count", count}}}};
     });
 
     // ── get_scan_results ─────────────────────────────────────────
     RegisterMethod("get_scan_results", [](const json& p) -> json {
         int total = GetScanResultCount();
+        if (total < 0)
+            return {{"success", false}, {"error", "获取扫描结果数量失败"}};
         int offset = p.value("offset", 0);
         int count = p.value("count", 20);
+        if (count < 1) count = 1;
         if (count > 1000) count = 1000;
         if (offset < 0) offset = 0;
         if (offset >= total) {
@@ -497,7 +715,8 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── clear_scan ───────────────────────────────────────────────
     RegisterMethod("clear_scan", [](const json&) -> json {
-        ClearScanResult();
+        if (!ClearScanResult())
+            return {{"success", false}, {"error", "清空扫描结果失败"}};
         return {{"success", true}, {"result", nullptr}};
     });
     // ── set_breakpoint ────────────────────────────────────────────
@@ -505,6 +724,12 @@ void IpcServer::RegisterBuiltinMethods() {
         uint64_t addr = ParseAddress(p, "address");
         uint32_t bpType = p.value("bp_type", 1u);
         uint32_t bpSize = p.value("bp_size", 4u);
+        if (bpType < 1 || bpType > 4) {
+            return {{"success", false}, {"error", "bp_type 必须在 1 到 4 之间"}};
+        }
+        if (!isValidBreakpointSize(bpSize)) {
+            return {{"success", false}, {"error", "bp_size 必须为 1、2、4 或 8"}};
+        }
         if (!SetKernelBreakpoint(addr, bpType, bpSize))
             return {{"success", false}, {"error", "设置断点失败"}};
         return {{"success", true}, {"result", nullptr}};

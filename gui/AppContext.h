@@ -19,8 +19,11 @@ public:
     // 进程状态
     std::atomic<int> selectedPid{0};
     std::atomic<int> processHandle{0};
+    std::atomic<uint64_t> processRevision{0};
 
     void selectProcess(int pid, const std::string& name);
+    void clearProcess();
+    void cleanupCurrentProcessServices();
     bool hasProcess() const {
         return selectedPid.load(std::memory_order_relaxed) != 0 &&
                processHandle.load(std::memory_order_relaxed) != 0;

@@ -35,8 +35,8 @@ int Window::currentPid() const {
     return AppContext::Get().selectedPid.load();
 }
 
-const std::string& Window::currentProcessName() const {
-    return AppContext::Get().selectedName;
+std::string Window::currentProcessName() const {
+    return AppContext::Get().getSelectedName();
 }
 
 void Window::navigateToAddress(uint64_t addr) {
@@ -53,4 +53,4 @@ bool Window::shouldRefresh(float& timer, float interval) {
         return true;
     }
     return false;
-} 
+}

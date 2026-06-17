@@ -1,6 +1,8 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
 #include <ctime>
+#include <cerrno>
+#include <cstdlib>
 
 namespace {
 constexpr int kMaxProcessCount = 65536;
@@ -12,6 +14,31 @@ constexpr int kMaxDriverResponseSize = 64 * 1024;
 
 bool isValidCount(int value, int maxValue) {
     return value >= 0 && value <= maxValue;
+}
+
+bool isValidModuleSize(int value) {
+    return value > 0;
+}
+
+bool parseTimestampMs(const std::string& text, uint64_t& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, 10);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& out) {
+    if (base > UINT64_MAX - offset)
+        return false;
+    out = base + offset;
+    return true;
 }
 } // namespace
 
@@ -66,13 +93,23 @@ bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
     if (ret > 0) {
         try {
             std::string timestampStr(resStrVec.data(), resStrVec.size());
-            uint64_t timestamp_ms = std::stoull(timestampStr);
+            uint64_t timestamp_ms = 0;
+            if (!parseTimestampMs(timestampStr, timestamp_ms)) {
+                resStr = "时间戳解析失败";
+                return true;
+            }
             time_t timestamp = static_cast<time_t>(timestamp_ms / 1000);
             if (timestamp > 0) {
-                std::tm *timeinfo = std::localtime(&timestamp);
-                if (timeinfo != nullptr) {
+                std::tm timeinfo{};
+#ifdef _WIN32
+                if (localtime_s(&timeinfo, &timestamp) == 0) {
+#else
+                std::tm *local = std::localtime(&timestamp);
+                if (local != nullptr) {
+                    timeinfo = *local;
+#endif
                     char dateTime[20];
-                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", timeinfo);
+                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeinfo);
                     resStr = dateTime;
                 } else {
                     resStr = "时间格式化失败";
@@ -97,14 +134,15 @@ bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type) {
         CeVersion version{};
         if (!client->Receive(&version, sizeof(version)))
             return false;
-        outInfo.version = version.version;
-        outInfo.versionString.clear();
+        ServerVersionInfo info{};
+        info.version = version.version;
         if (version.stringsize > 0) {
             std::vector<char> versionString(version.stringsize);
-            if (client->Receive(versionString.data(), versionString.size())) {
-                outInfo.versionString.assign(versionString.data(), versionString.size());
-            }
+            if (!client->Receive(versionString.data(), versionString.size()))
+                return false;
+            info.versionString.assign(versionString.data(), versionString.size());
         }
+        outInfo = std::move(info);
         return true;
     });
 }
@@ -156,7 +194,8 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
-            if (!isValidCount(entry.modulenamesize, kMaxModuleNameSize))
+            if (!isValidModuleSize(entry.modulesize) ||
+                !isValidCount(entry.modulenamesize, kMaxModuleNameSize))
                 return false;
             std::vector<char> name;
             if (entry.modulenamesize > 0) {
@@ -194,9 +233,9 @@ bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortT
     return false;
 }
 
-static bool read_u64(uint64_t address, uint64_t &value) {
+static bool read_u64(uint64_t address, uint64_t &value, PortType port) {
     std::vector<unsigned char> buf;
-    if (!ReadProcessMemoryBytes(address, 8, buf))
+    if (!ReadProcessMemoryBytes(address, 8, buf, port))
         return false;
     if (buf.size() < 8)
         return false;
@@ -213,20 +252,23 @@ bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleNam
     uint64_t base = 0;
     if (!GetModuleBaseByName(moduleName, base, port))
         return false;
-    uint64_t addr = base + baseOffset;
+    uint64_t addr = 0;
+    if (!addAddressOffset(base, baseOffset, addr))
+        return false;
     if (offsets.empty()) {
         outAddress = addr;
         return true;
     }
     for (size_t i = 0; i < offsets.size(); ++i) {
         uint64_t ptr = 0;
-        if (!read_u64(addr, ptr))
+        if (!read_u64(addr, ptr, port))
             return false;
-        addr = ptr + offsets[i];
+        if (!addAddressOffset(ptr, offsets[i], addr))
+            return false;
     }
     if (derefFinal) {
         uint64_t finalPtr = 0;
-        if (!read_u64(addr, finalPtr))
+        if (!read_u64(addr, finalPtr, port))
             return false;
         addr = finalPtr;
     }

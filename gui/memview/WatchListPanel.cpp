@@ -9,7 +9,11 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <cerrno>
+#include <limits>
 
 // 辅助：判断类型是否可冻结（固定大小 ≤ 8 字节的数值类型）
 static bool isFreezableType(FieldType type) {
@@ -41,6 +45,215 @@ static uint8_t getFreezeDataSize(FieldType type) {
     }
 }
 
+static bool resolveWatchItemAddress(const MemoryWatchItem& item, uint64_t& address) {
+    address = item.address;
+
+    if (!item.isPointer || item.offsets.empty()) {
+        return true;
+    }
+
+    for (uint64_t offset : item.offsets) {
+        std::vector<unsigned char> ptrData;
+        if (!ReadProcessMemoryBytes(address, 8, ptrData) || ptrData.size() < 8) {
+            return false;
+        }
+
+        uint64_t nextAddress = 0;
+        memcpy(&nextAddress, ptrData.data(), sizeof(nextAddress));
+        if (nextAddress > (std::numeric_limits<uint64_t>::max)() - offset) {
+            return false;
+        }
+        address = nextAddress + offset;
+    }
+
+    return true;
+}
+
+static void clearWatchItemFreeze(MemoryWatchItem& item) {
+    if (item.frozen || item.frozenDataSize > 0 || item.frozenAddress != 0) {
+        const uint64_t address = item.frozenAddress != 0 ? item.frozenAddress : item.address;
+        FreezeRemove(address);
+    }
+
+    item.frozen = false;
+    item.frozenDataSize = 0;
+    item.frozenAddress = 0;
+    memset(item.frozenData, 0, sizeof(item.frozenData));
+}
+
+static void clearWatchItemFreezes(std::vector<MemoryWatchItem>& items) {
+    for (auto& item : items) {
+        clearWatchItemFreeze(item);
+    }
+}
+
+template <typename T>
+static bool readWatchScalar(const std::vector<unsigned char>& data, T& value) {
+    if (data.size() < sizeof(T)) {
+        return false;
+    }
+    std::memcpy(&value, data.data(), sizeof(T));
+    return true;
+}
+
+template <typename T>
+static void appendWatchScalar(std::vector<unsigned char>& data, T value) {
+    const size_t oldSize = data.size();
+    data.resize(oldSize + sizeof(T));
+    std::memcpy(data.data() + oldSize, &value, sizeof(T));
+}
+
+static bool parseWatchHexStrict(const char* text, uint64_t& value) {
+    if (!text) {
+        return false;
+    }
+
+    const char* begin = text;
+    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+        ++begin;
+    }
+    if (*begin == '\0' || *begin == '-') {
+        return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(begin, &end, 16);
+    if (end == begin || errno == ERANGE) {
+        return false;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+
+    return *end == '\0';
+}
+
+static bool parseWatchUnsignedValue(const std::string& text, uint64_t maxValue, uint64_t& value, int defaultBase = 0) {
+    size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos || text[begin] == '-') {
+        return false;
+    }
+
+    size_t endPos = begin;
+    while (endPos < text.size() &&
+           text[endPos] != ' ' &&
+           text[endPos] != '\t' &&
+           text[endPos] != '\r' &&
+           text[endPos] != '\n' &&
+           text[endPos] != '(' &&
+           text[endPos] != ',') {
+        ++endPos;
+    }
+
+    std::string token = text.substr(begin, endPos - begin);
+    if (token.empty()) {
+        return false;
+    }
+
+    bool hasHexLetter = false;
+    for (char c : token) {
+        if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+            hasHexLetter = true;
+            break;
+        }
+    }
+
+    int base = defaultBase;
+    if (token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+        base = 0;
+    } else if (base == 0) {
+        base = hasHexLetter ? 16 : 10;
+    }
+
+    const char* str = token.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtoull(str, &end, base);
+    return end != str && *end == '\0' && errno != ERANGE && value <= maxValue;
+}
+
+static bool parseWatchFloatValue(const std::string& text, float& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtof(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+static bool parseWatchDoubleValue(const std::string& text, double& value) {
+    const char* str = text.c_str();
+    char* end = nullptr;
+    errno = 0;
+    value = std::strtod(str, &end);
+    if (end == str || errno == ERANGE) {
+        return false;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        ++end;
+    }
+    return *end == '\0';
+}
+
+static std::vector<uint16_t> watchUtf8ToUtf16Units(const std::string& text) {
+    std::vector<uint16_t> units;
+    for (size_t i = 0; i < text.size();) {
+        uint32_t cp = 0xFFFD;
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x80) {
+            cp = c;
+            ++i;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            if ((c1 & 0xC0) == 0x80) {
+                cp = ((c & 0x1F) << 6) | (c1 & 0x3F);
+                i += 2;
+            } else {
+                ++i;
+            }
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(text[i + 2]);
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
+                cp = ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+                i += 3;
+            } else {
+                ++i;
+            }
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+            unsigned char c1 = static_cast<unsigned char>(text[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(text[i + 2]);
+            unsigned char c3 = static_cast<unsigned char>(text[i + 3]);
+            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
+                cp = ((c & 0x07) << 18) | ((c1 & 0x3F) << 12) |
+                     ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+                i += 4;
+            } else {
+                ++i;
+            }
+        } else {
+            ++i;
+        }
+
+        if (cp <= 0xFFFF) {
+            units.push_back(static_cast<uint16_t>(cp));
+        } else if (cp <= 0x10FFFF) {
+            cp -= 0x10000;
+            units.push_back(static_cast<uint16_t>(0xD800 | (cp >> 10)));
+            units.push_back(static_cast<uint16_t>(0xDC00 | (cp & 0x3FF)));
+        }
+    }
+
+    return units;
+}
+
 void MemoryViewerWindow::drawAddressList()
 {
     // 工具栏
@@ -56,7 +269,11 @@ void MemoryViewerWindow::drawAddressList()
     ImGui::SameLine();
     if (ImGui::Button("删除选中")) {
         if (selectedWatchIndex >= 0 && selectedWatchIndex < (int)watchItems.size()) {
+            clearWatchItemFreeze(watchItems[selectedWatchIndex]);
             watchItems.erase(watchItems.begin() + selectedWatchIndex);
+            if (selectedWatchIndex < (int)watchLastValues.size()) {
+                watchLastValues.erase(watchLastValues.begin() + selectedWatchIndex);
+            }
             selectedWatchIndex = -1;
         }
     }
@@ -70,7 +287,9 @@ void MemoryViewerWindow::drawAddressList()
     
     ImGui::SameLine();
     if (ImGui::Button("删除全部")) {
+        clearWatchItemFreezes(watchItems);
         watchItems.clear();
+        watchLastValues.clear();
         selectedWatchIndex = -1;
     }
     
@@ -91,6 +310,9 @@ void MemoryViewerWindow::drawAddressList()
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);
     ImGui::InputFloat("##interval", &watchUpdateInterval, 0, 0, "%.2f");
+    if (watchUpdateInterval < 0.1f) {
+        watchUpdateInterval = 0.1f;
+    }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("自动更新间隔（秒）\n建议值: 0.5-2.0秒\n监控项多时建议增加间隔");
     }
@@ -116,6 +338,7 @@ void MemoryViewerWindow::drawAddressList()
         ImGui::TableSetupColumn("值", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 120);
         ImGui::TableHeadersRow();
+        int pendingDeleteWatchIndex = -1;
         
         for (size_t i = 0; i < watchItems.size(); i++) {
             auto& item = watchItems[i];
@@ -135,8 +358,7 @@ void MemoryViewerWindow::drawAddressList()
             // 描述
             ImGui::TableSetColumnIndex(1);
             char descBuf[256];
-            strncpy(descBuf, item.description.c_str(), sizeof(descBuf) - 1);
-            descBuf[sizeof(descBuf) - 1] = '\0';
+            std::snprintf(descBuf, sizeof(descBuf), "%s", item.description.c_str());
             ImGui::PushItemWidth(-1);
             if (ImGui::InputText("##desc", descBuf, sizeof(descBuf))) {
                 item.description = descBuf;
@@ -145,13 +367,34 @@ void MemoryViewerWindow::drawAddressList()
             
             // 地址（可编辑）
             ImGui::TableSetColumnIndex(2);
-            char addrBuf[32];
-            snprintf(addrBuf, sizeof(addrBuf), "%016llX", item.address);
+            if (!item.addressEditActive) {
+                std::snprintf(item.editAddressBuffer, sizeof(item.editAddressBuffer), "%016llX", item.address);
+            }
             ImGui::PushItemWidth(-1);
-            if (ImGui::InputText("##addr", addrBuf, sizeof(addrBuf), ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue)) {
+            bool addressSubmitted = ImGui::InputText(
+                "##addr",
+                item.editAddressBuffer,
+                sizeof(item.editAddressBuffer),
+                ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemActivated()) {
+                item.addressEditActive = true;
+            }
+            bool addressDeactivated = ImGui::IsItemDeactivated();
+            if (addressSubmitted) {
                 uint64_t newAddr = 0;
-                sscanf(addrBuf, "%llx", &newAddr);
-                item.address = newAddr;
+                if (parseWatchHexStrict(item.editAddressBuffer, newAddr)) {
+                    if (newAddr != item.address) {
+                        clearWatchItemFreeze(item);
+                    }
+                    item.address = newAddr;
+                    item.cachedValue = AppContext::Get().hasProcess() ? readWatchItemValue(item) : "N/A";
+                } else {
+                    Gui::log("无效的监控地址: %s", item.editAddressBuffer);
+                    std::snprintf(item.editAddressBuffer, sizeof(item.editAddressBuffer), "%016llX", item.address);
+                }
+                item.addressEditActive = false;
+            } else if (addressDeactivated) {
+                item.addressEditActive = false;
             }
             ImGui::PopItemWidth();
             
@@ -165,7 +408,12 @@ void MemoryViewerWindow::drawAddressList()
             int currentType = (int)item.type;
             ImGui::PushItemWidth(-1);
             if (ImGui::Combo("##type", &currentType, typeNames, IM_ARRAYSIZE(typeNames))) {
-                item.type = (FieldType)currentType;
+                FieldType newType = (FieldType)currentType;
+                if (newType != item.type) {
+                    clearWatchItemFreeze(item);
+                    item.type = newType;
+                    item.cachedValue = AppContext::Get().hasProcess() ? readWatchItemValue(item) : "N/A";
+                }
             }
             ImGui::PopItemWidth();
             
@@ -176,34 +424,49 @@ void MemoryViewerWindow::drawAddressList()
                 std::string& value = item.cachedValue;
                 
                 // 可编辑的值
-                char valueBuf[256];
-                strncpy(valueBuf, value.c_str(), sizeof(valueBuf) - 1);
-                valueBuf[sizeof(valueBuf) - 1] = '\0';
+                if (!item.valueEditActive) {
+                    std::snprintf(item.editValueBuffer, sizeof(item.editValueBuffer), "%s", value.c_str());
+                }
                 
                 ImGui::PushItemWidth(-1);
-                if (ImGui::InputText("##value", valueBuf, sizeof(valueBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                    if (writeWatchItemValue(item, valueBuf)) {
-                        item.cachedValue = valueBuf;  // 立即更新缓存
+                bool valueSubmitted = ImGui::InputText(
+                    "##value",
+                    item.editValueBuffer,
+                    sizeof(item.editValueBuffer),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::IsItemActivated()) {
+                    item.valueEditActive = true;
+                }
+                bool valueDeactivated = ImGui::IsItemDeactivated();
+                if (valueSubmitted) {
+                    std::string submittedValue = item.editValueBuffer;
+                    if (writeWatchItemValue(item, submittedValue)) {
+                        item.cachedValue = readWatchItemValue(item);
                         // 如果该项正在冻结，同步更新服务端冻结值
                         if (item.frozen && item.frozenDataSize > 0) {
+                            uint64_t freezeAddress = item.frozenAddress != 0 ? item.frozenAddress : item.address;
                             std::vector<unsigned char> rawData;
-                            if (ReadProcessMemoryBytes(item.address, item.frozenDataSize, rawData) &&
+                            if (ReadProcessMemoryBytes(freezeAddress, item.frozenDataSize, rawData) &&
                                 rawData.size() >= item.frozenDataSize) {
                                 memcpy(item.frozenData, rawData.data(), item.frozenDataSize);
-                                FreezeUpdate(item.address, item.frozenData);
+                                FreezeUpdate(freezeAddress, item.frozenData);
                             }
                         }
                     }
+                    item.valueEditActive = false;
+                } else if (valueDeactivated) {
+                    item.valueEditActive = false;
                 }
                 ImGui::PopItemWidth();
                 
                 // 值变化时高亮显示
-                static std::vector<std::string> lastValues;
-                if (lastValues.size() <= i) lastValues.resize(watchItems.size());
-                if (lastValues[i] != value) {
+                if (watchLastValues.size() != watchItems.size()) {
+                    watchLastValues.resize(watchItems.size());
+                }
+                if (watchLastValues[i] != value) {
                     ImGui::SameLine();
                     ImGui::TextColored(ColorScheme::WarningBright, "*");
-                    lastValues[i] = value;
+                    watchLastValues[i] = value;
                 }
             } else {
                 ImGui::TextDisabled("禁用");
@@ -212,11 +475,17 @@ void MemoryViewerWindow::drawAddressList()
             // 操作
             ImGui::TableSetColumnIndex(5);
             if (ImGui::SmallButton("浏览")) {
-                jumpToAddress(item.address);
+                uint64_t targetAddress = 0;
+                if (resolveWatchItemAddress(item, targetAddress)) {
+                    jumpToAddress(targetAddress);
+                } else {
+                    Gui::log("浏览失败: 无法解析地址 0x%llX", (unsigned long long)item.address);
+                }
             }
             ImGui::SameLine();
             // 冻结：仅数值类型（≤8字节）可冻结
             if (!isFreezableType(item.type)) {
+                clearWatchItemFreeze(item);
                 ImGui::BeginDisabled();
                 bool dummy = false;
                 ImGui::Checkbox("冻结", &dummy);
@@ -228,28 +497,31 @@ void MemoryViewerWindow::drawAddressList()
                 if (item.frozen) {
                     // 读取当前原始字节
                     uint8_t dataSize = getFreezeDataSize(item.type);
+                    uint64_t targetAddress = 0;
                     std::vector<unsigned char> rawData;
                     if (dataSize > 0 && dataSize <= 8 &&
-                        ReadProcessMemoryBytes(item.address, dataSize, rawData) &&
+                        resolveWatchItemAddress(item, targetAddress) &&
+                        ReadProcessMemoryBytes(targetAddress, dataSize, rawData) &&
                         rawData.size() >= dataSize) {
                         item.frozenDataSize = dataSize;
+                        item.frozenAddress = targetAddress;
                         memset(item.frozenData, 0, sizeof(item.frozenData));
                         memcpy(item.frozenData, rawData.data(), dataSize);
                         // 委托服务端冻结
-                        if (!FreezeAdd(item.address, dataSize, item.frozenData)) {
-                            Gui::log("冻结失败: 0x%llX", (unsigned long long)item.address);
+                        if (!FreezeAdd(targetAddress, dataSize, item.frozenData)) {
+                            Gui::log("冻结失败: 0x%llX", (unsigned long long)targetAddress);
                             item.frozen = false;
                             item.frozenDataSize = 0;
+                            item.frozenAddress = 0;
                         }
                     } else {
                         Gui::log("冻结失败: 无法读取地址 0x%llX", (unsigned long long)item.address);
                         item.frozen = false;
+                        item.frozenAddress = 0;
                     }
                 } else {
                     // 取消冻结
-                    FreezeRemove(item.address);
-                    item.frozenDataSize = 0;
-                    memset(item.frozenData, 0, sizeof(item.frozenData));
+                    clearWatchItemFreeze(item);
                 }
             }
             
@@ -271,7 +543,12 @@ void MemoryViewerWindow::drawAddressList()
                     };
                     for (int t = 0; t < IM_ARRAYSIZE(typeNames); t++) {
                         if (ImGui::MenuItem(typeNames[t], nullptr, (int)item.type == t)) {
-                            item.type = (FieldType)t;
+                            FieldType newType = (FieldType)t;
+                            if (newType != item.type) {
+                                clearWatchItemFreeze(item);
+                                item.type = newType;
+                                item.cachedValue = AppContext::Get().hasProcess() ? readWatchItemValue(item) : "N/A";
+                            }
                         }
                     }
                     ImGui::EndMenu();
@@ -281,7 +558,7 @@ void MemoryViewerWindow::drawAddressList()
                 
                 if (ImGui::MenuItem("复制地址")) {
                     char addrStr[32];
-                    sprintf(addrStr, "%llX", item.address);
+                    std::snprintf(addrStr, sizeof(addrStr), "%llX", item.address);
                     ImGui::SetClipboardText(addrStr);
                 }
                 
@@ -293,14 +570,26 @@ void MemoryViewerWindow::drawAddressList()
                 ImGui::Separator();
                 
                 if (ImGui::MenuItem("删除此项")) {
-                    watchItems.erase(watchItems.begin() + i);
-                    selectedWatchIndex = -1;
+                    pendingDeleteWatchIndex = (int)i;
                 }
                 
                 ImGui::EndPopup();
             }
             
             ImGui::PopID();
+        }
+
+        if (pendingDeleteWatchIndex >= 0 && pendingDeleteWatchIndex < (int)watchItems.size()) {
+            clearWatchItemFreeze(watchItems[pendingDeleteWatchIndex]);
+            watchItems.erase(watchItems.begin() + pendingDeleteWatchIndex);
+            if (pendingDeleteWatchIndex < (int)watchLastValues.size()) {
+                watchLastValues.erase(watchLastValues.begin() + pendingDeleteWatchIndex);
+            }
+            if (selectedWatchIndex == pendingDeleteWatchIndex) {
+                selectedWatchIndex = -1;
+            } else if (selectedWatchIndex > pendingDeleteWatchIndex) {
+                --selectedWatchIndex;
+            }
         }
         
         ImGui::EndTable();
@@ -347,7 +636,11 @@ void MemoryViewerWindow::drawAddItemDialog()
             
             // 解析地址
             uint64_t addr = 0;
-            sscanf(newItemAddress, "%llx", &addr);
+            if (!parseWatchHexStrict(newItemAddress, addr)) {
+                Gui::log("无效的监控地址: %s", newItemAddress);
+                ImGui::EndPopup();
+                return;
+            }
             newItem.address = addr;
             
             // 设置类型
@@ -362,8 +655,13 @@ void MemoryViewerWindow::drawAddItemDialog()
                     size_t comma = s.find(',', start);
                     std::string tok = (comma == std::string::npos) ? s.substr(start) : s.substr(start, comma - start);
                     uint64_t offset = 0;
-                    sscanf(tok.c_str(), "%llx", &offset);
-                    newItem.offsets.push_back(offset);
+                    if (parseWatchHexStrict(tok.c_str(), offset)) {
+                        newItem.offsets.push_back(offset);
+                    } else {
+                        Gui::log("无效的偏移值: %s", tok.c_str());
+                        ImGui::EndPopup();
+                        return;
+                    }
                     if (comma == std::string::npos) break;
                     start = comma + 1;
                 }
@@ -393,21 +691,10 @@ void MemoryViewerWindow::drawAddItemDialog()
 std::string MemoryViewerWindow::readWatchItemValue(MemoryWatchItem& item)
 {
     std::vector<unsigned char> data;
-    uint64_t addr = item.address;
-    
-    // 如果是指针，先解引用
-    if (item.isPointer && !item.offsets.empty()) {
-        for (size_t i = 0; i < item.offsets.size(); i++) {
-            std::vector<unsigned char> ptrData;
-            ReadProcessMemoryBytes(addr, 8, ptrData);
-            if (ptrData.size() < 8) return "??";
-            
-            addr = *(uint64_t*)&ptrData[0];
-            if (i < item.offsets.size() - 1 || item.offsets.size() > 0) {
-                addr += item.offsets[i];
-            }
-        }
-        item.address = addr;  // 更新实际地址
+    uint64_t addr = 0;
+
+    if (!resolveWatchItemAddress(item, addr)) {
+        return "??";
     }
     
     // 根据类型读取数据
@@ -416,8 +703,7 @@ std::string MemoryViewerWindow::readWatchItemValue(MemoryWatchItem& item)
         dataSize = 256;  // 字符串读取更多
     }
     
-    ReadProcessMemoryBytes(addr, dataSize, data);
-    if (data.empty()) return "??";
+    if (!ReadProcessMemoryBytes(addr, dataSize, data) || data.empty()) return "??";
     
     std::stringstream ss;
     
@@ -430,14 +716,16 @@ std::string MemoryViewerWindow::readWatchItemValue(MemoryWatchItem& item)
             
         case FieldType::WORD:
             if (data.size() >= 2) {
-                uint16_t val = *(uint16_t*)&data[0];
+                uint16_t val = 0;
+                readWatchScalar(data, val);
                 ss << val << " (0x" << std::hex << std::uppercase << val << ")";
             }
             break;
             
         case FieldType::DWORD:
             if (data.size() >= 4) {
-                uint32_t val = *(uint32_t*)&data[0];
+                uint32_t val = 0;
+                readWatchScalar(data, val);
                 ss << val << " (0x" << std::hex << std::uppercase << val << ")";
             }
             break;
@@ -445,21 +733,24 @@ std::string MemoryViewerWindow::readWatchItemValue(MemoryWatchItem& item)
         case FieldType::QWORD:
         case FieldType::POINTER:
             if (data.size() >= 8) {
-                uint64_t val = *(uint64_t*)&data[0];
+                uint64_t val = 0;
+                readWatchScalar(data, val);
                 ss << "0x" << std::hex << std::uppercase << val;
             }
             break;
             
         case FieldType::FLOAT:
             if (data.size() >= 4) {
-                float val = *(float*)&data[0];
+                float val = 0.0f;
+                readWatchScalar(data, val);
                 ss << std::fixed << std::setprecision(6) << val;
             }
             break;
             
         case FieldType::DOUBLE:
             if (data.size() >= 8) {
-                double val = *(double*)&data[0];
+                double val = 0.0;
+                readWatchScalar(data, val);
                 ss << std::fixed << std::setprecision(10) << val;
             }
             break;
@@ -491,44 +782,63 @@ bool MemoryViewerWindow::writeWatchItemValue(MemoryWatchItem& item, const std::s
     try {
         switch (item.type) {
             case FieldType::BYTE: {
-                int val = std::stoi(value);
-                data.push_back((unsigned char)val);
+                uint64_t val = 0;
+                if (!parseWatchUnsignedValue(value, 0xFF, val)) {
+                    Gui::log("错误：无效的BYTE值");
+                    return false;
+                }
+                data.push_back(static_cast<unsigned char>(val));
                 break;
             }
             
             case FieldType::WORD: {
-                uint16_t val = (uint16_t)std::stoul(value);
-                data.resize(2);
-                *(uint16_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseWatchUnsignedValue(value, 0xFFFF, val)) {
+                    Gui::log("错误：无效的WORD值");
+                    return false;
+                }
+                appendWatchScalar(data, static_cast<uint16_t>(val));
                 break;
             }
             
             case FieldType::DWORD: {
-                uint32_t val = (uint32_t)std::stoul(value);
-                data.resize(4);
-                *(uint32_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseWatchUnsignedValue(value, 0xFFFFFFFFULL, val)) {
+                    Gui::log("错误：无效的DWORD值");
+                    return false;
+                }
+                appendWatchScalar(data, static_cast<uint32_t>(val));
                 break;
             }
             
             case FieldType::QWORD:
             case FieldType::POINTER: {
-                uint64_t val = std::stoull(value, nullptr, 16);
-                data.resize(8);
-                *(uint64_t*)&data[0] = val;
+                uint64_t val = 0;
+                if (!parseWatchUnsignedValue(value, UINT64_MAX, val, 16)) {
+                    Gui::log("错误：无效的QWORD/POINTER值");
+                    return false;
+                }
+                appendWatchScalar(data, val);
                 break;
             }
             
             case FieldType::FLOAT: {
-                float val = std::stof(value);
-                data.resize(4);
-                *(float*)&data[0] = val;
+                float val = 0.0f;
+                if (!parseWatchFloatValue(value, val)) {
+                    Gui::log("错误：无效的FLOAT值");
+                    return false;
+                }
+                appendWatchScalar(data, val);
                 break;
             }
             
             case FieldType::DOUBLE: {
-                double val = std::stod(value);
-                data.resize(8);
-                *(double*)&data[0] = val;
+                double val = 0.0;
+                if (!parseWatchDoubleValue(value, val)) {
+                    Gui::log("错误：无效的DOUBLE值");
+                    return false;
+                }
+                appendWatchScalar(data, val);
                 break;
             }
             
@@ -540,17 +850,32 @@ bool MemoryViewerWindow::writeWatchItemValue(MemoryWatchItem& item, const std::s
                 data.push_back(0);  // null terminator
                 break;
             }
+
+            case FieldType::STRING_UTF16: {
+                std::vector<uint16_t> units = watchUtf8ToUtf16Units(value);
+                for (uint16_t unit : units) {
+                    appendWatchScalar(data, unit);
+                }
+                appendWatchScalar<uint16_t>(data, 0);
+                break;
+            }
             
             default:
                 return false;
         }
         
+        uint64_t targetAddress = 0;
+        if (!resolveWatchItemAddress(item, targetAddress)) {
+            Gui::log("错误：写入内存失败 - 无法解析地址 0x%llX", item.address);
+            return false;
+        }
+
         // 写入内存
-        if (WriteProcessMemoryBytes(item.address, data.size(), data)) {
-            Gui::log("成功写入地址 0x%llX: %s", item.address, value.c_str());
+        if (WriteProcessMemoryBytes(targetAddress, data.size(), data)) {
+            Gui::log("成功写入地址 0x%llX: %s", targetAddress, value.c_str());
             return true;
         } else {
-            Gui::log("错误：写入内存失败 - 地址 0x%llX", item.address);
+            Gui::log("错误：写入内存失败 - 地址 0x%llX", targetAddress);
             return false;
         }
     } catch (const std::exception& e) {
@@ -618,50 +943,67 @@ void MemoryViewerWindow::loadWatchList()
     std::ifstream file("watch_list.dat", std::ios::binary);
     if (!file.is_open()) return;
 
-    watchItems.clear();
-
     size_t count;
     if (!file.read((char*)&count, sizeof(count))) return;
+    if (count > 100000) return;
 
+    std::vector<MemoryWatchItem> loadedItems;
+    loadedItems.reserve(count);
     for (size_t i = 0; i < count; i++) {
         MemoryWatchItem item;
+        bool itemValid = true;
 
         size_t descLen;
-        if (!file.read((char*)&descLen, sizeof(descLen))) break;
-        if (descLen > 4096) break;
+        if (!file.read((char*)&descLen, sizeof(descLen))) return;
+        if (descLen > 4096) return;
         item.description.resize(descLen);
-        if (!file.read(&item.description[0], descLen)) break;
+        if (descLen > 0 && !file.read(&item.description[0], descLen)) return;
 
-        if (!file.read((char*)&item.address, sizeof(item.address))) break;
-        if (!file.read((char*)&item.type, sizeof(item.type))) break;
-        if (!file.read((char*)&item.enabled, sizeof(item.enabled))) break;
-        if (!file.read((char*)&item.frozen, sizeof(item.frozen))) break;
+        if (!file.read((char*)&item.address, sizeof(item.address))) return;
+        if (!file.read((char*)&item.type, sizeof(item.type))) return;
+        if ((int)item.type < (int)FieldType::BYTE || (int)item.type > (int)FieldType::STRING_UTF16) return;
+        if (!file.read((char*)&item.enabled, sizeof(item.enabled))) return;
+        if (!file.read((char*)&item.frozen, sizeof(item.frozen))) return;
 
-        if (!file.read((char*)&item.frozenDataSize, sizeof(item.frozenDataSize))) break;
-        if (!file.read((char*)item.frozenData, sizeof(item.frozenData))) break;
+        if (!file.read((char*)&item.frozenDataSize, sizeof(item.frozenDataSize))) return;
+        if (!file.read((char*)item.frozenData, sizeof(item.frozenData))) return;
+        if (item.frozenDataSize > sizeof(item.frozenData)) return;
 
-        if (!file.read((char*)&item.isPointer, sizeof(item.isPointer))) break;
+        if (!file.read((char*)&item.isPointer, sizeof(item.isPointer))) return;
 
         size_t offsetCount;
-        if (!file.read((char*)&offsetCount, sizeof(offsetCount))) break;
-        if (offsetCount > 1024) break;
+        if (!file.read((char*)&offsetCount, sizeof(offsetCount))) return;
+        if (offsetCount > 1024) return;
         for (size_t j = 0; j < offsetCount; j++) {
             uint64_t offset;
-            if (!file.read((char*)&offset, sizeof(offset))) break;
+            if (!file.read((char*)&offset, sizeof(offset))) {
+                itemValid = false;
+                break;
+            }
             item.offsets.push_back(offset);
         }
+        if (!itemValid) return;
 
-        watchItems.push_back(item);
+        loadedItems.push_back(item);
     }
+
+    clearWatchItemFreezes(watchItems);
+    watchItems = std::move(loadedItems);
+    watchLastValues.clear();
+    selectedWatchIndex = -1;
 
     // 加载后，对冻结项重新注册到服务端
     for (auto& item : watchItems) {
         if (item.frozen && item.frozenDataSize > 0 && isFreezableType(item.type)) {
-            if (!FreezeAdd(item.address, item.frozenDataSize, item.frozenData)) {
+            uint64_t targetAddress = 0;
+            if (!resolveWatchItemAddress(item, targetAddress) ||
+                !FreezeAdd(targetAddress, item.frozenDataSize, item.frozenData)) {
                 item.frozen = false;
                 item.frozenDataSize = 0;
+                item.frozenAddress = 0;
+            } else {
+                item.frozenAddress = targetAddress;
             }
         }
     }
 }
-

@@ -37,6 +37,18 @@ void ScanWindow::drawScanRangeSettings()
 void ScanWindow::drawScanProgressBar()
 {
     if (scanInProgress) {
+        float progress = 0.0f;
+        uint64_t matchCount = 0;
+        uint64_t totalBytes = 0;
+        uint64_t scannedBytes = 0;
+        {
+            std::lock_guard<std::mutex> lock(scanProgressMutex);
+            progress = scanProgress;
+            matchCount = scanMatchCount;
+            totalBytes = scanTotalBytes;
+            scannedBytes = scanScannedBytes;
+        }
+
         ImGui::Separator();
         ImGui::Text("正在扫描...");
 
@@ -46,41 +58,41 @@ void ScanWindow::drawScanProgressBar()
 
         // 进度显示文本
         char progressBuf[64];
-        if (scanTotalBytes > 0) {
+        if (totalBytes > 0) {
             std::snprintf(progressBuf, sizeof(progressBuf), "%.1f%% (%llu / %llu MB)",
-                scanProgress * 100.0f,
-                (unsigned long long)(scanScannedBytes / (1024 * 1024)),
-                (unsigned long long)(scanTotalBytes / (1024 * 1024)));
+                progress * 100.0f,
+                (unsigned long long)(scannedBytes / (1024 * 1024)),
+                (unsigned long long)(totalBytes / (1024 * 1024)));
         } else {
-            std::snprintf(progressBuf, sizeof(progressBuf), "%.1f%%", scanProgress * 100.0f);
+            std::snprintf(progressBuf, sizeof(progressBuf), "%.1f%%", progress * 100.0f);
         }
 
-        ImGui::ProgressBar(scanProgress, ImVec2(-1, 0), progressBuf);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), progressBuf);
         ImGui::PopStyleColor();
 
         // 显示匹配计数和扫描速度
-        if (scanMatchCount > 0) {
-            ImGui::Text("已找到匹配: %llu 个", scanMatchCount);
+        if (matchCount > 0) {
+            ImGui::Text("已找到匹配: %llu 个", matchCount);
         }
 
         // 显示扫描速度和预计剩余时间
-        static uint64_t lastScannedBytes = 0;
-        static float lastUpdateTime = 0.0f;
-        static float scanStartTime = 0.0f;
+        uint64_t& lastScannedBytes = progressLastScannedBytes;
+        float& lastUpdateTime = progressLastUpdateTime;
+        float& scanStartTime = progressStartTime;
 
         float currentTime = ImGui::GetTime();
 
         // 记录扫描开始时间
-        if (scanProgress == 0.0f || scanStartTime == 0.0f) {
+        if (progress == 0.0f || scanStartTime == 0.0f) {
             scanStartTime = currentTime;
             lastUpdateTime = currentTime;
             lastScannedBytes = 0;
         }
 
         // 更新速度显示
-        if (currentTime - lastUpdateTime > 0.5f && scanScannedBytes > lastScannedBytes) {
+        if (currentTime - lastUpdateTime > 0.5f && scannedBytes > lastScannedBytes) {
             float timeDelta = currentTime - lastUpdateTime;
-            uint64_t bytesDelta = scanScannedBytes - lastScannedBytes;
+            uint64_t bytesDelta = scannedBytes - lastScannedBytes;
             float speed = (float)bytesDelta / timeDelta / (1024 * 1024); // MB/s
 
             // 显示速度
@@ -89,9 +101,9 @@ void ScanWindow::drawScanProgressBar()
             ImGui::Text("%s", speedBuf);
 
             // 计算并显示预计剩余时间
-            if (scanProgress > 0.01f && speed > 0.1f) {
+            if (progress > 0.01f && speed > 0.1f) {
                 float totalElapsed = currentTime - scanStartTime;
-                float estimatedTotal = totalElapsed / scanProgress;
+                float estimatedTotal = totalElapsed / progress;
                 float estimatedRemaining = estimatedTotal - totalElapsed;
 
                 if (estimatedRemaining > 0) {
@@ -103,12 +115,12 @@ void ScanWindow::drawScanProgressBar()
                 }
             }
 
-            lastScannedBytes = scanScannedBytes;
+            lastScannedBytes = scannedBytes;
             lastUpdateTime = currentTime;
         }
 
-        ImGui::Text("扫描类型: %s", getScanTypeName(scanType));
-        ImGui::Text("数值类型: %s", getValueTypeName(valueType));
+        ImGui::Text("扫描类型: %s", getScanTypeName(activeScanType.load()));
+        ImGui::Text("数值类型: %s", getValueTypeName(activeScanValueType.load()));
 
         // 显示当前内存类型选择
         if (selectedMemoryTypes == MemoryType::All) {
@@ -145,10 +157,16 @@ void ScanWindow::drawScanProgressBar()
             ImGui::TextColored(ColorScheme::SuccessBright, "扫描已完成");
         }
 
-        if (totalScanResults > 0) {
-            ImGui::Text("找到 %d 个匹配结果", totalScanResults);
-            if (scanTotalBytes > 0) {
-                ImGui::Text("已扫描 %llu MB 内存", scanTotalBytes / (1024 * 1024));
+        int totalResults = totalScanResults.load();
+        if (totalResults > 0) {
+            ImGui::Text("找到 %d 个匹配结果", totalResults);
+            uint64_t completedTotalBytes = 0;
+            {
+                std::lock_guard<std::mutex> lock(scanProgressMutex);
+                completedTotalBytes = scanTotalBytes;
+            }
+            if (completedTotalBytes > 0) {
+                ImGui::Text("已扫描 %llu MB 内存", completedTotalBytes / (1024 * 1024));
             }
         } else {
             if (scanCancelled) {
@@ -165,6 +183,10 @@ void ScanWindow::drawScanPanel()
     ImGui::BeginChild("ScanPanel", ImVec2(300, 0), ImGuiChildFlags_Borders);
     ImGui::Text("扫描设置");
     ImGui::Separator();
+    bool parametersDisabled = scanInProgress.load();
+    if (parametersDisabled) {
+        ImGui::BeginDisabled();
+    }
 
     // 根据扫描类型动态显示输入框
     bool needValue1 = true;
@@ -265,9 +287,14 @@ void ScanWindow::drawScanPanel()
 
     ImGui::Spacing();
     ImGui::Separator();
+    if (parametersDisabled) {
+        ImGui::EndDisabled();
+    }
 
     // 根据扫描类型显示适当的按钮
-    bool isFirstScan = (totalScanResults == 0);
+    const int totalResults = totalScanResults.load();
+    const int resultValueType = scanResultValueType.load();
+    bool isFirstScan = (totalResults == 0);
     bool canUseUnknownValue = (scanType == UNKNOW_VAL || scanType == ADD_UNKNOW_VAL ||
                               scanType == SUB_UNKNOW_VAL || scanType == CHANGED_VAL ||
                               scanType == UNCHANGED_VAL);
@@ -367,8 +394,13 @@ void ScanWindow::drawScanPanel()
                 if (!addressesToRemove.empty() && RemoveScanResult(addressesToRemove)) {
                     Gui::log("已移除 %d 个结果", (int)addressesToRemove.size());
                     // 更新总结果数
-                    totalScanResults = GetScanResultCount();
-                    loadScanResults(); // 重新加载结果
+                    int updatedCount = GetScanResultCount();
+                    if (updatedCount < 0) {
+                        Gui::log("获取扫描结果数量失败");
+                    } else {
+                        totalScanResults = updatedCount;
+                        loadScanResults(); // 重新加载结果
+                    }
                 } else {
                     Gui::log("移除结果失败");
                 }
@@ -394,21 +426,21 @@ void ScanWindow::drawScanPanel()
     ImGui::Separator();
     ImGui::Text("扫描结果:");
 
-    if (totalScanResults == 0) {
+    if (totalResults == 0) {
         if (isFirstScan && !scanCompleted) {
             ImGui::TextDisabled("尚未扫描");
         } else {
             ImGui::TextColored(ColorScheme::ErrorLight, "未找到匹配结果");
         }
     } else {
-        ImGui::TextColored(ColorScheme::SuccessBright, "找到: %d 个结果", totalScanResults);
+        ImGui::TextColored(ColorScheme::SuccessBright, "找到: %d 个结果", totalResults);
 
         // 根据结果数量显示不同的建议
-        if (totalScanResults > 100000) {
+        if (totalResults > 100000) {
             ImGui::TextColored(ColorScheme::ErrorLight, "结果过多，强烈建议继续筛选");
-        } else if (totalScanResults > 10000) {
+        } else if (totalResults > 10000) {
             ImGui::TextColored(ColorScheme::WarningBright, "结果较多，建议继续筛选");
-        } else if (totalScanResults > 1000) {
+        } else if (totalResults > 1000) {
             ImGui::TextColored(ColorScheme::SuccessLight, "结果适中，可以查看或继续筛选");
         } else {
             ImGui::TextColored(ColorScheme::SuccessLight, "结果较少，适合详细分析");
@@ -448,7 +480,7 @@ void ScanWindow::drawScanPanel()
                     if (!alreadyExists) {
                         AddressListItem newItem;
                         newItem.address = scanResults[i].address;
-                        newItem.valueType = valueType;
+                        newItem.valueType = resultValueType;
                         newItem.currentValue = scanResults[i].valueStr;
                         newItem.description = "选中添加 " + std::to_string(addressList.size() + 1);
                         addressList.push_back(newItem);
@@ -467,8 +499,8 @@ void ScanWindow::drawScanPanel()
             }
         }
 
-        if (ImGui::Button("全部添加到地址列表", ImVec2(-1, 0))) {
-            // 添加所有结果到地址列表（限制数量）
+        if (ImGui::Button("当前页全部添加到地址列表", ImVec2(-1, 0))) {
+            // 添加当前页结果到地址列表（限制数量）
             int addCount = 0;
             int maxAdd = 100; // 最多添加100个
 
@@ -490,15 +522,15 @@ void ScanWindow::drawScanPanel()
                 if (!alreadyExists) {
                     AddressListItem newItem;
                     newItem.address = result.address;
-                    newItem.valueType = valueType;
+                    newItem.valueType = resultValueType;
                     newItem.currentValue = result.valueStr;
-                    newItem.description = "批量添加 " + std::to_string(addressList.size() + 1);
+                    newItem.description = "当前页添加 " + std::to_string(addressList.size() + 1);
                     addressList.push_back(newItem);
                     addCount++;
                 }
             }
 
-            Gui::log("已添加 %d 个地址到列表", addCount);
+            Gui::log("已从当前页添加 %d 个地址到列表", addCount);
             if (addCount >= maxAdd) {
                 Gui::log("注意: 限制最多添加 %d 个地址", maxAdd);
             }
@@ -517,6 +549,10 @@ void ScanWindow::drawMemoryTypeSelectionModal()
     {
         ImGui::Text("Select memory types to scan:");
         ImGui::Separator();
+        bool memoryTypesDisabled = scanInProgress.load();
+        if (memoryTypesDisabled) {
+            ImGui::BeginDisabled();
+        }
 
         // 快捷按钮
         if (ImGui::Button("All")) {
@@ -611,6 +647,10 @@ void ScanWindow::drawMemoryTypeSelectionModal()
             if (i == (IM_ARRAYSIZE(memoryTypes) - 1) / 2) {
                 ImGui::NextColumn();
             }
+        }
+
+        if (memoryTypesDisabled) {
+            ImGui::EndDisabled();
         }
 
         ImGui::Columns(1);

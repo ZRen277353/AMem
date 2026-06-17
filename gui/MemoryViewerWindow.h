@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 
 // 数据结构字段类型枚举
@@ -33,12 +34,17 @@ struct MemoryWatchItem {
     bool frozen;                    // 是否冻结
     uint8_t frozenData[8];          // 冻结值（原始字节）
     uint8_t frozenDataSize;         // 冻结值字节数（0 表示未设置，最大 8）
+    uint64_t frozenAddress = 0;     // Address currently registered with server-side freeze.
     std::vector<uint64_t> offsets;  // 偏移链
     std::string moduleName;         // 模块名
     uint64_t moduleOffset;          // 模块偏移
     bool isPointer;                 // 是否是指针
     int arrayLength;                // 如果是数组，数组长度
     std::string cachedValue;        // 缓存的当前值，避免每帧读取
+    char editAddressBuffer[32] = "";
+    bool addressEditActive = false;
+    char editValueBuffer[256] = "";
+    bool valueEditActive = false;
 
     MemoryWatchItem() : address(0), type(FieldType::DWORD), enabled(true),
                         frozen(false), frozenDataSize(0), moduleOffset(0),
@@ -72,7 +78,17 @@ struct StructDefinition {
     void calculateSize() {
         totalSize = 0;
         for (const auto& field : fields) {
-            int fieldEnd = field.offset + field.size * field.arrayCount;
+            if (field.offset < 0 || field.size <= 0 || field.arrayCount <= 0) {
+                continue;
+            }
+            const int64_t fieldBytes =
+                static_cast<int64_t>(field.size) * static_cast<int64_t>(field.arrayCount);
+            if (fieldBytes <= 0 ||
+                fieldBytes > (std::numeric_limits<int>::max)() - field.offset) {
+                totalSize = (std::numeric_limits<int>::max)();
+                continue;
+            }
+            const int fieldEnd = field.offset + static_cast<int>(fieldBytes);
             if (fieldEnd > totalSize) {
                 totalSize = fieldEnd;
             }
@@ -87,6 +103,8 @@ struct DissectNode {
     std::string name;        // 用户命名
     std::string cachedValue; // 缓存的显示值
     std::string description; // 用户备注
+    char editValueBuffer[256] = "";
+    bool valueEditActive = false;
     int storedSize = 0;      // 该行占用字节数（STRING 等变长类型用）
 
     // 树结构
@@ -148,7 +166,9 @@ public:
 
 private:
     int navSubscriptionId = 0;  // EventBus 订阅 ID
+    uint64_t observedProcessRevision = 0;
     static bool parseAddressExpression(const char* expr, uint64_t& result);
+    void resetProcessState();
     void drawMemoryViewerPanel();
     void drawStructAnalyzerPanel();
     void drawDissectorTable();
@@ -190,7 +210,7 @@ private:
     void regenerateDissectNodes();
     void refreshDissectValues();
     void refreshNodeValues(std::vector<DissectNode>& nodes, const std::vector<unsigned char>& buffer, uint64_t baseAddr);
-    void onDissectNodeTypeChanged(std::vector<DissectNode>& nodes, int nodeIndex, FieldType newType);
+    void onDissectNodeTypeChanged(std::vector<DissectNode>& nodes, int nodeIndex, FieldType newType, int stringSize = 32);
     void expandPointerNode(DissectNode& node, uint64_t baseAddr);
     void collapsePointerNode(DissectNode& node);
     bool writeDissectNodeValue(DissectNode& node, uint64_t baseAddr, const std::string& valueStr);
@@ -225,6 +245,9 @@ private:
     uint64_t viewAddress = 0;
     uint64_t pageBaseAddress = 0;  // 页首地址（4K对齐）
     uint64_t targetAddress = 0;    // 目标地址（用于滚动聚焦）
+    char hexAddressInputBuf[64] = "";
+    uint64_t lastHexAddressInputTarget = 0;
+    bool hexAutoScrolling = false;
     int bytesPerRow = 16;
     int viewSize = 4096;  // 默认一页大小
     int pageSize = 4096;   // 页大小（4KB）
@@ -300,6 +323,7 @@ private:
     
     // 地址列表（监控项）
     std::vector<MemoryWatchItem> watchItems;
+    std::vector<std::string> watchLastValues;
     int selectedWatchIndex = -1;
     bool showAddItemDialog = false;
     
