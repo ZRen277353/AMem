@@ -28,7 +28,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             count: 获取数量，默认 100，最大 1000
             module_base: 模块基址；如提供，则会先初始化该模块的符号表
         """
-        count = min(count, 1000)
+        offset = max(0, offset)
+        count = max(1, min(count, 1000))
         if module_base:
             ipc.call_or_raise("symbol_init", {"module_base": module_base})
 

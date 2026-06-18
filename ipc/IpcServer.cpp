@@ -47,8 +47,45 @@ bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const c
     return true;
 }
 
-bool parseContentLengthHeader(const std::string& headers, size_t& outLength) {
+struct HttpRequestLine {
+    std::string method;
+    std::string target;
+};
+
+bool parseRequestLine(const std::string& headers, HttpRequestLine& out) {
+    const size_t lineEnd = headers.find("\r\n");
+    const std::string line =
+        headers.substr(0, lineEnd == std::string::npos ? headers.size() : lineEnd);
+    const size_t methodEnd = line.find(' ');
+    if (methodEnd == std::string::npos || methodEnd == 0) {
+        return false;
+    }
+
+    const size_t targetEnd = line.find(' ', methodEnd + 1);
+    if (targetEnd == std::string::npos || targetEnd == methodEnd + 1) {
+        return false;
+    }
+
+    const std::string version = line.substr(targetEnd + 1);
+    if (version.rfind("HTTP/", 0) != 0) {
+        return false;
+    }
+
+    out.method = line.substr(0, methodEnd);
+    out.target = line.substr(methodEnd + 1, targetEnd - methodEnd - 1);
+    return true;
+}
+
+std::string pathWithoutQuery(const std::string& target) {
+    const size_t query = target.find('?');
+    return query == std::string::npos ? target : target.substr(0, query);
+}
+
+bool parseContentLengthHeader(const std::string& headers,
+                              size_t& outLength,
+                              bool& outFound) {
     outLength = 0;
+    outFound = false;
     size_t lineStart = 0;
     while (lineStart < headers.size()) {
         size_t lineEnd = headers.find("\r\n", lineStart);
@@ -97,6 +134,7 @@ bool parseContentLengthHeader(const std::string& headers, size_t& outLength) {
                     parsed = parsed * 10 + digit;
                 }
                 outLength = parsed;
+                outFound = true;
                 return true;
             }
         }
@@ -239,6 +277,9 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     bool contentLengthKnown = false;
     bool badRequest = false;
     bool requestTooLarge = false;
+    int earlyStatusCode = 0;
+    std::string earlyError;
+    HttpRequestLine requestLine;
     size_t headerEnd = std::string::npos;
 
     while (true) {
@@ -251,11 +292,40 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             headerEnd = raw.find("\r\n\r\n");
             if (headerEnd != std::string::npos) {
                 const std::string headers = raw.substr(0, headerEnd);
-                if (!parseContentLengthHeader(headers, contentLength)) {
+                if (!parseRequestLine(headers, requestLine)) {
                     badRequest = true;
+                    earlyError = "Invalid HTTP request line";
                     break;
                 }
-                contentLengthKnown = true;
+
+                const std::string path = pathWithoutQuery(requestLine.target);
+                if (path != "/") {
+                    earlyStatusCode = 404;
+                    earlyError = "Unknown IPC endpoint";
+                    break;
+                }
+
+                if (requestLine.method != "POST" &&
+                    requestLine.method != "OPTIONS") {
+                    earlyStatusCode = 405;
+                    earlyError = "Unsupported HTTP method";
+                    break;
+                }
+
+                if (!parseContentLengthHeader(headers,
+                                              contentLength,
+                                              contentLengthKnown)) {
+                    badRequest = true;
+                    earlyError = "Invalid Content-Length";
+                    break;
+                }
+
+                if (requestLine.method == "POST" && !contentLengthKnown) {
+                    badRequest = true;
+                    earlyError = "Missing Content-Length";
+                    break;
+                }
+
                 if (contentLength > kMaxHttpRequestBytes ||
                     headerEnd + 4 > kMaxHttpRequestBytes - contentLength) {
                     requestTooLarge = true;
@@ -269,14 +339,30 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             if (raw.size() >= bodyStart && raw.size() - bodyStart >= contentLength) break;
         }
 
+        if (headerEnd != std::string::npos &&
+            requestLine.method == "OPTIONS" &&
+            !contentLengthKnown) {
+            break;
+        }
+
         if (raw.size() > kMaxHttpRequestBytes) {
             requestTooLarge = true;
             break;
         }
     }
 
+    if (earlyStatusCode != 0) {
+        json response = {{"success", false}, {"error", earlyError}};
+        std::string httpResp = BuildHttpResponse(earlyStatusCode, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
+    }
+
     if (badRequest || headerEnd == std::string::npos) {
-        json response = {{"success", false}, {"error", "Invalid HTTP request"}};
+        json response = {{"success", false},
+                         {"error", earlyError.empty() ? "Invalid HTTP request"
+                                                       : earlyError}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
         ::closesocket(sock);
@@ -292,13 +378,23 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     }
 
     // 提取 body
-    std::string body;
     const size_t bodyStart = headerEnd + 4;
-    if (raw.size() >= bodyStart)
+    if (contentLengthKnown &&
+        (raw.size() < bodyStart || raw.size() - bodyStart < contentLength)) {
+        json response = {{"success", false},
+                         {"error", "Incomplete HTTP request body"}};
+        std::string httpResp = BuildHttpResponse(400, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
+    }
+
+    std::string body;
+    if (contentLengthKnown && raw.size() >= bodyStart)
         body = raw.substr(bodyStart, contentLength);
 
     // 处理 CORS preflight
-    if (raw.substr(0, 7) == "OPTIONS") {
+    if (requestLine.method == "OPTIONS") {
         std::string resp = "HTTP/1.1 204 No Content\r\n"
             "Access-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
@@ -337,6 +433,7 @@ std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body
     case 204: reason = "No Content"; break;
     case 400: reason = "Bad Request"; break;
     case 404: reason = "Not Found"; break;
+    case 405: reason = "Method Not Allowed"; break;
     case 413: reason = "Payload Too Large"; break;
     case 500: reason = "Internal Server Error"; break;
     default:  reason = "Unknown"; break;
@@ -360,6 +457,9 @@ json IpcServer::DispatchRequest(const json& request) {
 
     std::string method = request["method"].get<std::string>();
     json params = request.value("params", json::object());
+    if (!params.is_object()) {
+        return {{"success", false}, {"error", "params must be an object"}};
+    }
 
     Gui::log("[IPC] 收到请求: %s", method.c_str());
 

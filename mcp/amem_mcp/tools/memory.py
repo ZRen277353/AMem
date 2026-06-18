@@ -18,7 +18,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             address: 内存地址，支持 0x 前缀（如 "0x7f12345000"）
             size: 读取字节数，默认 256，最大 65536
         """
-        size = min(size, 65536)
+        size = max(1, min(size, 65536))
         r = ipc.call_or_raise("read_memory", {"address": address, "size": size})
         return hex_dump(r["hex"], parse_int(address))
 

@@ -109,7 +109,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移
             count: 获取数量，默认 20，最大 1000
         """
-        count = min(count, 1000)
+        offset = max(0, offset)
+        count = max(1, min(count, 1000))
         r = ipc.call_or_raise("get_scan_results", {"offset": offset, "count": count})
         total = r.get("total", 0)
         items = r.get("items", [])

@@ -39,7 +39,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移，默认 0
             count: 获取数量，默认 200，最大 1000
         """
-        count = min(count, 1000)
+        offset = max(0, offset)
+        count = max(1, min(count, 1000))
         params: dict = {"offset": offset, "count": count}
         if filter:
             params["filter"] = filter

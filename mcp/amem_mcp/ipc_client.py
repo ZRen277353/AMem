@@ -16,6 +16,27 @@ _SLOW_METHODS = frozenset({
 })
 
 
+def _json_error_from_http_error(e: urllib.error.HTTPError) -> dict:
+    try:
+        body = e.read().decode("utf-8")
+    except Exception:
+        body = ""
+
+    if body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                parsed.setdefault("success", False)
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "success": False,
+        "error": f"IPC HTTP {e.code}: {getattr(e, 'reason', '') or body or 'request failed'}",
+    }
+
+
 class IpcClient:
     """通过 HTTP JSON 协议与 AMem GUI 通信。"""
 
@@ -56,6 +77,8 @@ class IpcClient:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                return _json_error_from_http_error(e)
             except ConnectionRefusedError:
                 return {
                     "success": False,
