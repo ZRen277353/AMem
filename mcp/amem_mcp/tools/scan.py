@@ -9,6 +9,9 @@ from ..helpers import encode_value_hex, make_scan_flags
 from ..ipc_client import IpcClient
 
 
+NO_VALUE_SCAN_TYPES = {"increased", "decreased", "changed", "unchanged"}
+
+
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
@@ -25,7 +28,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         return f"扫描范围已设置为: {memory_type}"
 
     @mcp.tool()
-    def scan_value(value: str, data_type: str = "dword", scan_type: str = "exact") -> str:
+    def scan_value(value: str, data_type: str = "dword",
+                   scan_type: str = "exact", value2: str = "") -> str:
         """首次扫描 - 在内存中搜索指定值。
 
         Args:
@@ -34,12 +38,17 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             scan_type: exact/unknown/greater/less/between
         """
         flags = make_scan_flags(scan_type, data_type)
-        val_hex = encode_value_hex(value, data_type)
-        r = ipc.call_or_raise("scan_value", {"flags": flags, "value_hex": val_hex})
+        params = {"flags": flags, "value_hex": encode_value_hex(value, data_type)}
+        if scan_type.lower() == "between":
+            if value2 == "":
+                raise ValueError("scan_value with scan_type='between' requires value2")
+            params["value2_hex"] = encode_value_hex(value2, data_type)
+        r = ipc.call_or_raise("scan_value", params)
         return f"首次扫描完成，找到 {r['count']} 个结果"
 
     @mcp.tool()
-    def scan_next(value: str, data_type: str = "dword", scan_type: str = "exact") -> str:
+    def scan_next(value: str = "", data_type: str = "dword",
+                  scan_type: str = "exact", value2: str = "") -> str:
         """再次扫描 - 在上次结果中筛选。
 
         Args:
@@ -49,10 +58,18 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
                        increased_by/decreased_by/greater/less
         """
         flags = make_scan_flags(scan_type, data_type)
-        val_hex = encode_value_hex(value, data_type)
-        r = ipc.call_or_raise("scan_next", {
-            "flags": flags, "value_hex": val_hex, "scan_flag": flags,
-        })
+        normalized_scan_type = scan_type.lower()
+        params = {"flags": flags, "scan_flag": flags}
+        if value == "":
+            if normalized_scan_type not in NO_VALUE_SCAN_TYPES:
+                raise ValueError(f"scan_next with scan_type='{scan_type}' requires value")
+        else:
+            params["value_hex"] = encode_value_hex(value, data_type)
+            if normalized_scan_type == "between":
+                if value2 == "":
+                    raise ValueError("scan_next with scan_type='between' requires value2")
+                params["value2_hex"] = encode_value_hex(value2, data_type)
+        r = ipc.call_or_raise("scan_next", params)
         return f"再次扫描完成，剩余 {r['count']} 个结果"
 
     @mcp.tool()

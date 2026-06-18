@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <windows.h>
 
+#include "socket_io_timeout.h"
+
 // Windows Socket库链接
 #pragma comment(lib, "ws2_32.lib")
 
@@ -295,13 +297,20 @@ public:
     bool Send(const void* data, size_t size) {
         if (!connected_ || sock_ == INVALID_SOCKET) return false;
 
+        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_, SO_SNDTIMEO);
         const char* buffer = static_cast<const char*>(data);
         size_t totalSent = 0;
 
         while (totalSent < size) {
             int sent = ::send(sock_, buffer + totalSent, static_cast<int>(size - totalSent), 0);
             if (sent == SOCKET_ERROR) {
-                std::cerr << "send() failed: " << WSAGetLastError() << std::endl;
+                int err = WSAGetLastError();
+                std::cerr << "send() failed: " << err << std::endl;
+                if (err == WSAETIMEDOUT || err == WSAECONNRESET ||
+                    err == WSAECONNABORTED) {
+                    timeoutGuard.dismissRestore();
+                    Close();
+                }
                 return false;
             }
             totalSent += sent;
@@ -312,13 +321,20 @@ public:
     bool Receive(void* buffer, size_t size) {
         if (!connected_ || sock_ == INVALID_SOCKET) return false;
 
+        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_, SO_RCVTIMEO);
         char* buf = static_cast<char*>(buffer);
         size_t totalReceived = 0;
 
         while (totalReceived < size) {
             int received = ::recv(sock_, buf + totalReceived, static_cast<int>(size - totalReceived), 0);
             if (received == SOCKET_ERROR) {
-                std::cerr << "recv() failed: " << WSAGetLastError() << std::endl;
+                int err = WSAGetLastError();
+                std::cerr << "recv() failed: " << err << std::endl;
+                if (err == WSAETIMEDOUT || err == WSAECONNRESET ||
+                    err == WSAECONNABORTED) {
+                    timeoutGuard.dismissRestore();
+                    Close();
+                }
                 return false;
             }
             if (received == 0) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "socket_io_timeout.h"
+
 #include <mutex>
 #include <chrono>
 #include <thread>
@@ -47,6 +49,15 @@ public:
      */
     template<typename RequestFunc>
     bool ExecuteRequest(RequestFunc request) {
+        if (SocketIoTimeout::HasThreadTimeout()) {
+            if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+                return false;
+            }
+            return TryExecuteRequest(
+                request,
+                static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()));
+        }
+
         std::lock_guard<std::mutex> lock(requestMutex_);
         return request();
     }
@@ -71,6 +82,15 @@ public:
      */
     template<typename RequestFunc>
     bool ExecuteRequestWithLock(std::mutex* customMutex, RequestFunc request) {
+        if (SocketIoTimeout::HasThreadTimeout()) {
+            if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+                return false;
+            }
+            return TryExecuteRequestWithLock(customMutex,
+                                             request,
+                                             static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()));
+        }
+
         if (!customMutex) {
             // 如果未提供自定义锁，使用全局锁
             return ExecuteRequest(request);

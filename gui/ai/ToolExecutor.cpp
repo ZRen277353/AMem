@@ -2,6 +2,7 @@
 
 #include "ToolExecutor.h"
 
+#include "../../socket/socket_io_timeout.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <chrono>
@@ -198,26 +199,43 @@ std::string validateAgainstSchema(const json& args, const std::string& schemaStr
     return validateAgainstSchema(args, schema, "root");
 }
 
+std::string jsonValueToErrorString(const json& value) {
+    if (value.is_null()) {
+        return "";
+    }
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_boolean() && !value.get<bool>()) {
+        return "";
+    }
+    return value.dump();
+}
+
 std::string extractToolError(const std::string& resultJson) {
     if (resultJson.empty()) return "";
 
     try {
         const json result = json::parse(resultJson);
-        if (!result.is_object() || !result.contains("error")) {
+        if (!result.is_object()) {
             return "";
         }
 
-        const json& err = result["error"];
-        if (err.is_null()) {
+        if (result.contains("success") && result["success"].is_boolean() &&
+            !result["success"].get<bool>()) {
+            if (result.contains("error")) {
+                const std::string err = jsonValueToErrorString(result["error"]);
+                if (!err.empty()) {
+                    return err;
+                }
+            }
+            return "tool returned success=false";
+        }
+
+        if (!result.contains("error")) {
             return "";
         }
-        if (err.is_string()) {
-            return err.get<std::string>();
-        }
-        if (err.is_boolean() && !err.get<bool>()) {
-            return "";
-        }
-        return err.dump();
+        return jsonValueToErrorString(result["error"]);
     } catch (const std::exception&) {
         return "";
     }
@@ -225,14 +243,17 @@ std::string extractToolError(const std::string& resultJson) {
 
 std::shared_future<std::string> runExecutorAsync(
     std::function<std::string(const std::string&)> executor,
-    std::string argsJson) {
+    std::string argsJson,
+    int timeoutSeconds) {
     auto promise = std::make_shared<std::promise<std::string>>();
     std::shared_future<std::string> future = promise->get_future().share();
 
     std::thread([promise,
                  executor = std::move(executor),
-                 argsJson = std::move(argsJson)]() mutable {
+                 argsJson = std::move(argsJson),
+                 timeoutSeconds]() mutable {
         try {
+            SocketIoTimeout::ScopedTimeout socketTimeout(timeoutSeconds);
             promise->set_value(executor(argsJson));
         } catch (...) {
             promise->set_exception(std::current_exception());
@@ -332,7 +353,7 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
     ToolResult result;
     try {
         std::shared_future<std::string> fut =
-            runExecutorAsync(registration.executor, normalizedArgsJson);
+            runExecutorAsync(registration.executor, normalizedArgsJson, timeoutSeconds);
         if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {
             if (registration.safety == ToolSafety::Write) {
                 result.resultJson = fut.get();

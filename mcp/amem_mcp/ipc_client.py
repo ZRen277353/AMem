@@ -12,7 +12,7 @@ from typing import Any, Optional
 # 耗时操作使用更长超时
 _SLOW_METHODS = frozenset({
     "scan_value", "scan_next", "scan_fuzzy", "scan_hex",
-    "list_processes", "list_modules",
+    "list_processes", "list_modules", "execute_lua",
 })
 
 

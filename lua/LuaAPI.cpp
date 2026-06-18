@@ -3,12 +3,14 @@
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
 #include "../socket/client_singleton.h"
+#include "../socket/socket_io_timeout.h"
 #include "../gui/AppContext.h"
 #include "../gui/Gui.h"
 #include <string>
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <cerrno>
@@ -89,6 +91,7 @@ static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
 // 辅助函数：检查地址参数
 namespace {
 constexpr size_t kMaxLuaOffsetCount = 1024;
+constexpr int kLuaSleepPollMs = 50;
 
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
@@ -456,7 +459,29 @@ int LuaAPI::Sleep(lua_State* L) {
         return 0;
     }
     int milliseconds = static_cast<int>(rawMilliseconds);
-    std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+    if (!SocketIoTimeout::HasThreadTimeout()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+        return 0;
+    }
+
+    int remainingSleepMs = milliseconds;
+    while (remainingSleepMs > 0) {
+        if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+            luaL_error(L, "Lua execution timed out");
+            return 0;
+        }
+
+        const DWORD remainingTimeoutMs = SocketIoTimeout::GetRemainingTimeoutMs();
+        const int sliceMs = (std::min)(
+            remainingSleepMs,
+            (std::min)(kLuaSleepPollMs, static_cast<int>(remainingTimeoutMs)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(sliceMs));
+        remainingSleepMs -= sliceMs;
+    }
+
+    if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+        luaL_error(L, "Lua execution timed out");
+    }
     return 0;
 }
 

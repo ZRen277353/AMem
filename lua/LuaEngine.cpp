@@ -4,6 +4,9 @@
 #include <sstream>
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
+#include <chrono>
+#include <cstring>
 
 #ifdef HAVE_LUAJIT
 // LuaJIT使用lua.hpp（已包含所有头文件）
@@ -18,6 +21,65 @@ extern "C" {
 #include <lualib.h>
 }
 #endif
+
+namespace {
+
+constexpr size_t kMaxCapturedOutputBytes = 1024 * 1024;
+constexpr int kLuaTimeoutInstructionInterval = 10000;
+
+char g_luaTimeoutRegistryKey;
+
+struct LuaTimeoutContext {
+    std::chrono::steady_clock::time_point deadline;
+    bool expired = false;
+};
+
+struct LuaCaptureContext {
+    std::string* output = nullptr;
+    bool truncated = false;
+};
+
+void LuaTimeoutHook(lua_State* L, lua_Debug*) {
+    lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    LuaTimeoutContext* ctx =
+        static_cast<LuaTimeoutContext*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+
+    if (!ctx) {
+        return;
+    }
+
+    if (std::chrono::steady_clock::now() >= ctx->deadline) {
+        ctx->expired = true;
+        luaL_error(L, "Lua execution timed out");
+    }
+}
+
+void AppendCapturedOutput(LuaCaptureContext* ctx, const char* text) {
+    if (!ctx || !ctx->output || !text || ctx->truncated) {
+        return;
+    }
+
+    const size_t remaining =
+        kMaxCapturedOutputBytes > ctx->output->size()
+            ? kMaxCapturedOutputBytes - ctx->output->size()
+            : 0;
+    if (remaining == 0) {
+        ctx->truncated = true;
+        ctx->output->append("\n[output truncated]\n");
+        return;
+    }
+
+    const size_t len = std::strlen(text);
+    ctx->output->append(text, (std::min)(len, remaining));
+    if (len > remaining) {
+        ctx->truncated = true;
+        ctx->output->append("\n[output truncated]\n");
+    }
+}
+
+} // namespace
 
 LuaEngine& LuaEngine::GetInstance() {
     static LuaEngine instance;
@@ -105,7 +167,7 @@ bool LuaEngine::ExecuteFileLocked(const std::string& filepath) {
     }
 
     // 执行代码
-    result = lua_pcall(L, 0, LUA_MULTRET, 0);
+    result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
         lastError = GetLuaError(L);
         return false;
@@ -138,7 +200,7 @@ bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkN
     }
 
     // 执行代码
-    result = lua_pcall(L, 0, LUA_MULTRET, 0);
+    result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
         lastError = GetLuaError(L);
         return false;
@@ -147,7 +209,10 @@ bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkN
     return true;
 }
 
-bool LuaEngine::ExecuteStringCapture(const std::string& code, const std::string& chunkName, std::string& output) {
+bool LuaEngine::ExecuteStringCapture(const std::string& code,
+                                     const std::string& chunkName,
+                                     std::string& output,
+                                     int timeoutMs) {
     std::lock_guard<std::mutex> lock(mutex);
 
     if (!initialized || !L) {
@@ -159,17 +224,20 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code, const std::string&
     lua_getglobal(L, "print");
     int printRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
+    LuaCaptureContext captureContext{&output, false};
+
     // 设置捕获 print → 写入 output
-    lua_pushlightuserdata(L, &output);
+    lua_pushlightuserdata(L, &captureContext);
     lua_pushcclosure(L, [](lua_State* L) -> int {
-        std::string* out = (std::string*)lua_touserdata(L, lua_upvalueindex(1));
+        LuaCaptureContext* capture =
+            static_cast<LuaCaptureContext*>(lua_touserdata(L, lua_upvalueindex(1)));
         int n = lua_gettop(L);
         for (int i = 1; i <= n; i++) {
-            if (i > 1) *out += "\t";
+            if (i > 1) AppendCapturedOutput(capture, "\t");
             const char* s = lua_tostring(L, i);
-            if (s) *out += s;
+            if (s) AppendCapturedOutput(capture, s);
         }
-        *out += "\n";
+        AppendCapturedOutput(capture, "\n");
         return 0;
     }, 1);
     lua_setglobal(L, "print");
@@ -185,10 +253,38 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code, const std::string&
         return false;
     }
 
-    result = lua_pcall(L, 0, LUA_MULTRET, 0);
+    LuaTimeoutContext timeoutContext{};
+    lua_Hook previousHook = nullptr;
+    int previousHookMask = 0;
+    int previousHookCount = 0;
+    const bool useTimeout = timeoutMs > 0;
+    if (useTimeout) {
+        timeoutContext.deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        previousHook = lua_gethook(L);
+        previousHookMask = lua_gethookmask(L);
+        previousHookCount = lua_gethookcount(L);
+
+        lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
+        lua_pushlightuserdata(L, &timeoutContext);
+        lua_settable(L, LUA_REGISTRYINDEX);
+        lua_sethook(L, LuaTimeoutHook, LUA_MASKCOUNT, kLuaTimeoutInstructionInterval);
+    }
+
+    result = lua_pcall(L, 0, 0, 0);
     bool ok = (result == LUA_OK);
     if (!ok) {
         lastError = GetLuaError(L);
+        if (timeoutContext.expired) {
+            lastError = "Lua execution timed out";
+        }
+    }
+
+    if (useTimeout) {
+        lua_sethook(L, previousHook, previousHookMask, previousHookCount);
+        lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
+        lua_pushnil(L);
+        lua_settable(L, LUA_REGISTRYINDEX);
     }
 
     // 恢复原始 print

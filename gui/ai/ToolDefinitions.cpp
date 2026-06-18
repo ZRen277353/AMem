@@ -27,6 +27,7 @@
 #include "../AppContext.h"
 #include "../MemoryTypes.h"
 #include "../../socket/client_singleton.h"
+#include "../../socket/socket_io_timeout.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #ifdef HAVE_LUAJIT
@@ -394,6 +395,11 @@ bool readRawFlagArg(const json& source, const char* key, uint32_t& out) {
     throw std::runtime_error(std::string(key) + " must be an integer");
 }
 
+bool scanNextFlagRequiresValue(uint32_t flag) {
+    return (flag & (_ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+                    _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
+}
+
 uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
     uint32_t rawFlag = 0;
     if (readRawFlagArg(args, "flags", rawFlag) ||
@@ -501,6 +507,47 @@ std::vector<unsigned char> scanBytesFromArgs(const json& args,
                                  "' (or provide value_hex/hex)");
     }
     return encodeScanValue(valueType, args.at(valueFieldName));
+}
+
+void appendBetweenUpperBound(const json& args,
+                             const std::string& valueType,
+                             std::vector<unsigned char>& bytes) {
+    const int singleValueSize = dataTypeToSize(valueType);
+    const bool hasUpper =
+        args.contains("value2") || args.contains("max_value") ||
+        args.contains("upper_value");
+
+    if (!hasUpper) {
+        if (bytes.size() == static_cast<size_t>(singleValueSize * 2)) {
+            return;
+        }
+        throw std::runtime_error(
+            "between scan requires value2, max_value, or upper_value");
+    }
+
+    if (bytes.size() != static_cast<size_t>(singleValueSize)) {
+        throw std::runtime_error(
+            "between scan lower value must encode exactly one value");
+    }
+
+    const json* upper = nullptr;
+    if (args.contains("value2")) {
+        upper = &args.at("value2");
+    } else if (args.contains("max_value")) {
+        upper = &args.at("max_value");
+    } else {
+        upper = &args.at("upper_value");
+    }
+
+    std::vector<unsigned char> upperBytes = encodeScanValue(valueType, *upper);
+    if (upperBytes.size() != bytes.size()) {
+        throw std::runtime_error("between scan values must use the same encoded size");
+    }
+    bytes.insert(bytes.end(), upperBytes.begin(), upperBytes.end());
+}
+
+std::vector<unsigned char> placeholderScanValue(const std::string& valueType) {
+    return std::vector<unsigned char>(static_cast<size_t>(dataTypeToSize(valueType)), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +784,9 @@ std::string execScanValue(const std::string& argsJson) {
         std::vector<unsigned char> bytes = scanBytesFromArgs(args, valueType, "value");
 
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
+        if ((flags & _BETWEEN_VAL) != 0) {
+            appendBetweenUpperBound(args, valueType, bytes);
+        }
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
         parseScanRange(args, start, end);
@@ -766,13 +816,25 @@ std::string execScanNext(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string valueType = valueTypeFromArgs(args);
-        std::vector<unsigned char> bytes = scanBytesFromArgs(args, valueType, "value");
         uint32_t rawFlag = 0;
         const uint32_t flags = readRawFlagArg(args, "scan_flag", rawFlag)
                                    ? rawFlag
                                    : scanFlagsFromArgs(args, valueType);
         if (flags > static_cast<uint32_t>(INT32_MAX)) {
             return makeError("scan_flag out of range");
+        }
+        const bool hasValue =
+            args.contains("value") || args.contains("value_hex") || args.contains("hex");
+        std::vector<unsigned char> bytes;
+        if (hasValue) {
+            bytes = scanBytesFromArgs(args, valueType, "value");
+            if ((flags & _BETWEEN_VAL) != 0) {
+                appendBetweenUpperBound(args, valueType, bytes);
+            }
+        } else if (scanNextFlagRequiresValue(flags)) {
+            return makeError("scan_next requires value/value_hex/hex for this scan_type");
+        } else {
+            bytes = placeholderScanValue(valueType);
         }
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
@@ -1443,7 +1505,11 @@ std::string execExecuteLua(const std::string& argsJson) {
             return makeError("Lua engine initialization failed: " + engine.GetLastError());
         }
         std::string output;
-        if (!engine.ExecuteStringCapture(code, "ai_tool", output)) {
+        if (!engine.ExecuteStringCapture(
+                code,
+                "ai_tool",
+                output,
+                static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()))) {
             json err;
             err["error"] = engine.GetLastError();
             err["output"] = output;
@@ -1566,6 +1632,15 @@ constexpr const char* kSchemaScanValue = R"JSON({
     "value": {
       "description": "Value to scan for; interpreted according to value_type/data_type. Required unless value_hex or hex is supplied"
     },
+    "value2": {
+      "description": "Upper bound for scan_type=between; interpreted according to value_type/data_type"
+    },
+    "max_value": {
+      "description": "Alias for value2 when scan_type=between"
+    },
+    "upper_value": {
+      "description": "Alias for value2 when scan_type=between"
+    },
     "value_hex": {
       "type": "string",
       "description": "Little-endian encoded value bytes. Alternative to value"
@@ -1585,6 +1660,60 @@ constexpr const char* kSchemaScanValue = R"JSON({
     "scan_type": {
       "type": "string",
       "description": "MCP-style scan type: exact, unknown, greater, less, between, increased, decreased, changed, unchanged"
+    },
+    "flags": {
+      "type": "integer",
+      "description": "Scan flags (provider-defined, default 0)",
+      "minimum": 0
+    },
+    "scan_flag": {
+      "type": "integer",
+      "description": "IPC/MCP raw scan flag alias",
+      "minimum": 0
+    },
+    "start": {
+      "description": "Optional start address as hex string or integer"
+    },
+    "end": {
+      "description": "Optional end address as hex string or integer"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaScanNext = R"JSON({
+  "type": "object",
+  "properties": {
+    "value": {
+      "description": "Value to filter by. Required for exact/greater/less/between/increased_by/decreased_by; optional for increased/decreased/changed/unchanged"
+    },
+    "value2": {
+      "description": "Upper bound for scan_type=between; interpreted according to value_type/data_type"
+    },
+    "max_value": {
+      "description": "Alias for value2 when scan_type=between"
+    },
+    "upper_value": {
+      "description": "Alias for value2 when scan_type=between"
+    },
+    "value_hex": {
+      "type": "string",
+      "description": "Little-endian encoded value bytes. Alternative to value"
+    },
+    "hex": {
+      "type": "string",
+      "description": "Alias for value_hex. Alternative to value"
+    },
+    "value_type": {
+      "type": "string",
+      "description": "One of: byte, word, dword, qword, int32, int64, float, double, bytes, string"
+    },
+    "data_type": {
+      "type": "string",
+      "description": "MCP-style alias for value_type: byte, word, dword, qword, float, double"
+    },
+    "scan_type": {
+      "type": "string",
+      "description": "MCP-style scan type: exact, greater, less, between, increased, decreased, changed, unchanged, increased_by, decreased_by"
     },
     "flags": {
       "type": "integer",
@@ -2111,8 +2240,8 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "scan_next",
-        "Filter the previous scan results with a new value/condition.",
-        kSchemaScanValue,
+        "Filter the previous scan results with a new value/condition. For increased/decreased/changed/unchanged no value is required.",
+        kSchemaScanNext,
         ToolSafety::ReadOnly,
         &execScanNext);
 

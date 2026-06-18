@@ -1,5 +1,6 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
+#include "../gui/MemoryTypes.h"
 #include <iostream>
 #include <iomanip>
 
@@ -40,6 +41,18 @@ bool isValidScanRange(uint64_t start, uint64_t end) {
 
 bool isValidScanBytes(const std::vector<unsigned char>& value) {
     return !value.empty() && value.size() <= kMaxScanValueBytes;
+}
+
+bool scanNextFlagRequiresValue(uint32_t flag) {
+    return (flag & (_ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+                    _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
+}
+
+bool isValidScanNextBytes(const std::vector<unsigned char>& value, uint32_t flag) {
+    if (!scanNextFlagRequiresValue(flag)) {
+        return value.size() <= kMaxScanValueBytes;
+    }
+    return isValidScanBytes(value);
 }
 
 bool isValidGroupScanValues(
@@ -111,7 +124,8 @@ int ScanValue(uint32_t flags, std::vector<unsigned char> &Value, uint64_t start,
 
 int ScanNextValue(std::vector<unsigned char> &Value, int flag, uint64_t start,
                   uint64_t end, PortType port) {
-    if (flag < 0 || !isValidScanRange(start, end) || !isValidScanBytes(Value))
+    if (flag < 0 || !isValidScanRange(start, end) ||
+        !isValidScanNextBytes(Value, static_cast<uint32_t>(flag)))
         return -1;
 
     return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
@@ -229,7 +243,8 @@ int ScanValueWithProgress(uint32_t flags, std::vector<unsigned char> &Value,
 int ScanNextValueWithProgress(std::vector<unsigned char> &Value, int flag,
                               ScanProgressCallback callback, void *userData,
                               uint64_t start, uint64_t end, PortType port) {
-    if (flag < 0 || !isValidScanRange(start, end) || !isValidScanBytes(Value))
+    if (flag < 0 || !isValidScanRange(start, end) ||
+        !isValidScanNextBytes(Value, static_cast<uint32_t>(flag)))
         return -1;
 
     return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {

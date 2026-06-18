@@ -1,7 +1,9 @@
 #include "IpcServer.h"
 #include "../socket/client_singleton.h"
+#include "../socket/socket_io_timeout.h"
 #include "../gui/AppContext.h"
 #include "../gui/Gui.h"
+#include "../gui/MemoryTypes.h"
 
 #ifdef HAVE_LUAJIT
 #include "../lua/LuaEngine.h"
@@ -24,6 +26,8 @@ namespace {
 constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
 constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
 constexpr size_t kMaxIpcBatchReadCount = 100000;
+constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
+constexpr int kMaxIpcLuaTimeoutSeconds = 300;
 
 bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const char* expected) {
     size_t expectedLen = 0;
@@ -415,6 +419,56 @@ static std::vector<unsigned char> HexToBytes(const std::string& hex) {
     return out;
 }
 
+static bool ScanNextFlagRequiresValue(uint32_t flag) {
+    return (flag & (_ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+                    _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
+}
+
+static size_t ScanValueSizeFromFlags(uint32_t flags) {
+    if ((flags & BYTE_) != 0) return 1;
+    if ((flags & WORD_) != 0) return 2;
+    if ((flags & (DWORD_ | XOR_ | FLOAT_)) != 0) return 4;
+    if ((flags & (QWORD_ | DOUBLE_)) != 0) return 8;
+    return 4;
+}
+
+static std::vector<unsigned char> ScanBytesFromIpcValue(const json& params,
+                                                        uint32_t flags,
+                                                        bool requireValue) {
+    std::vector<unsigned char> bytes;
+    if (params.contains("value_hex") && params["value_hex"].is_string()) {
+        bytes = HexToBytes(params["value_hex"].get<std::string>());
+    } else if (params.contains("hex") && params["hex"].is_string()) {
+        bytes = HexToBytes(params["hex"].get<std::string>());
+    } else if (requireValue) {
+        throw std::invalid_argument("value_hex is required for this scan type");
+    } else {
+        bytes.assign(ScanValueSizeFromFlags(flags), 0);
+        return bytes;
+    }
+
+    if ((flags & _BETWEEN_VAL) != 0) {
+        const size_t singleSize = ScanValueSizeFromFlags(flags);
+        if (params.contains("value2_hex") && params["value2_hex"].is_string()) {
+            std::vector<unsigned char> upper =
+                HexToBytes(params["value2_hex"].get<std::string>());
+            if (bytes.size() != singleSize || upper.size() != singleSize) {
+                throw std::invalid_argument(
+                    "between scan values must match data type size");
+            }
+            bytes.insert(bytes.end(), upper.begin(), upper.end());
+        } else if (bytes.size() != singleSize * 2) {
+            throw std::invalid_argument(
+                "between scan requires value2_hex or combined value_hex");
+        }
+    }
+
+    if (bytes.empty()) {
+        throw std::invalid_argument("value_hex is empty");
+    }
+    return bytes;
+}
+
 static uint64_t ParseAddress(const json& params, const std::string& key) {
     auto& v = params.at(key);
     if (v.is_string()) {
@@ -629,8 +683,7 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── scan_value ───────────────────────────────────────────────
     RegisterMethod("scan_value", [](const json& p) -> json {
         uint32_t flags = p.at("flags").get<uint32_t>();
-        std::string hexVal = p.at("value_hex").get<std::string>();
-        auto valBytes = HexToBytes(hexVal);
+        auto valBytes = ScanBytesFromIpcValue(p, flags, true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -643,9 +696,13 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── scan_next ────────────────────────────────────────────────
     RegisterMethod("scan_next", [](const json& p) -> json {
         uint32_t flags = p.at("flags").get<uint32_t>();
-        std::string hexVal = p.at("value_hex").get<std::string>();
-        auto valBytes = HexToBytes(hexVal);
         int flag = p.value("scan_flag", static_cast<int>(flags));
+        if (flag < 0) {
+            return {{"success", false}, {"error", "scan_flag out of range"}};
+        }
+        auto valBytes = ScanBytesFromIpcValue(
+            p, static_cast<uint32_t>(flag),
+            ScanNextFlagRequiresValue(static_cast<uint32_t>(flag)));
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -789,13 +846,20 @@ void IpcServer::RegisterBuiltinMethods() {
 #ifdef HAVE_LUAJIT
     RegisterMethod("execute_lua", [](const json& p) -> json {
         std::string code = p.at("code").get<std::string>();
+        int timeoutSeconds = p.value("timeout_seconds", kDefaultIpcLuaTimeoutSeconds);
+        timeoutSeconds = (std::clamp)(timeoutSeconds, 1, kMaxIpcLuaTimeoutSeconds);
         auto& engine = LuaEngine::GetInstance();
         if (!engine.IsInitialized()) {
             if (!engine.Initialize())
                 return {{"success", false}, {"error", "Lua 引擎初始化失败: " + engine.GetLastError()}};
         }
         std::string output;
-        bool ok = engine.ExecuteStringCapture(code, "ipc", output);
+        SocketIoTimeout::ScopedTimeout luaTimeout(timeoutSeconds);
+        bool ok = engine.ExecuteStringCapture(
+            code,
+            "ipc",
+            output,
+            static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()));
         if (!ok)
             return {{"success", false}, {"error", engine.GetLastError()}, {"output", output}};
         return {{"success", true}, {"result", {{"output", output}}}};
