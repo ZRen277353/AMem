@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..helpers import clamp_page, parse_int
 from ..ipc_client import IpcClient
 
 
@@ -27,6 +28,9 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             pid: 目标进程 PID
         """
+        pid = parse_int(pid)
+        if pid == 0:
+            raise ValueError("pid must be positive")
         r = ipc.call_or_raise("open_process", {"pid": pid})
         return f"已打开进程 PID={pid}, handle={r['handle']}"
 
@@ -39,8 +43,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移，默认 0
             count: 获取数量，默认 200，最大 1000
         """
-        offset = max(0, offset)
-        count = max(1, min(count, 1000))
+        offset, count = clamp_page(offset, count)
         params: dict = {"offset": offset, "count": count}
         if filter:
             params["filter"] = filter
@@ -67,6 +70,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             module_name: 模块名称
         """
+        if not module_name.strip():
+            raise ValueError("module_name must not be empty")
         r = ipc.call_or_raise("get_module_base", {"name": module_name})
         return f"模块 {module_name} 基址: {r['base']}"
 
@@ -85,10 +90,16 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offsets: 偏移链列表，如 [0x10, 0x20, 0x8]
             deref_final: 是否解引用最终地址，默认 True
         """
+        if not module.strip():
+            raise ValueError("module must not be empty")
+        parse_int(base_offset)
+        if offsets is not None and not isinstance(offsets, list):
+            raise ValueError("offsets must be a list")
+        parsed_offsets = [parse_int(offset) for offset in (offsets or [])]
         r = ipc.call_or_raise("resolve_offset_chain", {
             "module": module,
             "base_offset": base_offset,
-            "offsets": offsets or [],
+            "offsets": parsed_offsets,
             "deref_final": deref_final,
         })
         return f"最终地址: {r['address']}"

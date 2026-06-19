@@ -20,6 +20,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             code: Lua 脚本代码
         """
+        if not code:
+            raise ValueError("code must not be empty")
         timeout_seconds = max(1, min(timeout_seconds, 300))
         r = ipc.call_or_raise(
             "execute_lua",

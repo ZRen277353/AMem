@@ -68,12 +68,12 @@ MEMORY_TYPE_MAP: dict[str, int] = {
 # ── 数据类型字节宽度和 struct 格式 ───────────────────────────────
 DATA_TYPE_SIZE: dict[str, int] = {
     "byte": 1, "word": 2, "dword": 4, "qword": 8,
-    "float": 4, "double": 8,
+    "float": 4, "double": 8, "xor": 4,
 }
 
 DATA_TYPE_FMT: dict[str, str] = {
     "byte": "<B", "word": "<H", "dword": "<I", "qword": "<Q",
-    "float": "<f", "double": "<d",
+    "float": "<f", "double": "<d", "xor": "<I",
 }
 
 # ── 硬件断点类型 (与 gui/BreakpointWindow.h HW_BREAKPOINT_* 对齐) ──

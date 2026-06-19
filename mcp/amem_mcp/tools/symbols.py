@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..helpers import clamp_page, parse_int
 from ..ipc_client import IpcClient
 
 
@@ -16,6 +17,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             module_base: 模块基址，支持 0x 前缀
         """
+        parse_int(module_base)
         r = ipc.call_or_raise("symbol_init", {"module_base": module_base})
         return f"符号表初始化完成，总符号数: {r['total_count']}"
 
@@ -28,9 +30,9 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             count: 获取数量，默认 100，最大 1000
             module_base: 模块基址；如提供，则会先初始化该模块的符号表
         """
-        offset = max(0, offset)
-        count = max(1, min(count, 1000))
+        offset, count = clamp_page(offset, count)
         if module_base:
+            parse_int(module_base)
             ipc.call_or_raise("symbol_init", {"module_base": module_base})
 
         r = ipc.call_or_raise("symbol_list", {"offset": offset, "count": count})
@@ -55,6 +57,9 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             module_base: 模块基址，支持 0x 前缀
             symbol_name: 符号名称
         """
+        parse_int(module_base)
+        if not symbol_name.strip():
+            raise ValueError("symbol_name must not be empty")
         r = ipc.call_or_raise("symbol_find", {
             "module_base": module_base,
             "name": symbol_name,

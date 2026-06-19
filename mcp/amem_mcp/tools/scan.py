@@ -5,11 +5,25 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from ..constants import MEMORY_TYPE_MAP
-from ..helpers import encode_value_hex, make_scan_flags
+from ..helpers import (
+    clean_hex_string,
+    clamp_page,
+    encode_value_hex,
+    make_scan_flags,
+    normalize_memory_type,
+    normalize_scan_type,
+)
 from ..ipc_client import IpcClient
 
 
 NO_VALUE_SCAN_TYPES = {"increased", "decreased", "changed", "unchanged"}
+FIRST_SCAN_TYPES = {"exact", "unknown", "greater", "less", "between"}
+NEXT_SCAN_TYPES = {
+    "exact", "greater", "less", "between",
+    "increased", "increased_by", "decreased", "decreased_by",
+    "changed", "unchanged",
+}
+FUZZY_SCAN_TYPES = {"unknown", "increased", "decreased", "changed", "unchanged"}
 
 
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
@@ -23,7 +37,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
                          java_heap / java / stack / code_app / code_system /
                          video / ashmem / bad
         """
-        mt = MEMORY_TYPE_MAP.get(memory_type.lower(), -1)
+        memory_type = normalize_memory_type(memory_type)
+        mt = MEMORY_TYPE_MAP[memory_type]
         ipc.call_or_raise("scan_set_range", {"type": mt})
         return f"扫描范围已设置为: {memory_type}"
 
@@ -37,9 +52,10 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             data_type: byte/word/dword/qword/float/double
             scan_type: exact/unknown/greater/less/between
         """
+        scan_type = normalize_scan_type(scan_type, FIRST_SCAN_TYPES)
         flags = make_scan_flags(scan_type, data_type)
         params = {"flags": flags, "value_hex": encode_value_hex(value, data_type)}
-        if scan_type.lower() == "between":
+        if scan_type == "between":
             if value2 == "":
                 raise ValueError("scan_value with scan_type='between' requires value2")
             params["value2_hex"] = encode_value_hex(value2, data_type)
@@ -57,8 +73,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             scan_type: exact/increased/decreased/changed/unchanged/
                        increased_by/decreased_by/greater/less
         """
-        flags = make_scan_flags(scan_type, data_type)
-        normalized_scan_type = scan_type.lower()
+        normalized_scan_type = normalize_scan_type(scan_type, NEXT_SCAN_TYPES)
+        flags = make_scan_flags(normalized_scan_type, data_type)
         params = {"flags": flags, "scan_flag": flags}
         if value == "":
             if normalized_scan_type not in NO_VALUE_SCAN_TYPES:
@@ -80,6 +96,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             data_type: byte/word/dword/qword/float/double
             scan_type: unknown/increased/decreased/changed/unchanged
         """
+        scan_type = normalize_scan_type(scan_type, FUZZY_SCAN_TYPES)
         flags = make_scan_flags(scan_type, data_type)
         r = ipc.call_or_raise("scan_fuzzy", {"flags": flags})
         return f"模糊扫描完成，找到 {r['count']} 个结果"
@@ -91,7 +108,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             hex_pattern: 十六进制字节串，如 "48 65 6C 6C 6F"
         """
-        pattern = hex_pattern.replace(" ", "")
+        pattern = clean_hex_string(hex_pattern)
         r = ipc.call_or_raise("scan_hex", {"pattern_hex": pattern})
         return f"HEX 扫描完成，找到 {r['count']} 个结果"
 
@@ -109,8 +126,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offset: 起始偏移
             count: 获取数量，默认 20，最大 1000
         """
-        offset = max(0, offset)
-        count = max(1, min(count, 1000))
+        offset, count = clamp_page(offset, count)
         r = ipc.call_or_raise("get_scan_results", {"offset": offset, "count": count})
         total = r.get("total", 0)
         items = r.get("items", [])
