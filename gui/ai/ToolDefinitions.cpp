@@ -632,8 +632,8 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
 
     auto asString = [&]() -> std::string {
         if (value.is_string()) return value.get<std::string>();
-        if (value.is_number_integer()) return std::to_string(value.get<long long>());
         if (value.is_number_unsigned()) return std::to_string(value.get<unsigned long long>());
+        if (value.is_number_integer()) return std::to_string(value.get<long long>());
         if (value.is_number_float()) return std::to_string(value.get<double>());
         throw std::runtime_error("value must be string or number for type '" + t + "'");
     };
