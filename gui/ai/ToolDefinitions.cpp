@@ -2517,30 +2517,30 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "scan_value",
-        "Scan target process memory for a value. Supports AMem flags or MCP-style data_type/scan_type.",
+        "Start a scan and replace the current scan result set. Requires user confirmation.",
         kSchemaScanValue,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execScanValue);
 
     registerTool(
         "scan_next",
-        "Filter the previous scan results with a new value/condition. For increased/decreased/changed/unchanged no value is required.",
+        "Filter the current scan result set. Requires user confirmation.",
         kSchemaScanNext,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execScanNext);
 
     registerTool(
         "scan_fuzzy",
-        "Run a fuzzy scan such as unknown/increased/decreased/changed/unchanged.",
+        "Run a fuzzy scan and replace the current scan result set. Requires user confirmation.",
         kSchemaScanFuzzy,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execScanFuzzy);
 
     registerTool(
         "scan_hex",
-        "Scan memory for a hex byte pattern.",
+        "Scan memory for a hex byte pattern and replace the current scan result set. Requires user confirmation.",
         kSchemaScanHex,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execScanHex);
 
     registerTool(
