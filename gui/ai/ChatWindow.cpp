@@ -971,9 +971,9 @@ void ChatWindow::drawInputArea() {
         ImGui::EndDisabled();
     }
 
-    // Stop is visible while the model or tools are still in flight.
+    // Stop can cancel model streaming and pending tool approval. Once a
+    // tool has started, let its result return so side effects are audited.
     if (state_ == State::WaitingResponse ||
-        state_ == State::ToolExecuting ||
         state_ == State::ToolConfirmation) {
         if (ImGui::Button("Stop", ImVec2(80.0f, 36.0f))) {
             cancelRequest();
