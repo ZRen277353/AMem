@@ -44,6 +44,7 @@
 #include <cmath>
 #include <exception>
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,17 @@ namespace AI {
 namespace {
 
 using nlohmann::json;
+
+constexpr size_t kMaxToolStringParamBytes = 4096;
+constexpr size_t kMaxToolHexStringBytes = 16 * 1024;
+constexpr size_t kMaxToolLuaCodeBytes = 256 * 1024;
+constexpr size_t kMaxToolScanHexBytes = 4096;
+constexpr size_t kMaxToolOffsetChainLength = 1024;
+constexpr int kDefaultToolLuaTimeoutSeconds = 30;
+constexpr int kMaxToolLuaTimeoutSeconds = 300;
+constexpr int kKnownMemoryTypeMask =
+    Anonymous | C_Alloc | C_Heap | C_Data | C_Bss | Java_Heap |
+    Java | Stack | Video | Code_App | Code_System | Ashmem | Bad;
 
 // ---------------------------------------------------------------------------
 // JSON helpers
@@ -80,7 +92,16 @@ std::string makeOk(const json& value) {
 // descriptive error instead of silently interpreting as 0.
 uint64_t parseHexAddress(const std::string& s) {
     if (s.empty()) throw std::runtime_error("address is empty");
-    std::string trimmed = s;
+    size_t begin = 0;
+    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) {
+        ++begin;
+    }
+    size_t end = s.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+        --end;
+    }
+    std::string trimmed = s.substr(begin, end - begin);
+    if (trimmed.empty()) throw std::runtime_error("address is empty");
     // strip optional 0x/0X prefix
     if (trimmed.size() >= 2 && trimmed[0] == '0' && (trimmed[1] == 'x' || trimmed[1] == 'X')) {
         trimmed = trimmed.substr(2);
@@ -235,6 +256,130 @@ std::string trimAsciiCopy(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
+bool isBlankString(const std::string& value) {
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    });
+}
+
+std::string requiredStringArg(const json& args,
+                              std::initializer_list<const char*> names,
+                              const char* fieldName,
+                              size_t maxBytes,
+                              bool allowBlank = false) {
+    std::string value = firstStringArg(args, names, fieldName);
+    if (!allowBlank && isBlankString(value)) {
+        throw std::runtime_error(std::string(fieldName) + " must not be empty");
+    }
+    if (value.size() > maxBytes) {
+        throw std::runtime_error(std::string(fieldName) + " is too long");
+    }
+    return value;
+}
+
+std::string optionalStringArg(const json& args,
+                              const char* key,
+                              const std::string& fallback,
+                              size_t maxBytes,
+                              bool allowBlank = true) {
+    if (!args.contains(key) || args[key].is_null()) {
+        return fallback;
+    }
+    if (!args[key].is_string()) {
+        throw std::runtime_error(std::string(key) + " must be a string");
+    }
+    std::string value = args[key].get<std::string>();
+    if (!allowBlank && isBlankString(value)) {
+        throw std::runtime_error(std::string(key) + " must not be empty");
+    }
+    if (value.size() > maxBytes) {
+        throw std::runtime_error(std::string(key) + " is too long");
+    }
+    return value;
+}
+
+long long readIntegerValue(const json& value, const char* key) {
+    if (value.is_number_unsigned()) {
+        const uint64_t v = value.get<uint64_t>();
+        if (v > static_cast<uint64_t>((std::numeric_limits<long long>::max)())) {
+            throw std::runtime_error(std::string(key) + " out of range");
+        }
+        return static_cast<long long>(v);
+    }
+    if (value.is_number_integer()) {
+        return value.get<long long>();
+    }
+    throw std::runtime_error(std::string(key) + " must be an integer");
+}
+
+int requiredIntArg(const json& args, const char* key, int minValue, int maxValue) {
+    if (!args.contains(key) || args[key].is_null()) {
+        throw std::runtime_error(std::string("missing required property '") + key + "'");
+    }
+    const long long value = readIntegerValue(args[key], key);
+    if (value < minValue || value > maxValue) {
+        throw std::runtime_error(std::string(key) + " out of range");
+    }
+    return static_cast<int>(value);
+}
+
+int optionalIntArg(const json& args,
+                   const char* key,
+                   int fallback,
+                   int minValue,
+                   int maxValue) {
+    if (!args.contains(key) || args[key].is_null()) {
+        return fallback;
+    }
+    const long long value = readIntegerValue(args[key], key);
+    if (value < minValue || value > maxValue) {
+        throw std::runtime_error(std::string(key) + " out of range");
+    }
+    return static_cast<int>(value);
+}
+
+int optionalPositiveClampedIntArg(const json& args,
+                                  const char* key,
+                                  int fallback,
+                                  int maxValue) {
+    if (!args.contains(key) || args[key].is_null()) {
+        return fallback;
+    }
+    const long long value = readIntegerValue(args[key], key);
+    if (value <= 0) {
+        throw std::runtime_error(std::string(key) + " must be positive");
+    }
+    if (value > maxValue) {
+        return maxValue;
+    }
+    return static_cast<int>(value);
+}
+
+bool optionalBoolArg(const json& args, const char* key, bool fallback) {
+    if (!args.contains(key) || args[key].is_null()) {
+        return fallback;
+    }
+    if (!args[key].is_boolean()) {
+        throw std::runtime_error(std::string(key) + " must be a boolean");
+    }
+    return args[key].get<bool>();
+}
+
+std::vector<unsigned char> requiredHexBytesArg(const json& args,
+                                               const char* key,
+                                               size_t maxInputBytes,
+                                               size_t maxDecodedBytes) {
+    const std::string hex = optionalStringArg(args, key, "", maxInputBytes, false);
+    std::vector<unsigned char> bytes = parseHexBytes(hex);
+    if (bytes.empty()) {
+        throw std::runtime_error(std::string(key) + " is empty");
+    }
+    if (bytes.size() > maxDecodedBytes) {
+        throw std::runtime_error(std::string(key) + " exceeds maximum byte length");
+    }
+    return bytes;
+}
+
 std::vector<unsigned char> integerToLittleEndian(uint64_t value, int byteCount) {
     std::vector<unsigned char> out;
     out.reserve(static_cast<size_t>(byteCount));
@@ -306,21 +451,14 @@ double parseDoubleValueStrict(const std::string& text, const std::string& typeNa
     return value;
 }
 
-std::string valueTypeFromArgs(const json& args, const std::string& fallback = "dword") {
-    if (args.contains("value_type") && args["value_type"].is_string()) {
-        return args["value_type"].get<std::string>();
-    }
-    return args.value("data_type", fallback);
-}
-
 int dataTypeToSize(const std::string& valueType) {
     const std::string t = lowerCopy(valueType);
     if (t == "byte" || t == "u8" || t == "uint8" || t == "int8") return 1;
     if (t == "word" || t == "u16" || t == "uint16" || t == "int16") return 2;
-    if (t == "dword" || t == "int32" || t == "uint32" || t == "float") return 4;
+    if (t == "dword" || t == "int32" || t == "uint32" || t == "float" || t == "xor") return 4;
     if (t == "qword" || t == "int64" || t == "uint64" || t == "double") return 8;
     throw std::runtime_error("unsupported data_type '" + valueType +
-                             "' (supported: byte, word, dword, qword, float, double)");
+                             "' (supported: byte, word, dword, qword, xor, float, double)");
 }
 
 int dataTypeToFlag(const std::string& valueType) {
@@ -372,6 +510,48 @@ int memoryTypeToFlag(const std::string& memoryType) {
     throw std::runtime_error("unsupported memory_type '" + memoryType + "'");
 }
 
+std::string valueTypeFromArgs(const json& args, const std::string& fallback = "dword") {
+    if (args.contains("value_type") && !args["value_type"].is_null()) {
+        return optionalStringArg(args, "value_type", fallback, 64, false);
+    }
+    return optionalStringArg(args, "data_type", fallback, 64, false);
+}
+
+bool isValidMemoryTypeFlags(int type) {
+    if (type == All || type == Other) {
+        return true;
+    }
+    return type > 0 && (type & ~kKnownMemoryTypeMask) == 0;
+}
+
+int checkedMemoryType(int type) {
+    if (!isValidMemoryTypeFlags(type)) {
+        throw std::runtime_error("memory type contains unsupported flags");
+    }
+    return type;
+}
+
+bool isValidBreakpointSize(int size) {
+    return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
+int memoryTypeFromArgs(const json& args) {
+    const char* rawKeys[] = {"memory_type_raw", "type"};
+    for (const char* key : rawKeys) {
+        if (!args.contains(key) || args[key].is_null()) {
+            continue;
+        }
+        const long long raw = readIntegerValue(args[key], key);
+        if (raw < (std::numeric_limits<int>::min)() ||
+            raw > (std::numeric_limits<int>::max)()) {
+            throw std::runtime_error(std::string(key) + " out of range");
+        }
+        return checkedMemoryType(static_cast<int>(raw));
+    }
+    return checkedMemoryType(
+        memoryTypeToFlag(optionalStringArg(args, "memory_type", "all", 64, false)));
+}
+
 bool readRawFlagArg(const json& source, const char* key, uint32_t& out) {
     if (!source.contains(key) || source[key].is_null()) {
         return false;
@@ -400,16 +580,29 @@ bool scanNextFlagRequiresValue(uint32_t flag) {
                     _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
 }
 
+size_t scanValueSizeFromFlags(uint32_t flags) {
+    if ((flags & BYTE_) != 0) return 1;
+    if ((flags & WORD_) != 0) return 2;
+    if ((flags & (DWORD_ | XOR_ | FLOAT_)) != 0) return 4;
+    if ((flags & (QWORD_ | DOUBLE_)) != 0) return 8;
+    return 0;
+}
+
+size_t scanSingleValueSize(const std::string& valueType, uint32_t flags) {
+    const size_t flagSize = scanValueSizeFromFlags(flags);
+    if (flagSize != 0) {
+        return flagSize;
+    }
+    return static_cast<size_t>(dataTypeToSize(valueType));
+}
+
 uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
     uint32_t rawFlag = 0;
     if (readRawFlagArg(args, "flags", rawFlag) ||
         readRawFlagArg(args, "scan_flag", rawFlag)) {
         return rawFlag;
     }
-    const std::string scanType =
-        args.contains("scan_type") && args["scan_type"].is_string()
-            ? args["scan_type"].get<std::string>()
-            : std::string("exact");
+    const std::string scanType = optionalStringArg(args, "scan_type", "exact", 64, false);
     return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
 }
 
@@ -427,16 +620,13 @@ uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) 
         readRawFlagArg(args, "scan_flag", rawFlag)) {
         return rawFlag;
     }
-    const std::string scanType =
-        args.contains("scan_type") && args["scan_type"].is_string()
-            ? args["scan_type"].get<std::string>()
-            : std::string("unknown");
+    const std::string scanType = optionalStringArg(args, "scan_type", "unknown", 64, false);
     return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
 }
 
 // Encode a value (int/float/etc.) as a byte vector for scan/write tools.
 // Supports both legacy value_type names (int32/int64/bytes/string) and
-// MCP-style data_type names (byte/word/dword/qword/float/double).
+// MCP-style data_type names (byte/word/dword/qword/xor/float/double).
 std::vector<unsigned char> encodeScanValue(const std::string& valueType, const json& value) {
     const std::string t = lowerCopy(valueType);
 
@@ -458,7 +648,7 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
         out = integerToLittleEndian(parseIntegerBits(asString(), 16, valueType), 2);
     } else if (t == "int16") {
         out = integerToLittleEndian(parseIntegerBits(asString(), 16, valueType), 2);
-    } else if (t == "dword" || t == "uint32") {
+    } else if (t == "dword" || t == "uint32" || t == "xor") {
         out = integerToLittleEndian(parseIntegerBits(asString(), 32, valueType), 4);
     } else if (t == "int32") {
         out = integerToLittleEndian(parseIntegerBits(asString(), 32, valueType), 4);
@@ -483,7 +673,7 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
         if (out.empty()) throw std::runtime_error("string value is empty");
     } else {
         throw std::runtime_error("unsupported value_type '" + valueType +
-                                 "' (supported: byte, word, dword, qword, int32, int64, float, double, bytes, string)");
+                                 "' (supported: byte, word, dword, qword, xor, int32, int64, float, double, bytes, string)");
     }
     return out;
 }
@@ -491,15 +681,11 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
 std::vector<unsigned char> scanBytesFromArgs(const json& args,
                                              const std::string& valueType,
                                              const char* valueFieldName) {
-    if (args.contains("value_hex") && args["value_hex"].is_string()) {
-        std::vector<unsigned char> bytes = parseHexBytes(args["value_hex"].get<std::string>());
-        if (bytes.empty()) throw std::runtime_error("value_hex is empty");
-        return bytes;
+    if (args.contains("value_hex") && !args["value_hex"].is_null()) {
+        return requiredHexBytesArg(args, "value_hex", kMaxToolHexStringBytes, kMaxToolScanHexBytes);
     }
-    if (args.contains("hex") && args["hex"].is_string()) {
-        std::vector<unsigned char> bytes = parseHexBytes(args["hex"].get<std::string>());
-        if (bytes.empty()) throw std::runtime_error("hex is empty");
-        return bytes;
+    if (args.contains("hex") && !args["hex"].is_null()) {
+        return requiredHexBytesArg(args, "hex", kMaxToolHexStringBytes, kMaxToolScanHexBytes);
     }
     if (!args.contains(valueFieldName)) {
         throw std::runtime_error(std::string("missing required property '") +
@@ -509,28 +695,63 @@ std::vector<unsigned char> scanBytesFromArgs(const json& args,
     return encodeScanValue(valueType, args.at(valueFieldName));
 }
 
+void validateScanBytesForFlags(const std::string& valueType,
+                               uint32_t flags,
+                               const std::vector<unsigned char>& bytes) {
+    if (bytes.empty()) {
+        throw std::runtime_error("scan value is empty");
+    }
+    if (bytes.size() > kMaxToolScanHexBytes) {
+        throw std::runtime_error("scan value exceeds maximum byte length");
+    }
+
+    const std::string t = lowerCopy(valueType);
+    if (t == "bytes" || t == "string") {
+        return;
+    }
+
+    const size_t singleValueSize = scanSingleValueSize(valueType, flags);
+    const size_t expected =
+        (flags & _BETWEEN_VAL) != 0 ? singleValueSize * 2 : singleValueSize;
+    if (bytes.size() != expected) {
+        throw std::runtime_error("scan value size must match data_type");
+    }
+}
+
 void appendBetweenUpperBound(const json& args,
                              const std::string& valueType,
+                             uint32_t flags,
                              std::vector<unsigned char>& bytes) {
-    const int singleValueSize = dataTypeToSize(valueType);
+    const size_t singleValueSize = scanSingleValueSize(valueType, flags);
     const bool hasUpper =
-        args.contains("value2") || args.contains("max_value") ||
+        args.contains("value2") || args.contains("value2_hex") ||
+        args.contains("max_value") ||
         args.contains("upper_value");
 
     if (!hasUpper) {
-        if (bytes.size() == static_cast<size_t>(singleValueSize * 2)) {
+        if (bytes.size() == singleValueSize * 2) {
             return;
         }
         throw std::runtime_error(
             "between scan requires value2, max_value, or upper_value");
     }
 
-    if (bytes.size() != static_cast<size_t>(singleValueSize)) {
+    if (bytes.size() != singleValueSize) {
         throw std::runtime_error(
             "between scan lower value must encode exactly one value");
     }
 
     const json* upper = nullptr;
+    if (args.contains("value2_hex") && !args["value2_hex"].is_null()) {
+        std::vector<unsigned char> upperBytes =
+            requiredHexBytesArg(args, "value2_hex", kMaxToolHexStringBytes, kMaxToolScanHexBytes);
+        if (upperBytes.size() != bytes.size()) {
+            throw std::runtime_error("between scan values must use the same encoded size");
+        }
+        bytes.insert(bytes.end(), upperBytes.begin(), upperBytes.end());
+        return;
+    }
+
     if (args.contains("value2")) {
         upper = &args.at("value2");
     } else if (args.contains("max_value")) {
@@ -546,8 +767,8 @@ void appendBetweenUpperBound(const json& args,
     bytes.insert(bytes.end(), upperBytes.begin(), upperBytes.end());
 }
 
-std::vector<unsigned char> placeholderScanValue(const std::string& valueType) {
-    return std::vector<unsigned char>(static_cast<size_t>(dataTypeToSize(valueType)), 0);
+std::vector<unsigned char> placeholderScanValue(const std::string& valueType, uint32_t flags) {
+    return std::vector<unsigned char>(scanSingleValueSize(valueType, flags), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +827,8 @@ std::string execGetArchitecture(const std::string& /*argsJson*/) {
 std::string execInitDriver(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        std::string card = firstStringArg(args, {"card_name", "card"}, "card_name");
+        std::string card = requiredStringArg(
+            args, {"card_name", "card"}, "card_name", kMaxToolStringParamBytes);
         std::string message;
         if (!InitDriver(card, message, PORT_MAIN)) {
             return makeError("socket communication error: init_driver");
@@ -624,10 +846,7 @@ std::string execMemoryRead(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        const int sizeRaw = args.at("size").get<int>();
-        if (sizeRaw <= 0 || sizeRaw > 4096) {
-            return makeError("size must be between 1 and 4096");
-        }
+        const int sizeRaw = requiredIntArg(args, "size", 1, 4096);
         const uint32_t size = static_cast<uint32_t>(sizeRaw);
 
         std::vector<unsigned char> bytes;
@@ -650,13 +869,7 @@ std::string execReadMemory(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        int sizeRaw = args.value("size", 256);
-        if (sizeRaw <= 0) {
-            return makeError("size must be positive");
-        }
-        if (sizeRaw > 65536) {
-            sizeRaw = 65536;
-        }
+        const int sizeRaw = optionalPositiveClampedIntArg(args, "size", 256, 65536);
 
         std::vector<unsigned char> bytes;
         if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(sizeRaw), bytes, PORT_MAIN)) {
@@ -679,7 +892,7 @@ std::string execReadValue(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        const std::string dataType = args.value("data_type", std::string("dword"));
+        const std::string dataType = optionalStringArg(args, "data_type", "dword", 64, false);
         const int size = dataTypeToSize(dataType);
 
         std::vector<unsigned char> bytes;
@@ -722,7 +935,8 @@ std::string execMemoryWrite(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        std::string hexBytes = firstStringArg(args, {"data_hex", "hex", "hex_string"}, "data_hex");
+        std::string hexBytes = requiredStringArg(
+            args, {"data_hex", "hex", "hex_string"}, "data_hex", kMaxToolHexStringBytes);
         std::vector<unsigned char> bytes = parseHexBytes(hexBytes);
         if (bytes.empty()) {
             return makeError("data_hex must contain at least one byte");
@@ -785,14 +999,13 @@ std::string execScanValue(const std::string& argsJson) {
 
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
         if ((flags & _BETWEEN_VAL) != 0) {
-            appendBetweenUpperBound(args, valueType, bytes);
+            appendBetweenUpperBound(args, valueType, flags, bytes);
         }
+        validateScanBytesForFlags(valueType, flags, bytes);
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
         parseScanRange(args, start, end);
-        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
-                                   ? args["memory_type_raw"].get<int>()
-                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
+        const int memoryType = memoryTypeFromArgs(args);
 
         if (!ScanSetRange(memoryType, PORT_MAIN)) {
             return makeError("socket communication error: scan_set_range");
@@ -829,13 +1042,14 @@ std::string execScanNext(const std::string& argsJson) {
         if (hasValue) {
             bytes = scanBytesFromArgs(args, valueType, "value");
             if ((flags & _BETWEEN_VAL) != 0) {
-                appendBetweenUpperBound(args, valueType, bytes);
+                appendBetweenUpperBound(args, valueType, flags, bytes);
             }
         } else if (scanNextFlagRequiresValue(flags)) {
             return makeError("scan_next requires value/value_hex/hex for this scan_type");
         } else {
-            bytes = placeholderScanValue(valueType);
+            bytes = placeholderScanValue(valueType, flags);
         }
+        validateScanBytesForFlags(valueType, flags, bytes);
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
         parseScanRange(args, start, end);
@@ -863,9 +1077,7 @@ std::string execScanFuzzy(const std::string& argsJson) {
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
         parseScanRange(args, start, end);
-        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
-                                   ? args["memory_type_raw"].get<int>()
-                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
+        const int memoryType = memoryTypeFromArgs(args);
 
         if (!ScanSetRange(memoryType, PORT_MAIN)) {
             return makeError("socket communication error: scan_set_range");
@@ -888,18 +1100,19 @@ std::string execScanFuzzy(const std::string& argsJson) {
 std::string execScanHex(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string pattern =
-            firstStringArg(args, {"hex_pattern", "pattern_hex", "value"}, "hex_pattern");
+        const std::string pattern = requiredStringArg(
+            args, {"hex_pattern", "pattern_hex", "value"}, "hex_pattern", kMaxToolHexStringBytes);
         std::vector<unsigned char> bytes = parseHexBytes(pattern);
         if (bytes.empty()) {
             return makeError("hex_pattern must contain at least one byte");
         }
+        if (bytes.size() > kMaxToolScanHexBytes) {
+            return makeError("hex_pattern exceeds maximum byte length");
+        }
         uint64_t start = 0;
         uint64_t end = UINT64_MAX;
         parseScanRange(args, start, end);
-        const int memoryType = args.contains("memory_type_raw") && args["memory_type_raw"].is_number_integer()
-                                   ? args["memory_type_raw"].get<int>()
-                                   : memoryTypeToFlag(args.value("memory_type", std::string("all")));
+        const int memoryType = memoryTypeFromArgs(args);
 
         if (!ScanSetRange(memoryType, PORT_MAIN)) {
             return makeError("socket communication error: scan_set_range");
@@ -921,12 +1134,7 @@ std::string execScanHex(const std::string& argsJson) {
 std::string execScanSetRange(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        int type = All;
-        if (args.contains("type") && args["type"].is_number_integer()) {
-            type = args["type"].get<int>();
-        } else {
-            type = memoryTypeToFlag(args.value("memory_type", std::string("all")));
-        }
+        const int type = memoryTypeFromArgs(args);
         if (!ScanSetRange(type, PORT_MAIN)) {
             return makeError("socket communication error: scan_set_range");
         }
@@ -958,16 +1166,9 @@ std::string execGetScanCount(const std::string& /*argsJson*/) {
 std::string execGetScanResults(const std::string& argsJson) {
     try {
         const json args = argsJson.empty() ? json::object() : json::parse(argsJson);
-        int offset = 0;
-        int count = 100;
-        if (args.contains("offset") && args["offset"].is_number_integer()) {
-            offset = args["offset"].get<int>();
-            if (offset < 0) return makeError("offset must be >= 0");
-        }
-        if (args.contains("count") && args["count"].is_number_integer()) {
-            count = args["count"].get<int>();
-            if (count < 1 || count > 1000) return makeError("count must be between 1 and 1000");
-        }
+        const int offset = optionalIntArg(
+            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
+        const int count = optionalIntArg(args, "count", 100, 1, 1000);
 
         std::vector<std::pair<uint64_t, uint64_t>> raw;
         if (!GetScanResult(offset, count, raw, PORT_MAIN)) {
@@ -1020,7 +1221,8 @@ std::string execGetModuleList(const std::string& argsJson) {
             return makeError("socket communication error: get_module_list");
         }
 
-        const std::string filter = lowerCopy(args.value("filter", std::string{}));
+        const std::string filter = lowerCopy(
+            optionalStringArg(args, "filter", "", kMaxToolStringParamBytes));
         std::vector<ModuleInfoItem> filtered;
         filtered.reserve(modules.size());
         for (const auto& m : modules) {
@@ -1031,11 +1233,9 @@ std::string execGetModuleList(const std::string& argsJson) {
             filtered.push_back(m);
         }
 
-        int offset = args.value("offset", 0);
-        int count = args.value("count", 1000);
-        if (offset < 0) offset = 0;
-        if (count < 1) count = 1;
-        if (count > 1000) count = 1000;
+        int offset = optionalIntArg(
+            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
+        const int count = optionalIntArg(args, "count", 1000, 1, 1000);
         const int total = static_cast<int>(filtered.size());
         if (offset > total) offset = total;
         const int end = (std::min)(offset + count, total);
@@ -1110,13 +1310,10 @@ std::string execListProcesses(const std::string& argsJson) {
 std::string execOpenProcess(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const int pid = args.at("pid").get<int>();
-        if (pid <= 0) {
-            return makeError("pid must be a positive integer");
-        }
-        const std::string name = args.contains("name") && args["name"].is_string()
-                                 ? args["name"].get<std::string>()
-                                 : std::string{};
+        const int pid = requiredIntArg(
+            args, "pid", 1, (std::numeric_limits<int>::max)());
+        const std::string name =
+            optionalStringArg(args, "name", "", kMaxToolStringParamBytes);
 
         // Resolve name if the caller didn't supply one so the process-bar
         // label shows something meaningful after attach. Best-effort only
@@ -1157,8 +1354,8 @@ std::string execOpenProcess(const std::string& argsJson) {
 std::string execGetModuleBase(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string moduleName =
-            firstStringArg(args, {"module_name", "name"}, "module_name");
+        const std::string moduleName = requiredStringArg(
+            args, {"module_name", "name"}, "module_name", kMaxToolStringParamBytes);
         uint64_t base = 0;
         if (!GetModuleBaseByName(moduleName, base, PORT_MAIN)) {
             return makeError("socket communication error: get_module_base");
@@ -1176,16 +1373,22 @@ std::string execGetModuleBase(const std::string& argsJson) {
 std::string execResolveOffsetChain(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string moduleName =
-            firstStringArg(args, {"module", "module_name"}, "module");
+        const std::string moduleName = requiredStringArg(
+            args, {"module", "module_name"}, "module", kMaxToolStringParamBytes);
         const uint64_t baseOffset = parseAddressJson(args.at("base_offset"));
         std::vector<uint64_t> offsets;
-        if (args.contains("offsets") && args["offsets"].is_array()) {
+        if (args.contains("offsets") && !args["offsets"].is_null()) {
+            if (!args["offsets"].is_array()) {
+                throw std::runtime_error("offsets must be an array");
+            }
+            if (args["offsets"].size() > kMaxToolOffsetChainLength) {
+                throw std::runtime_error("offsets chain is too long");
+            }
             for (const auto& off : args["offsets"]) {
                 offsets.push_back(parseAddressJson(off));
             }
         }
-        const bool derefFinal = args.value("deref_final", true);
+        const bool derefFinal = optionalBoolArg(args, "deref_final", true);
 
         uint64_t address = 0;
         if (!ResolveModuleOffsetChain(address,
@@ -1216,10 +1419,7 @@ std::string execReadDisassembly(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        const int countRaw = args.at("count").get<int>();
-        if (countRaw < 1 || countRaw > 512) {
-            return makeError("count must be between 1 and 512");
-        }
+        const int countRaw = requiredIntArg(args, "count", 1, 512);
 
         // ARM64 instructions are fixed 4 bytes wide; read count * 4 bytes.
         const uint32_t size = static_cast<uint32_t>(countRaw) * 4u;
@@ -1269,13 +1469,10 @@ std::string execSetBreakpoint(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
-        const int bpType = args.value("bp_type", 2);
-        const int bpSize = args.value("bp_size", 4);
-        if (bpType < 1 || bpType > 4) {
-            return makeError("bp_type must be 1 (read), 2 (write), 3 (readwrite), or 4 (execute)");
-        }
-        if (bpSize < 1 || bpSize > 8) {
-            return makeError("bp_size must be between 1 and 8");
+        const int bpType = optionalIntArg(args, "bp_type", 2, 1, 4);
+        const int bpSize = optionalIntArg(args, "bp_size", 4, 1, 8);
+        if (!isValidBreakpointSize(bpSize)) {
+            return makeError("bp_size must be 1, 2, 4, or 8");
         }
         const int effectiveSize = (bpType == 4) ? 4 : bpSize;
 
@@ -1389,12 +1586,10 @@ std::string execReadBreakpointInfo(const std::string& argsJson) {
 std::string execResolveSymbol(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string moduleName =
-            firstStringArg(args, {"module_name", "module"}, "module_name");
-        const std::string symbolName =
-            firstStringArg(args, {"symbol_name", "name"}, "symbol_name");
-        if (moduleName.empty()) return makeError("module_name is empty");
-        if (symbolName.empty()) return makeError("symbol_name is empty");
+        const std::string moduleName = requiredStringArg(
+            args, {"module_name", "module"}, "module_name", kMaxToolStringParamBytes);
+        const std::string symbolName = requiredStringArg(
+            args, {"symbol_name", "name"}, "symbol_name", kMaxToolStringParamBytes);
 
         uint64_t base = 0;
         if (!GetModuleBaseByName(moduleName, base, PORT_MAIN)) {
@@ -1441,7 +1636,8 @@ std::string execSymbolList(const std::string& argsJson) {
     try {
         const json args = argsJson.empty() ? json::object() : json::parse(argsJson);
         if (args.contains("module_base") && !args["module_base"].is_null() &&
-            !(args["module_base"].is_string() && args["module_base"].get<std::string>().empty())) {
+            !(args["module_base"].is_string() &&
+              isBlankString(args["module_base"].get<std::string>()))) {
             int totalCount = 0;
             const uint64_t moduleBase = parseAddressJson(args["module_base"]);
             if (!SymbolInit(moduleBase, totalCount, PORT_MAIN)) {
@@ -1449,11 +1645,9 @@ std::string execSymbolList(const std::string& argsJson) {
             }
         }
 
-        int offset = args.value("offset", 0);
-        int count = args.value("count", 100);
-        if (offset < 0) offset = 0;
-        if (count < 1) count = 1;
-        if (count > 1000) count = 1000;
+        const int offset = optionalIntArg(
+            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
+        const int count = optionalIntArg(args, "count", 100, 1, 1000);
 
         int totalCount = 0;
         std::vector<std::pair<uint64_t, std::string>> symbols;
@@ -1479,7 +1673,8 @@ std::string execSymbolFind(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t moduleBase = parseAddressJson(args.at("module_base"));
-        const std::string name = firstStringArg(args, {"symbol_name", "name"}, "symbol_name");
+        const std::string name = requiredStringArg(
+            args, {"symbol_name", "name"}, "symbol_name", kMaxToolStringParamBytes);
         uint64_t address = 0;
         if (!SymbolFind(moduleBase, name, address, PORT_MAIN) || address == 0) {
             return makeError("socket communication error: symbol_find");
@@ -1499,7 +1694,12 @@ std::string execExecuteLua(const std::string& argsJson) {
 #ifdef HAVE_LUAJIT
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string code = args.at("code").get<std::string>();
+        const std::string code = requiredStringArg(
+            args, {"code"}, "code", kMaxToolLuaCodeBytes);
+        const int timeoutSeconds = optionalIntArg(
+            args, "timeout_seconds", kDefaultToolLuaTimeoutSeconds,
+            1, kMaxToolLuaTimeoutSeconds);
+        SocketIoTimeout::ScopedTimeout luaTimeout(timeoutSeconds);
         auto& engine = LuaEngine::GetInstance();
         if (!engine.IsInitialized() && !engine.Initialize()) {
             return makeError("Lua engine initialization failed: " + engine.GetLastError());
@@ -1643,19 +1843,29 @@ constexpr const char* kSchemaScanValue = R"JSON({
     },
     "value_hex": {
       "type": "string",
-      "description": "Little-endian encoded value bytes. Alternative to value"
+      "description": "Little-endian encoded value bytes. Alternative to value",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "value2_hex": {
+      "type": "string",
+      "description": "Upper bound for scan_type=between as little-endian encoded bytes",
+      "minLength": 2,
+      "maxLength": 16384
     },
     "hex": {
       "type": "string",
-      "description": "Alias for value_hex. Alternative to value"
+      "description": "Alias for value_hex. Alternative to value",
+      "minLength": 2,
+      "maxLength": 16384
     },
     "value_type": {
       "type": "string",
-      "description": "One of: byte, word, dword, qword, int32, int64, float, double, bytes, string"
+      "description": "One of: byte, word, dword, qword, xor, int32, int64, float, double, bytes, string"
     },
     "data_type": {
       "type": "string",
-      "description": "MCP-style alias for value_type: byte, word, dword, qword, float, double"
+      "description": "MCP-style alias for value_type: byte, word, dword, qword, xor, float, double"
     },
     "scan_type": {
       "type": "string",
@@ -1676,6 +1886,18 @@ constexpr const char* kSchemaScanValue = R"JSON({
     },
     "end": {
       "description": "Optional end address as hex string or integer"
+    },
+    "memory_type": {
+      "type": "string",
+      "description": "all, anonymous, c_alloc, c_heap, c_data, c_bss, java_heap, java, stack, code_app, code_system, video, ashmem, bad, other"
+    },
+    "memory_type_raw": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer"
+    },
+    "type": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer alias"
     }
   }
 })JSON";
@@ -1697,19 +1919,29 @@ constexpr const char* kSchemaScanNext = R"JSON({
     },
     "value_hex": {
       "type": "string",
-      "description": "Little-endian encoded value bytes. Alternative to value"
+      "description": "Little-endian encoded value bytes. Alternative to value",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "value2_hex": {
+      "type": "string",
+      "description": "Upper bound for scan_type=between as little-endian encoded bytes",
+      "minLength": 2,
+      "maxLength": 16384
     },
     "hex": {
       "type": "string",
-      "description": "Alias for value_hex. Alternative to value"
+      "description": "Alias for value_hex. Alternative to value",
+      "minLength": 2,
+      "maxLength": 16384
     },
     "value_type": {
       "type": "string",
-      "description": "One of: byte, word, dword, qword, int32, int64, float, double, bytes, string"
+      "description": "One of: byte, word, dword, qword, xor, int32, int64, float, double, bytes, string"
     },
     "data_type": {
       "type": "string",
-      "description": "MCP-style alias for value_type: byte, word, dword, qword, float, double"
+      "description": "MCP-style alias for value_type: byte, word, dword, qword, xor, float, double"
     },
     "scan_type": {
       "type": "string",
@@ -1739,11 +1971,11 @@ constexpr const char* kSchemaScanFuzzy = R"JSON({
   "properties": {
     "value_type": {
       "type": "string",
-      "description": "One of: int32, int64, float, double, bytes, string"
+      "description": "One of: byte, word, dword, qword, xor, float, double"
     },
     "data_type": {
       "type": "string",
-      "description": "MCP-style alias for value_type: byte, word, dword, qword, float, double"
+      "description": "MCP-style alias for value_type: byte, word, dword, qword, xor, float, double"
     },
     "scan_type": {
       "type": "string",
@@ -1764,6 +1996,18 @@ constexpr const char* kSchemaScanFuzzy = R"JSON({
     },
     "end": {
       "description": "Optional end address as hex string or integer"
+    },
+    "memory_type": {
+      "type": "string",
+      "description": "all, anonymous, c_alloc, c_heap, c_data, c_bss, java_heap, java, stack, code_app, code_system, video, ashmem, bad, other"
+    },
+    "memory_type_raw": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer"
+    },
+    "type": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer alias"
     }
   }
 })JSON";
@@ -1800,12 +2044,14 @@ constexpr const char* kSchemaStatusInitDriver = R"JSON({
     "card_name": {
       "type": "string",
       "description": "Driver authorization card/key string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "card": {
       "type": "string",
       "description": "IPC/MCP alias for card_name",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     }
   }
 })JSON";
@@ -1835,7 +2081,7 @@ constexpr const char* kSchemaReadValue = R"JSON({
     },
     "data_type": {
       "type": "string",
-      "description": "byte, word, dword, qword, float, or double"
+      "description": "byte, word, dword, qword, xor, float, or double"
     }
   }
 })JSON";
@@ -1852,7 +2098,7 @@ constexpr const char* kSchemaWriteValue = R"JSON({
     },
     "data_type": {
       "type": "string",
-      "description": "byte, word, dword, qword, float, or double"
+      "description": "byte, word, dword, qword, xor, float, or double"
     }
   }
 })JSON";
@@ -1867,6 +2113,10 @@ constexpr const char* kSchemaScanSetRange = R"JSON({
     "type": {
       "type": "integer",
       "description": "Raw AMem MemoryType integer"
+    },
+    "memory_type_raw": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer alias"
     }
   }
 })JSON";
@@ -1882,23 +2132,38 @@ constexpr const char* kSchemaScanHex = R"JSON({
     "hex_pattern": {
       "type": "string",
       "description": "Hex byte pattern, e.g. '48 65 6C 6C 6F'",
-      "minLength": 2
+      "minLength": 2,
+      "maxLength": 16384
     },
     "pattern_hex": {
       "type": "string",
       "description": "IPC/MCP alias for hex_pattern",
-      "minLength": 2
+      "minLength": 2,
+      "maxLength": 16384
     },
     "value": {
       "type": "string",
       "description": "Legacy alias for hex_pattern",
-      "minLength": 2
+      "minLength": 2,
+      "maxLength": 16384
     },
     "start": {
       "description": "Optional start address as hex string or integer"
     },
     "end": {
       "description": "Optional end address as hex string or integer"
+    },
+    "memory_type": {
+      "type": "string",
+      "description": "all, anonymous, c_alloc, c_heap, c_data, c_bss, java_heap, java, stack, code_app, code_system, video, ashmem, bad, other"
+    },
+    "memory_type_raw": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer"
+    },
+    "type": {
+      "type": "integer",
+      "description": "Raw AMem MemoryType integer alias"
     }
   }
 })JSON";
@@ -1908,7 +2173,8 @@ constexpr const char* kSchemaListModules = R"JSON({
   "properties": {
     "filter": {
       "type": "string",
-      "description": "Optional case-insensitive module-name substring"
+      "description": "Optional case-insensitive module-name substring",
+      "maxLength": 4096
     },
     "offset": {
       "type": "integer",
@@ -1932,12 +2198,14 @@ constexpr const char* kSchemaGetModuleBase = R"JSON({
     "module_name": {
       "type": "string",
       "description": "Module name or unique substring",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "name": {
       "type": "string",
       "description": "IPC/MCP alias for module_name",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     }
   }
 })JSON";
@@ -1953,19 +2221,22 @@ constexpr const char* kSchemaResolveOffsetChain = R"JSON({
     "module": {
       "type": "string",
       "description": "Module name or unique substring",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "module_name": {
       "type": "string",
       "description": "Alias for module",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "base_offset": {
       "description": "Base offset from module base as hex string or integer"
     },
     "offsets": {
       "type": "array",
-      "description": "Pointer-chain offsets as integers or hex strings"
+      "description": "Pointer-chain offsets as integers or hex strings",
+      "maxItems": 1024
     },
     "deref_final": {
       "type": "boolean",
@@ -2005,7 +2276,7 @@ constexpr const char* kSchemaSetBreakpoint = R"JSON({
     },
     "bp_size": {
       "type": "integer",
-      "description": "Breakpoint width in bytes (1-8)",
+      "description": "Breakpoint width in bytes: 1, 2, 4, or 8. Execute breakpoints use 4",
       "minimum": 1,
       "maximum": 8
     }
@@ -2044,22 +2315,26 @@ constexpr const char* kSchemaResolveSymbol = R"JSON({
     "module_name": {
       "type": "string",
       "description": "Module name, e.g. 'libfoo.so'",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "module": {
       "type": "string",
       "description": "Alias for module_name",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "symbol_name": {
       "type": "string",
       "description": "Symbol (function / global) to resolve inside the module",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "name": {
       "type": "string",
       "description": "Alias for symbol_name",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     }
   }
 })JSON";
@@ -2105,12 +2380,14 @@ constexpr const char* kSchemaSymbolFind = R"JSON({
     },
     "symbol_name": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     },
     "name": {
       "type": "string",
       "description": "IPC/MCP alias for symbol_name",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4096
     }
   }
 })JSON";
@@ -2122,7 +2399,14 @@ constexpr const char* kSchemaExecuteLua = R"JSON({
     "code": {
       "type": "string",
       "description": "Lua code to execute inside AMem",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 262144
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "description": "Execution timeout in seconds (default 30, max 300)",
+      "minimum": 1,
+      "maximum": 300
     }
   }
 })JSON";
@@ -2138,7 +2422,8 @@ constexpr const char* kSchemaOpenProcess = R"JSON({
     },
     "name": {
       "type": "string",
-      "description": "Optional process name; resolved automatically from the process list when omitted"
+      "description": "Optional process name; resolved automatically from the process list when omitted",
+      "maxLength": 4096
     }
   }
 })JSON";
