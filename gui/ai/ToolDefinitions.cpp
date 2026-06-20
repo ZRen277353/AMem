@@ -490,6 +490,20 @@ int scanTypeToFlag(const std::string& scanType) {
     throw std::runtime_error("unsupported scan_type '" + scanType + "'");
 }
 
+constexpr uint32_t kValueScanFlags =
+    _ACCURATE_VAL | _UNKNOW_VAL | _LARGER_THAN_VAL |
+    _LESS_THAN_VAL | _BETWEEN_VAL;
+constexpr uint32_t kNextScanFlags =
+    _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
+    _ADD_UNKNOW_VAL | _ADD_ACCURATE_VAL |
+    _SUB_UNKNOW_VAL | _SUB_ACCURATE_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kFuzzyScanFlags =
+    _UNKNOW_VAL | _ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kDataTypeFlags =
+    BYTE_ | WORD_ | DWORD_ | XOR_ | FLOAT_ | QWORD_ | DOUBLE_;
+
 int fuzzyScanTypeToFlag(const std::string& scanType) {
     const std::string t = lowerCopy(scanType.empty() ? std::string("unknown") : scanType);
     if (t == "unknown") return _UNKNOW_VAL;
@@ -502,32 +516,52 @@ int fuzzyScanTypeToFlag(const std::string& scanType) {
         "' (supported: unknown, increased, decreased, changed, unchanged)");
 }
 
+bool isUntypedScanValue(const std::string& valueType) {
+    const std::string t = lowerCopy(valueType);
+    return t == "bytes" || t == "string";
+}
+
+void validateScanFlags(uint32_t flags,
+                       uint32_t allowedScanFlags,
+                       const std::string& valueType,
+                       const char* toolName,
+                       bool allowMissingScanMode) {
+    if ((flags & ~(allowedScanFlags | kDataTypeFlags)) != 0) {
+        throw std::runtime_error(std::string(toolName) + " flags contain unsupported bits");
+    }
+
+    const uint32_t scanModeBits = flags & allowedScanFlags;
+    if (scanModeBits == 0 && !allowMissingScanMode) {
+        throw std::runtime_error(std::string(toolName) + " flags must contain a scan type");
+    }
+    if (scanModeBits != 0 && (scanModeBits & (scanModeBits - 1)) != 0) {
+        throw std::runtime_error(std::string(toolName) + " flags contain multiple scan types");
+    }
+
+    const uint32_t dataTypeBits = flags & kDataTypeFlags;
+    if (isUntypedScanValue(valueType)) {
+        if ((dataTypeBits & (dataTypeBits - 1)) != 0) {
+            throw std::runtime_error(std::string(toolName) +
+                                     " flags contain multiple data types");
+        }
+        return;
+    }
+
+    if (dataTypeBits == 0 || (dataTypeBits & (dataTypeBits - 1)) != 0) {
+        throw std::runtime_error(std::string(toolName) +
+                                 " flags must contain exactly one data type");
+    }
+}
+
 void validateFuzzyScanFlags(uint32_t flags) {
     constexpr uint32_t kValueBearingScanFlags =
         _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
         _ADD_ACCURATE_VAL | _SUB_ACCURATE_VAL | _GROUP_VALUE;
-    constexpr uint32_t kAllowedFuzzyScanFlags =
-        _UNKNOW_VAL | _ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
-        _CHANGED_VAL | _UNCHANGED_VAL;
-    constexpr uint32_t kAllowedDataTypeFlags =
-        BYTE_ | WORD_ | DWORD_ | XOR_ | FLOAT_ | QWORD_ | DOUBLE_;
     if ((flags & kValueBearingScanFlags) != 0) {
         throw std::runtime_error(
             "scan_fuzzy cannot use scan types that require a comparison value");
     }
-    if ((flags & ~(kAllowedFuzzyScanFlags | kAllowedDataTypeFlags)) != 0) {
-        throw std::runtime_error("scan_fuzzy flags contain unsupported bits");
-    }
-
-    const uint32_t scanModeBits = flags & kAllowedFuzzyScanFlags;
-    if (scanModeBits != 0 && (scanModeBits & (scanModeBits - 1)) != 0) {
-        throw std::runtime_error("scan_fuzzy flags contain multiple scan types");
-    }
-
-    const uint32_t dataTypeBits = flags & kAllowedDataTypeFlags;
-    if (dataTypeBits == 0 || (dataTypeBits & (dataTypeBits - 1)) != 0) {
-        throw std::runtime_error("scan_fuzzy flags must contain exactly one data type");
-    }
+    validateScanFlags(flags, kFuzzyScanFlags, "dword", "scan_fuzzy", true);
 }
 
 int memoryTypeToFlag(const std::string& memoryType) {
@@ -1039,6 +1073,7 @@ std::string execScanValue(const std::string& argsJson) {
         std::vector<unsigned char> bytes = scanBytesFromArgs(args, valueType, "value");
 
         const uint32_t flags = scanFlagsFromArgs(args, valueType);
+        validateScanFlags(flags, kValueScanFlags, valueType, "scan_value", false);
         if ((flags & _BETWEEN_VAL) != 0) {
             appendBetweenUpperBound(args, valueType, flags, bytes);
         }
@@ -1074,6 +1109,7 @@ std::string execScanNext(const std::string& argsJson) {
         const uint32_t flags = readRawFlagArg(args, "scan_flag", rawFlag)
                                    ? rawFlag
                                    : scanFlagsFromArgs(args, valueType);
+        validateScanFlags(flags, kNextScanFlags, valueType, "scan_next", false);
         if (flags > static_cast<uint32_t>(INT32_MAX)) {
             return makeError("scan_flag out of range");
         }
