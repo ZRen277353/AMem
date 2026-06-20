@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,14 @@ json parseJsonOr(const std::string& text, const json& fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+json toolResultBlock(const ChatMessage& msg) {
+    json block = json::object();
+    block["type"]        = "tool_result";
+    block["tool_use_id"] = msg.toolCallId;
+    block["content"]     = msg.content;
+    return block;
 }
 
 // Map HTTP + network errors to a ProviderError. Mirrors the requirements in
@@ -321,20 +330,24 @@ std::string ClaudeProvider::buildRequestBody(const CompletionRequest& request) {
 
     // 2. Build the Messages array from user/assistant/tool messages.
     json messages = json::array();
-    for (const auto& msg : request.messages) {
+    for (std::size_t i = 0; i < request.messages.size(); ++i) {
+        const auto& msg = request.messages[i];
         if (msg.role == Role::System) continue;
 
         json m = json::object();
         m["role"] = roleToAnthropic(msg.role);
 
         if (msg.role == Role::Tool) {
-            // Tool result → user message with a single tool_result content
-            // block keyed by tool_use_id.
-            json block = json::object();
-            block["type"]        = "tool_result";
-            block["tool_use_id"] = msg.toolCallId;
-            block["content"]     = msg.content;
-            m["content"] = json::array({ block });
+            // Merge adjacent stored tool results into one Anthropic user
+            // message so a multi-tool turn stays protocol-valid.
+            json blocks = json::array();
+            blocks.push_back(toolResultBlock(msg));
+            while (i + 1 < request.messages.size() &&
+                   request.messages[i + 1].role == Role::Tool) {
+                ++i;
+                blocks.push_back(toolResultBlock(request.messages[i]));
+            }
+            m["content"] = std::move(blocks);
             messages.push_back(std::move(m));
             continue;
         }
