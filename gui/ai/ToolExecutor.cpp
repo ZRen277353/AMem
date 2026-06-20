@@ -258,8 +258,8 @@ std::string extractToolError(const std::string& resultJson) {
             return "";
         }
         return jsonValueToErrorString(result["error"]);
-    } catch (const std::exception&) {
-        return "";
+    } catch (const std::exception& e) {
+        return std::string("tool returned invalid JSON: ") + e.what();
     }
 }
 
