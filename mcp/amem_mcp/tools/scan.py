@@ -17,7 +17,7 @@ from ..ipc_client import IpcClient
 
 
 NO_VALUE_SCAN_TYPES = {"increased", "decreased", "changed", "unchanged"}
-FIRST_SCAN_TYPES = {"exact", "unknown", "greater", "less", "between"}
+FIRST_SCAN_TYPES = {"exact", "greater", "less", "between"}
 NEXT_SCAN_TYPES = {
     "exact", "greater", "less", "between",
     "increased", "increased_by", "decreased", "decreased_by",
@@ -50,7 +50,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             value: 要搜索的值
             data_type: byte/word/dword/qword/float/double
-            scan_type: exact/unknown/greater/less/between
+            scan_type: exact/greater/less/between
         """
         scan_type = normalize_scan_type(scan_type, FIRST_SCAN_TYPES)
         flags = make_scan_flags(scan_type, data_type)

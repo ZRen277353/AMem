@@ -491,7 +491,7 @@ int scanTypeToFlag(const std::string& scanType) {
 }
 
 constexpr uint32_t kValueScanFlags =
-    _ACCURATE_VAL | _UNKNOW_VAL | _LARGER_THAN_VAL |
+    _ACCURATE_VAL | _LARGER_THAN_VAL |
     _LESS_THAN_VAL | _BETWEEN_VAL;
 constexpr uint32_t kNextScanFlags =
     _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
@@ -1945,7 +1945,7 @@ constexpr const char* kSchemaScanValue = R"JSON({
     },
     "scan_type": {
       "type": "string",
-      "description": "MCP-style scan type: exact, unknown, greater, less, between, increased, decreased, changed, unchanged"
+      "description": "MCP-style scan type: exact, greater, less, between"
     },
     "flags": {
       "type": "integer",

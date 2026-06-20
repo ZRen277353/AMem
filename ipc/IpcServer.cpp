@@ -725,7 +725,7 @@ static bool ScanNextFlagRequiresValue(uint32_t flag) {
 }
 
 constexpr uint32_t kIpcValueScanFlags =
-    _ACCURATE_VAL | _UNKNOW_VAL | _LARGER_THAN_VAL |
+    _ACCURATE_VAL | _LARGER_THAN_VAL |
     _LESS_THAN_VAL | _BETWEEN_VAL;
 constexpr uint32_t kIpcNextScanFlags =
     _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
