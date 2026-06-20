@@ -15,7 +15,24 @@ _SLOW_METHODS = frozenset({
     "list_processes", "list_modules", "execute_lua",
 })
 
+_RETRYABLE_METHODS = frozenset({
+    "get_status", "get_version", "get_architecture",
+    "list_processes", "list_modules", "get_module_base",
+    "read_memory", "resolve_offset_chain",
+    "get_scan_count", "get_scan_results",
+    "read_bp_info",
+    "symbol_list", "symbol_find",
+})
+
+_DEFAULT_RETRIES = 2
+
 _MAX_ERROR_PREVIEW_CHARS = 4096
+
+
+def _effective_retries(method: str, retries: Optional[int]) -> int:
+    if retries is None:
+        return _DEFAULT_RETRIES if method in _RETRYABLE_METHODS else 0
+    return max(0, retries)
 
 
 def _preview_json(value: Any) -> str:
@@ -84,12 +101,13 @@ class IpcClient:
         method: str,
         params: Optional[dict] = None,
         *,
-        retries: int = 2,
+        retries: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> dict:
         """调用 IPC 方法，返回响应 dict（保证含 success 字段）。"""
         if timeout is None:
             timeout = 60.0 if method in _SLOW_METHODS else 30.0
+        retries = _effective_retries(method, retries)
 
         payload = json.dumps({
             "method": method,
