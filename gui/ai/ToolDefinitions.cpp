@@ -649,6 +649,26 @@ bool readRawFlagArg(const json& source, const char* key, uint32_t& out) {
     throw std::runtime_error(std::string(key) + " must be an integer");
 }
 
+bool readRawScanFlagsArg(const json& source, uint32_t& out) {
+    uint32_t flagsValue = 0;
+    uint32_t scanFlagValue = 0;
+    const bool hasFlags = readRawFlagArg(source, "flags", flagsValue);
+    const bool hasScanFlag = readRawFlagArg(source, "scan_flag", scanFlagValue);
+    if (hasFlags && hasScanFlag && flagsValue != scanFlagValue) {
+        throw std::runtime_error(
+            "flags and scan_flag must match when both are provided");
+    }
+    if (hasFlags) {
+        out = flagsValue;
+        return true;
+    }
+    if (hasScanFlag) {
+        out = scanFlagValue;
+        return true;
+    }
+    return false;
+}
+
 bool scanNextFlagRequiresValue(uint32_t flag) {
     return (flag & (_ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
                     _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
@@ -672,8 +692,7 @@ size_t scanSingleValueSize(const std::string& valueType, uint32_t flags) {
 
 uint32_t scanFlagsFromArgs(const json& args, const std::string& valueType) {
     uint32_t rawFlag = 0;
-    if (readRawFlagArg(args, "flags", rawFlag) ||
-        readRawFlagArg(args, "scan_flag", rawFlag)) {
+    if (readRawScanFlagsArg(args, rawFlag)) {
         return rawFlag;
     }
     const std::string scanType = optionalStringArg(args, "scan_type", "exact", 64, false);
@@ -690,8 +709,7 @@ void parseScanRange(const json& args, uint64_t& start, uint64_t& end) {
 
 uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) {
     uint32_t rawFlag = 0;
-    if (readRawFlagArg(args, "flags", rawFlag) ||
-        readRawFlagArg(args, "scan_flag", rawFlag)) {
+    if (readRawScanFlagsArg(args, rawFlag)) {
         validateFuzzyScanFlags(rawFlag);
         return rawFlag;
     }
@@ -1106,7 +1124,7 @@ std::string execScanNext(const std::string& argsJson) {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string valueType = valueTypeFromArgs(args);
         uint32_t rawFlag = 0;
-        const uint32_t flags = readRawFlagArg(args, "scan_flag", rawFlag)
+        const uint32_t flags = readRawScanFlagsArg(args, rawFlag)
                                    ? rawFlag
                                    : scanFlagsFromArgs(args, valueType);
         validateScanFlags(flags, kNextScanFlags, valueType, "scan_next", false);

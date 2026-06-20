@@ -352,6 +352,18 @@ uint32_t getRequiredUint32Param(const json& params, const char* key) {
     return static_cast<uint32_t>(value);
 }
 
+uint32_t getRequiredScanFlagsParam(const json& params) {
+    uint32_t flags = getRequiredUint32Param(params, "flags");
+    if (params.contains("scan_flag")) {
+        uint32_t scanFlag = getRequiredUint32Param(params, "scan_flag");
+        if (scanFlag != flags) {
+            throw std::invalid_argument(
+                "flags and scan_flag must match when both are provided");
+        }
+    }
+    return flags;
+}
+
 bool getOptionalBoolParam(const json& params, const char* key, bool defaultValue) {
     if (!params.contains(key)) {
         return defaultValue;
@@ -1033,7 +1045,7 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_value ───────────────────────────────────────────────
     RegisterMethod("scan_value", [](const json& p) -> json {
-        uint32_t flags = getRequiredUint32Param(p, "flags");
+        uint32_t flags = getRequiredScanFlagsParam(p);
         ValidateScanFlags(flags, kIpcValueScanFlags, "scan_value", false);
         auto valBytes = ScanBytesFromIpcValue(p, flags, true);
         uint64_t start = 0, end = UINT64_MAX;
@@ -1047,10 +1059,7 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_next ────────────────────────────────────────────────
     RegisterMethod("scan_next", [](const json& p) -> json {
-        uint32_t flags = getRequiredUint32Param(p, "flags");
-        uint32_t flagValue = p.contains("scan_flag")
-                                 ? getRequiredUint32Param(p, "scan_flag")
-                                 : flags;
+        uint32_t flagValue = getRequiredScanFlagsParam(p);
         ValidateScanFlags(flagValue, kIpcNextScanFlags, "scan_next", false);
         if (flagValue > static_cast<uint32_t>((std::numeric_limits<int>::max)())) {
             return {{"success", false}, {"error", "scan_flag out of range"}};
@@ -1070,7 +1079,7 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_fuzzy ───────────────────────────────────────────────
     RegisterMethod("scan_fuzzy", [](const json& p) -> json {
-        uint32_t flags = getRequiredUint32Param(p, "flags");
+        uint32_t flags = getRequiredScanFlagsParam(p);
         ValidateScanFlags(flags, kIpcFuzzyScanFlags, "scan_fuzzy", true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
