@@ -1743,8 +1743,7 @@ constexpr const char* kSchemaMemoryRead = R"JSON({
   "required": ["address", "size"],
   "properties": {
     "address": {
-      "type": "string",
-      "description": "Memory address in hex format, e.g. '0x7FF00000'"
+      "description": "Memory address as hex string or integer"
     },
     "size": {
       "type": "integer",
