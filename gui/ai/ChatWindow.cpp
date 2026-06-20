@@ -52,6 +52,11 @@ CancellationToken makeCancellationToken() {
     return std::make_shared<std::atomic<bool>>(false);
 }
 
+constexpr size_t kMaxInboundToolCalls = 64;
+constexpr size_t kMaxToolCallIdBytes = 256;
+constexpr size_t kMaxToolCallNameBytes = 64;
+constexpr size_t kMaxToolCallArgumentsBytes = 512 * 1024;
+
 bool startsWithICase(const std::string& s, const char* prefix) {
     const size_t n = std::strlen(prefix);
     if (s.size() < n) return false;
@@ -87,6 +92,11 @@ bool getProviderConfigProblem(const AIProvider* provider, const std::string& mod
 }
 
 std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
+    if (calls.size() > kMaxInboundToolCalls) {
+        return "too many tool calls in one response (max " +
+               std::to_string(kMaxInboundToolCalls) + ")";
+    }
+
     std::vector<std::string> seenIds;
     seenIds.reserve(calls.size());
     for (size_t i = 0; i < calls.size(); ++i) {
@@ -95,6 +105,9 @@ std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
         const std::string id = trimWhitespace(call.id);
         if (id.empty()) {
             return label + " is missing a tool_call id";
+        }
+        if (id.size() > kMaxToolCallIdBytes) {
+            return label + " tool_call id is too long";
         }
         if (std::find(seenIds.begin(), seenIds.end(), id) != seenIds.end()) {
             return label + " duplicates tool_call id '" + id + "'";
@@ -105,8 +118,14 @@ std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
         if (call.name.empty()) {
             return label + " is missing a tool name";
         }
+        if (call.name.size() > kMaxToolCallNameBytes) {
+            return label + " tool name is too long";
+        }
         if (trimWhitespace(call.arguments).empty()) {
             call.arguments = "{}";
+        }
+        if (call.arguments.size() > kMaxToolCallArgumentsBytes) {
+            return label + " arguments are too large";
         }
         try {
             const nlohmann::json parsed = nlohmann::json::parse(call.arguments);
@@ -114,6 +133,9 @@ std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
                 return label + " arguments must be a JSON object";
             }
             call.arguments = parsed.dump();
+            if (call.arguments.size() > kMaxToolCallArgumentsBytes) {
+                return label + " normalized arguments are too large";
+            }
         } catch (const nlohmann::json::exception& e) {
             return label + " has invalid JSON arguments: " + e.what();
         }
