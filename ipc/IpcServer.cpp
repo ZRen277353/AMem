@@ -1094,13 +1094,16 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── set_breakpoint ────────────────────────────────────────────
     RegisterMethod("set_breakpoint", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        uint32_t bpType = getOptionalPositiveUintParam(p, "bp_type", 1u, 4u);
+        uint32_t bpType = getOptionalPositiveUintParam(p, "bp_type", 2u, 4u);
         uint32_t bpSize = getOptionalPositiveUintParam(p, "bp_size", 4u, 8u);
         if (bpType < 1 || bpType > 4) {
             return {{"success", false}, {"error", "bp_type 必须在 1 到 4 之间"}};
         }
         if (!isValidBreakpointSize(bpSize)) {
             return {{"success", false}, {"error", "bp_size 必须为 1、2、4 或 8"}};
+        }
+        if (bpType == 4) {
+            bpSize = 4;
         }
         if (!SetKernelBreakpoint(addr, bpType, bpSize))
             return {{"success", false}, {"error", "设置断点失败"}};
