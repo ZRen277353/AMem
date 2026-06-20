@@ -1114,6 +1114,7 @@ void ChatWindow::clearHistory() {
     clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
+    requestStartMs_ = 0;
     state_ = State::Idle;
     session_.clearHistory();
     touchActiveSession();
