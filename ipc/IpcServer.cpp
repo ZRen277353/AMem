@@ -723,6 +723,43 @@ static bool ScanNextFlagRequiresValue(uint32_t flag) {
                     _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
 }
 
+constexpr uint32_t kIpcValueScanFlags =
+    _ACCURATE_VAL | _UNKNOW_VAL | _LARGER_THAN_VAL |
+    _LESS_THAN_VAL | _BETWEEN_VAL;
+constexpr uint32_t kIpcNextScanFlags =
+    _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
+    _ADD_UNKNOW_VAL | _ADD_ACCURATE_VAL |
+    _SUB_UNKNOW_VAL | _SUB_ACCURATE_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kIpcFuzzyScanFlags =
+    _UNKNOW_VAL | _ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kIpcDataTypeFlags =
+    BYTE_ | WORD_ | DWORD_ | XOR_ | FLOAT_ | QWORD_ | DOUBLE_;
+
+static void ValidateScanFlags(uint32_t flags,
+                              uint32_t allowedScanFlags,
+                              const char* method,
+                              bool allowMissingScanMode) {
+    if ((flags & ~(allowedScanFlags | kIpcDataTypeFlags)) != 0) {
+        throw std::invalid_argument(std::string(method) + " flags contain unsupported bits");
+    }
+
+    const uint32_t scanModeBits = flags & allowedScanFlags;
+    if (scanModeBits == 0 && !allowMissingScanMode) {
+        throw std::invalid_argument(std::string(method) + " flags must contain a scan type");
+    }
+    if (scanModeBits != 0 && (scanModeBits & (scanModeBits - 1)) != 0) {
+        throw std::invalid_argument(std::string(method) + " flags contain multiple scan types");
+    }
+
+    const uint32_t dataTypeBits = flags & kIpcDataTypeFlags;
+    if (dataTypeBits == 0 || (dataTypeBits & (dataTypeBits - 1)) != 0) {
+        throw std::invalid_argument(std::string(method) +
+                                    " flags must contain exactly one data type");
+    }
+}
+
 static size_t ScanValueSizeFromFlags(uint32_t flags) {
     if ((flags & BYTE_) != 0) return 1;
     if ((flags & WORD_) != 0) return 2;
@@ -991,6 +1028,7 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── scan_value ───────────────────────────────────────────────
     RegisterMethod("scan_value", [](const json& p) -> json {
         uint32_t flags = getRequiredUint32Param(p, "flags");
+        ValidateScanFlags(flags, kIpcValueScanFlags, "scan_value", false);
         auto valBytes = ScanBytesFromIpcValue(p, flags, true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
@@ -1007,6 +1045,7 @@ void IpcServer::RegisterBuiltinMethods() {
         uint32_t flagValue = p.contains("scan_flag")
                                  ? getRequiredUint32Param(p, "scan_flag")
                                  : flags;
+        ValidateScanFlags(flagValue, kIpcNextScanFlags, "scan_next", false);
         if (flagValue > static_cast<uint32_t>((std::numeric_limits<int>::max)())) {
             return {{"success", false}, {"error", "scan_flag out of range"}};
         }
@@ -1026,6 +1065,7 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── scan_fuzzy ───────────────────────────────────────────────
     RegisterMethod("scan_fuzzy", [](const json& p) -> json {
         uint32_t flags = getRequiredUint32Param(p, "flags");
+        ValidateScanFlags(flags, kIpcFuzzyScanFlags, "scan_fuzzy", true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
