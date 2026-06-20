@@ -490,6 +490,46 @@ int scanTypeToFlag(const std::string& scanType) {
     throw std::runtime_error("unsupported scan_type '" + scanType + "'");
 }
 
+int fuzzyScanTypeToFlag(const std::string& scanType) {
+    const std::string t = lowerCopy(scanType.empty() ? std::string("unknown") : scanType);
+    if (t == "unknown") return _UNKNOW_VAL;
+    if (t == "increased") return _ADD_UNKNOW_VAL;
+    if (t == "decreased") return _SUB_UNKNOW_VAL;
+    if (t == "changed") return _CHANGED_VAL;
+    if (t == "unchanged") return _UNCHANGED_VAL;
+    throw std::runtime_error(
+        "unsupported fuzzy scan_type '" + scanType +
+        "' (supported: unknown, increased, decreased, changed, unchanged)");
+}
+
+void validateFuzzyScanFlags(uint32_t flags) {
+    constexpr uint32_t kValueBearingScanFlags =
+        _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
+        _ADD_ACCURATE_VAL | _SUB_ACCURATE_VAL | _GROUP_VALUE;
+    constexpr uint32_t kAllowedFuzzyScanFlags =
+        _UNKNOW_VAL | _ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+        _CHANGED_VAL | _UNCHANGED_VAL;
+    constexpr uint32_t kAllowedDataTypeFlags =
+        BYTE_ | WORD_ | DWORD_ | XOR_ | FLOAT_ | QWORD_ | DOUBLE_;
+    if ((flags & kValueBearingScanFlags) != 0) {
+        throw std::runtime_error(
+            "scan_fuzzy cannot use scan types that require a comparison value");
+    }
+    if ((flags & ~(kAllowedFuzzyScanFlags | kAllowedDataTypeFlags)) != 0) {
+        throw std::runtime_error("scan_fuzzy flags contain unsupported bits");
+    }
+
+    const uint32_t scanModeBits = flags & kAllowedFuzzyScanFlags;
+    if (scanModeBits != 0 && (scanModeBits & (scanModeBits - 1)) != 0) {
+        throw std::runtime_error("scan_fuzzy flags contain multiple scan types");
+    }
+
+    const uint32_t dataTypeBits = flags & kAllowedDataTypeFlags;
+    if (dataTypeBits == 0 || (dataTypeBits & (dataTypeBits - 1)) != 0) {
+        throw std::runtime_error("scan_fuzzy flags must contain exactly one data type");
+    }
+}
+
 int memoryTypeToFlag(const std::string& memoryType) {
     const std::string t = lowerCopy(memoryType.empty() ? std::string("all") : memoryType);
     if (t == "all") return All;
@@ -618,10 +658,11 @@ uint32_t fuzzyScanFlagsFromArgs(const json& args, const std::string& valueType) 
     uint32_t rawFlag = 0;
     if (readRawFlagArg(args, "flags", rawFlag) ||
         readRawFlagArg(args, "scan_flag", rawFlag)) {
+        validateFuzzyScanFlags(rawFlag);
         return rawFlag;
     }
     const std::string scanType = optionalStringArg(args, "scan_type", "unknown", 64, false);
-    return static_cast<uint32_t>(scanTypeToFlag(scanType) | dataTypeToFlag(valueType));
+    return static_cast<uint32_t>(fuzzyScanTypeToFlag(scanType) | dataTypeToFlag(valueType));
 }
 
 // Encode a value (int/float/etc.) as a byte vector for scan/write tools.
@@ -1978,7 +2019,7 @@ constexpr const char* kSchemaScanFuzzy = R"JSON({
     },
     "scan_type": {
       "type": "string",
-      "description": "MCP-style fuzzy scan type: unknown, increased, increased_by, decreased, decreased_by, changed, unchanged. Default: unknown"
+      "description": "MCP-style fuzzy scan type: unknown, increased, decreased, changed, unchanged. Default: unknown"
     },
     "flags": {
       "type": "integer",
