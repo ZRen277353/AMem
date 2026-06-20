@@ -44,6 +44,14 @@ const char* roleToAnthropic(Role r) {
     return "user";
 }
 
+std::string stripTrailingSlash(const std::string& url) {
+    std::size_t end = url.size();
+    while (end > 0 && url[end - 1] == '/') {
+        --end;
+    }
+    return url.substr(0, end);
+}
+
 // Try to parse a string as JSON; on failure return the supplied fallback.
 // Used for both tool argument payloads (may be partial/invalid) and tool
 // input_schema strings supplied by callers.
@@ -469,8 +477,8 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         return;
     }
 
-    const std::string baseUrl = config_.baseUrl.empty() ? getDefaultBaseUrl()
-                                                        : config_.baseUrl;
+    const std::string baseUrl = stripTrailingSlash(
+        config_.baseUrl.empty() ? getDefaultBaseUrl() : config_.baseUrl);
     const std::string apiVer  = config_.apiVersion.empty() ? kDefaultApiVersion
                                                            : config_.apiVersion;
     const std::string url     = baseUrl + "/messages";
