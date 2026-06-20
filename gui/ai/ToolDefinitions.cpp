@@ -2235,6 +2235,12 @@ constexpr const char* kSchemaResolveOffsetChain = R"JSON({
     "offsets": {
       "type": "array",
       "description": "Pointer-chain offsets as integers or hex strings",
+      "items": {
+        "anyOf": [
+          { "type": "integer" },
+          { "type": "string" }
+        ]
+      },
       "maxItems": 1024
     },
     "deref_final": {
