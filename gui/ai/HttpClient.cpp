@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <exception>
 #include <sstream>
 #include <thread>
 
@@ -88,6 +89,9 @@ public:
 
     // 追加原始字节；识别 \n 边界；\r 被忽略以兼容 \r\n
     void feed(const char* data, size_t len) {
+        if (callbackFailed_) {
+            return;
+        }
         for (size_t i = 0; i < len; ++i) {
             char c = data[i];
             if (c == '\r') {
@@ -104,6 +108,9 @@ public:
 
     // 流结束时，刷出剩余数据
     void finish() {
+        if (callbackFailed_) {
+            return;
+        }
         if (!currentLine_.empty()) {
             processLine(currentLine_);
             currentLine_.clear();
@@ -111,8 +118,19 @@ public:
         flushEvent();
     }
 
+    bool callbackFailed() const {
+        return callbackFailed_;
+    }
+
+    const std::string& callbackError() const {
+        return callbackError_;
+    }
+
 private:
     void processLine(const std::string& line) {
+        if (callbackFailed_) {
+            return;
+        }
         if (line.empty()) {
             // 空行 → 事件结束
             flushEvent();
@@ -147,7 +165,15 @@ private:
             return;
         }
         if (cb_) {
-            cb_(eventBuffer_);
+            try {
+                cb_(eventBuffer_);
+            } catch (const std::exception& e) {
+                callbackFailed_ = true;
+                callbackError_ = e.what();
+            } catch (...) {
+                callbackFailed_ = true;
+                callbackError_ = "unknown callback exception";
+            }
         }
         eventBuffer_.clear();
     }
@@ -155,6 +181,8 @@ private:
     SSECallback cb_;
     std::string currentLine_;
     std::string eventBuffer_;
+    bool callbackFailed_ = false;
+    std::string callbackError_;
 };
 
 } // namespace
@@ -238,14 +266,26 @@ uint64_t HttpClient::postAsync(const std::string& url,
             activeRequests_.erase(requestId);
         };
 
+        auto completeSafely = [&](HttpResponse resp) {
+            if (!onComplete) {
+                return;
+            }
+            try {
+                onComplete(std::move(resp));
+            } catch (const std::exception&) {
+                // Completion callbacks run on this worker thread. Letting an
+                // exception escape would terminate the process.
+            } catch (...) {
+                // See above.
+            }
+        };
+
         ParsedUrl parsed = parseUrl(url);
         if (!parsed.valid) {
             response.statusCode = 0;
             response.errorMessage = "invalid URL: " + url;
             removeFromActive();
-            if (onComplete) {
-                onComplete(std::move(response));
-            }
+            completeSafely(std::move(response));
             return;
         }
 
@@ -316,6 +356,9 @@ uint64_t HttpClient::postAsync(const std::string& url,
             accumulated.append(data, dataLen);
             if (onSSE) {
                 parser.feed(data, dataLen);
+                if (parser.callbackFailed()) {
+                    return false;
+                }
             }
             return true;
         };
@@ -329,13 +372,22 @@ uint64_t HttpClient::postAsync(const std::string& url,
             parser.finish();
         }
 
+        if (parser.callbackFailed()) {
+            response.statusCode = 0;
+            response.errorMessage = "SSE callback failed";
+            if (!parser.callbackError().empty()) {
+                response.errorMessage += ": " + parser.callbackError();
+            }
+            removeFromActive();
+            completeSafely(std::move(response));
+            return;
+        }
+
         if ((cancelToken && cancelToken->load()) || aborted) {
             response.cancelled = true;
             response.errorMessage = "request cancelled";
             removeFromActive();
-            if (onComplete) {
-                onComplete(std::move(response));
-            }
+            completeSafely(std::move(response));
             return;
         }
 
@@ -348,9 +400,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
                 response.timedOut = true;
             }
             removeFromActive();
-            if (onComplete) {
-                onComplete(std::move(response));
-            }
+            completeSafely(std::move(response));
             return;
         }
 
@@ -365,9 +415,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
         }
 
         removeFromActive();
-        if (onComplete) {
-            onComplete(std::move(response));
-        }
+        completeSafely(std::move(response));
     });
 
     worker.detach();
