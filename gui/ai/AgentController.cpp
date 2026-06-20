@@ -6,9 +6,11 @@
 #include "ToolExecutor.h"
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 namespace AI {
@@ -40,6 +42,36 @@ AgentTraceEvent makeTrace(AgentTraceType type,
     ev.tool = provider;
     ev.detail = detail;
     return ev;
+}
+
+bool startsWithICase(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    if (s.size() < n) {
+        return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char a = static_cast<unsigned char>(s[i]);
+        const unsigned char b = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(a) != std::tolower(b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string validateProviderConfig(const AIProvider& provider,
+                                   const std::string& modelOverride) {
+    const ProviderConfig& cfg = provider.getConfig();
+    if (cfg.apiKey.empty()) {
+        return "Enter an API key in Settings before sending";
+    }
+    if (cfg.baseUrl.empty() || !startsWithICase(cfg.baseUrl, "https://")) {
+        return "Configure a valid https:// endpoint in Settings before sending";
+    }
+    if (modelOverride.empty() && cfg.model.empty()) {
+        return "Enter a model name before sending";
+    }
+    return {};
 }
 
 } // namespace
@@ -74,6 +106,19 @@ AgentController::DispatchResult AgentController::dispatchModelRequest(
     }
 
     const ProviderConfig& cfg = provider->getConfig();
+    const std::string configError =
+        validateProviderConfig(*provider, request.modelOverride);
+    if (!configError.empty()) {
+        result.error = configError;
+        result.traceEvent =
+            makeTrace(AgentTraceType::ProviderError,
+                      request.providerName,
+                      configError);
+        appendTraceEvent(result.traceEvent);
+        markFailed();
+        return result;
+    }
+
     CompletionRequest completion;
     completion.runId = run_.id;
     completion.messages = request.messages;

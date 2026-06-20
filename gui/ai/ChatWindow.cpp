@@ -1678,10 +1678,10 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     activeDispatchRunId_.clear();
 
     const std::string detail =
-        failureDetail && *failureDetail
-            ? std::string(failureDetail)
-            : (result.error.empty() ? std::string("agent dispatch failed")
-                                    : result.error);
+        !result.error.empty()
+            ? result.error
+            : (failureDetail && *failureDetail ? std::string(failureDetail)
+                                               : std::string("agent dispatch failed"));
     Gui::log("[AI Chat] agent dispatch failed: %s", detail.c_str());
 
     ChatMessage errMsg;
