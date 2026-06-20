@@ -20,6 +20,40 @@ using nlohmann::json;
 
 namespace {
 
+constexpr unsigned long long kMaxStreamToolCallIndex = 63ULL;
+
+bool readStreamToolCallIndex(const json& object, size_t& outIndex) {
+    outIndex = 0;
+    if (!object.is_object()) {
+        return false;
+    }
+
+    const auto it = object.find("index");
+    if (it == object.end()) {
+        return true;
+    }
+
+    if (it->is_number_unsigned()) {
+        const auto index = it->get<unsigned long long>();
+        if (index > kMaxStreamToolCallIndex) {
+            return false;
+        }
+        outIndex = static_cast<size_t>(index);
+        return true;
+    }
+
+    if (it->is_number_integer()) {
+        const auto index = it->get<long long>();
+        if (index < 0 || static_cast<unsigned long long>(index) > kMaxStreamToolCallIndex) {
+            return false;
+        }
+        outIndex = static_cast<size_t>(index);
+        return true;
+    }
+
+    return false;
+}
+
 // Map an AI::Role to the OpenAI/DeepSeek role string.
 const char* roleToString(Role role) {
     switch (role) {
@@ -234,9 +268,8 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
                 if (!tcFrag.is_object()) continue;
 
                 size_t idx = 0;
-                if (tcFrag.contains("index") && tcFrag["index"].is_number_integer()) {
-                    long long iv = tcFrag["index"].get<long long>();
-                    idx = iv < 0 ? 0 : static_cast<size_t>(iv);
+                if (!readStreamToolCallIndex(tcFrag, idx)) {
+                    continue;
                 }
                 while (outMessage.toolCalls.size() <= idx) {
                     outMessage.toolCalls.emplace_back();

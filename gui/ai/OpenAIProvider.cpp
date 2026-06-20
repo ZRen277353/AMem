@@ -20,6 +20,40 @@ namespace {
 
 using json = nlohmann::json;
 
+constexpr unsigned long long kMaxStreamToolCallIndex = 63ULL;
+
+bool readStreamToolCallIndex(const json& object, size_t& outIndex) {
+    outIndex = 0;
+    if (!object.is_object()) {
+        return false;
+    }
+
+    const auto it = object.find("index");
+    if (it == object.end()) {
+        return true;
+    }
+
+    if (it->is_number_unsigned()) {
+        const auto index = it->get<unsigned long long>();
+        if (index > kMaxStreamToolCallIndex) {
+            return false;
+        }
+        outIndex = static_cast<size_t>(index);
+        return true;
+    }
+
+    if (it->is_number_integer()) {
+        const auto index = it->get<long long>();
+        if (index < 0 || static_cast<unsigned long long>(index) > kMaxStreamToolCallIndex) {
+            return false;
+        }
+        outIndex = static_cast<size_t>(index);
+        return true;
+    }
+
+    return false;
+}
+
 // Map OpenAI role enum → wire string.
 const char* roleToString(Role role) {
     switch (role) {
@@ -305,17 +339,14 @@ CompletionResponse OpenAIProvider::parseSSEChunk(const std::string& chunk) const
                 if (!tc.is_object()) {
                     continue;
                 }
-                int index = 0;
-                if (tc.contains("index") && tc["index"].is_number_integer()) {
-                    index = tc["index"].get<int>();
-                }
-                if (index < 0) {
+                size_t slotIndex = 0;
+                if (!readStreamToolCallIndex(tc, slotIndex)) {
                     continue;
                 }
-                if (static_cast<size_t>(index) >= out.message.toolCalls.size()) {
-                    out.message.toolCalls.resize(index + 1);
+                if (slotIndex >= out.message.toolCalls.size()) {
+                    out.message.toolCalls.resize(slotIndex + 1);
                 }
-                ToolCall& slot = out.message.toolCalls[index];
+                ToolCall& slot = out.message.toolCalls[slotIndex];
 
                 if (tc.contains("id") && tc["id"].is_string()) {
                     slot.id = tc["id"].get<std::string>();

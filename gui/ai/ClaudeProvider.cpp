@@ -31,6 +31,8 @@ constexpr const char* kDefaultApiVersion = "2023-06-01";
 // Messages API requires this field to be present.
 constexpr int kDefaultMaxTokens = 4096;
 
+constexpr unsigned long long kMaxStreamContentBlockIndex = 63ULL;
+
 // Role → Anthropic role string mapping (only user/assistant are valid inside
 // the "messages" array; System is hoisted to the top-level "system" param,
 // Tool is converted to a user-role tool_result message).
@@ -64,6 +66,38 @@ json parseJsonOr(const std::string& text, const json& fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+bool readStreamContentBlockIndex(const json& object, int& outIndex) {
+    outIndex = 0;
+    if (!object.is_object()) {
+        return false;
+    }
+
+    const auto it = object.find("index");
+    if (it == object.end()) {
+        return true;
+    }
+
+    if (it->is_number_unsigned()) {
+        const auto index = it->get<unsigned long long>();
+        if (index > kMaxStreamContentBlockIndex) {
+            return false;
+        }
+        outIndex = static_cast<int>(index);
+        return true;
+    }
+
+    if (it->is_number_integer()) {
+        const auto index = it->get<long long>();
+        if (index < 0 || static_cast<unsigned long long>(index) > kMaxStreamContentBlockIndex) {
+            return false;
+        }
+        outIndex = static_cast<int>(index);
+        return true;
+    }
+
+    return false;
 }
 
 json toolResultBlock(const ChatMessage& msg) {
@@ -201,7 +235,10 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
     }
 
     if (type == "content_block_start") {
-        int idx = ev.value("index", 0);
+        int idx = 0;
+        if (!readStreamContentBlockIndex(ev, idx)) {
+            return;
+        }
         const auto& cb = ev.value("content_block", json::object());
         StreamState::Block block;
         block.type = cb.value("type", std::string{});
@@ -216,7 +253,10 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
     }
 
     if (type == "content_block_delta") {
-        int idx = ev.value("index", 0);
+        int idx = 0;
+        if (!readStreamContentBlockIndex(ev, idx)) {
+            return;
+        }
         auto it = state.blocks.find(idx);
         if (it == state.blocks.end()) {
             return;
@@ -245,7 +285,10 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
     }
 
     if (type == "content_block_stop") {
-        int idx = ev.value("index", 0);
+        int idx = 0;
+        if (!readStreamContentBlockIndex(ev, idx)) {
+            return;
+        }
         auto it = state.blocks.find(idx);
         if (it == state.blocks.end()) {
             return;
