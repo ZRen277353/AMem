@@ -26,6 +26,7 @@ namespace {
 constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
 constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
 constexpr size_t kMaxIpcBatchReadCount = 100000;
+constexpr uint64_t kMaxIpcBatchReadTotalBytes = 256ull * 1024ull * 1024ull;
 constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
 constexpr int kMaxIpcLuaTimeoutSeconds = 300;
 constexpr size_t kMaxIpcStringParamBytes = 4096;
@@ -997,9 +998,14 @@ void IpcServer::RegisterBuiltinMethods() {
         }
         std::vector<std::pair<uint64_t, int32_t>> addrs;
         addrs.reserve(addrsArr.size());
+        uint64_t totalBytes = 0;
         for (auto& item : addrsArr) {
             uint64_t a = ParseAddress(item, "address");
             uint32_t s = getPositiveSizeParam(item, "size", 4u, kMaxIpcMemoryTransferBytes);
+            if (totalBytes > kMaxIpcBatchReadTotalBytes - s) {
+                return {{"success", false}, {"error", "read_batch total size exceeds IPC limit"}};
+            }
+            totalBytes += s;
             addrs.push_back({a, s});
         }
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> out;
