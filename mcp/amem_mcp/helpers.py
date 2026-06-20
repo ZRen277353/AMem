@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 
 from .constants import (
@@ -83,11 +84,14 @@ def encode_value_hex(value: str, data_type: str) -> str:
     """Encode a typed scalar value as little-endian hex."""
     data_type = normalize_data_type(data_type)
     fmt = DATA_TYPE_FMT[data_type]
-    parsed = (
-        float(value)
-        if data_type in ("float", "double")
-        else int(str(value).strip(), 0)
-    )
+    if data_type in ("float", "double"):
+        if isinstance(value, bool):
+            raise ValueError(f"{data_type} value must not be boolean")
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"{data_type} value must be finite")
+    else:
+        parsed = int(str(value).strip(), 0)
     return struct.pack(fmt, parsed).hex()
 
 
