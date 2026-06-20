@@ -695,6 +695,9 @@ void ChatWindow::deleteSession(const std::string& id) {
     if (wasActive) {
         // Clear in-memory state before switching; if sessions remain the
         // manager already picked a new active id, otherwise create one.
+        if (cancelToken_) {
+            cancelToken_->store(true);
+        }
         clearActiveRunContext();
         streamingContent_.clear();
         agentController_.resetForNewRun();
