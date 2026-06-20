@@ -65,7 +65,8 @@ bool matchesType(const json& value, const std::string& expected) {
 }
 
 // Minimal JSON-Schema validator. Supports: type, required, properties,
-// anyOf, minimum, maximum, minLength, maxLength. Returns an empty string on
+// anyOf, minimum, maximum, minLength, maxLength, minItems, maxItems.
+// Returns an empty string on
 // success, otherwise a human-readable description of the first violation
 // encountered (AC 5.6). The path argument is used to build
 // "root.foo.bar"-style property locators in error messages.
@@ -101,6 +102,26 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
             if (s.size() > maxLen) {
                 std::ostringstream oss;
                 oss << path << " longer than maxLength " << maxLen;
+                return oss.str();
+            }
+        }
+    }
+
+    // array constraints
+    if (args.is_array()) {
+        if (schema.contains("minItems") && schema["minItems"].is_number_integer()) {
+            const auto minItems = schema["minItems"].get<std::size_t>();
+            if (args.size() < minItems) {
+                std::ostringstream oss;
+                oss << path << " has fewer items than minItems " << minItems;
+                return oss.str();
+            }
+        }
+        if (schema.contains("maxItems") && schema["maxItems"].is_number_integer()) {
+            const auto maxItems = schema["maxItems"].get<std::size_t>();
+            if (args.size() > maxItems) {
+                std::ostringstream oss;
+                oss << path << " has more items than maxItems " << maxItems;
                 return oss.str();
             }
         }
@@ -185,16 +206,17 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
 }
 
 // Entry point used by ToolExecutor::execute(). Parses the schema string from
-// the ToolDefinition and dispatches to the recursive validator. A malformed
-// schema is treated as "no constraints" to avoid blocking execution when the
-// registration side has a bug; such cases are caught during development.
+// the ToolDefinition and dispatches to the recursive validator.
 std::string validateAgainstSchema(const json& args, const std::string& schemaStr) {
     if (schemaStr.empty()) return "";
     json schema;
     try {
         schema = json::parse(schemaStr);
-    } catch (const std::exception&) {
-        return ""; // tolerate broken schema — registration-side concern
+    } catch (const std::exception& e) {
+        return std::string("invalid tool parameter schema: ") + e.what();
+    }
+    if (!schema.is_object()) {
+        return "invalid tool parameter schema: root schema must be an object";
     }
     return validateAgainstSchema(args, schema, "root");
 }
