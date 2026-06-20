@@ -15,6 +15,38 @@ _SLOW_METHODS = frozenset({
     "list_processes", "list_modules", "execute_lua",
 })
 
+_MAX_ERROR_PREVIEW_CHARS = 4096
+
+
+def _preview_json(value: Any) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        text = repr(value)
+    if len(text) > _MAX_ERROR_PREVIEW_CHARS:
+        text = text[:_MAX_ERROR_PREVIEW_CHARS - 3] + "..."
+    return text
+
+
+def _protocol_error(message: str, value: Any | None = None) -> dict:
+    if value is not None:
+        message = f"{message}: {_preview_json(value)}"
+    return {"success": False, "error": message}
+
+
+def _normalize_success_response(parsed: Any) -> dict:
+    if not isinstance(parsed, dict):
+        return _protocol_error("IPC response must be a JSON object", parsed)
+
+    success = parsed.get("success")
+    if not isinstance(success, bool):
+        return _protocol_error("IPC response missing boolean success field", parsed)
+
+    if success and "result" not in parsed:
+        return _protocol_error("IPC success response missing result field", parsed)
+
+    return parsed
+
 
 def _json_error_from_http_error(e: urllib.error.HTTPError) -> dict:
     try:
@@ -26,7 +58,9 @@ def _json_error_from_http_error(e: urllib.error.HTTPError) -> dict:
         try:
             parsed = json.loads(body)
             if isinstance(parsed, dict):
-                parsed.setdefault("success", False)
+                parsed["success"] = False
+                if "error" not in parsed:
+                    parsed["error"] = f"IPC HTTP {e.code}: request failed"
                 return parsed
         except json.JSONDecodeError:
             pass
@@ -76,7 +110,8 @@ class IpcClient:
 
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    parsed = json.loads(resp.read().decode("utf-8"))
+                    return _normalize_success_response(parsed)
             except urllib.error.HTTPError as e:
                 return _json_error_from_http_error(e)
             except ConnectionRefusedError:
