@@ -12,6 +12,7 @@ from ..helpers import (
     hex_dump,
     normalize_data_type,
     parse_int,
+    parse_positive_int,
 )
 from ..ipc_client import IpcClient
 
@@ -27,7 +28,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             size: 读取字节数，默认 256，最大 65536
         """
         addr_int = parse_int(address)
-        size = max(1, min(size, 65536))
+        size = parse_positive_int(size, "size", 65536)
         r = ipc.call_or_raise("read_memory", {"address": address, "size": size})
         return hex_dump(r["hex"], addr_int)
 

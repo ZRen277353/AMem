@@ -29,6 +29,16 @@ def parse_int(value: str | int) -> int:
     return parsed
 
 
+def parse_positive_int(value: str | int, name: str, max_value: int | None = None) -> int:
+    """Parse a positive integer, optionally capping it to max_value."""
+    parsed = parse_int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    if max_value is not None and parsed > max_value:
+        return max_value
+    return parsed
+
+
 def normalize_data_type(data_type: str) -> str:
     key = str(data_type).strip().lower()
     if key not in DATA_TYPE_FMT:
@@ -66,7 +76,7 @@ def clean_hex_string(hex_string: str) -> str:
 
 
 def clamp_page(offset: int, count: int, max_count: int = 1000) -> tuple[int, int]:
-    return max(0, offset), max(1, min(count, max_count))
+    return parse_int(offset), parse_positive_int(count, "count", max_count)
 
 
 def encode_value_hex(value: str, data_type: str) -> str:

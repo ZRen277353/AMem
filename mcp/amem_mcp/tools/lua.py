@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..helpers import parse_positive_int
 from ..ipc_client import IpcClient
 
 
@@ -22,7 +23,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         """
         if not code:
             raise ValueError("code must not be empty")
-        timeout_seconds = max(1, min(timeout_seconds, 300))
+        timeout_seconds = parse_positive_int(timeout_seconds, "timeout_seconds", 300)
         r = ipc.call_or_raise(
             "execute_lua",
             {"code": code, "timeout_seconds": timeout_seconds},
