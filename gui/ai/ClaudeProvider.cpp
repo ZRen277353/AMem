@@ -68,6 +68,30 @@ json parseJsonOr(const std::string& text, const json& fallback) {
     }
 }
 
+const json* objectMember(const json& object, const char* key) {
+    if (!object.is_object()) {
+        return nullptr;
+    }
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_object()) {
+        return nullptr;
+    }
+    return &*it;
+}
+
+std::string stringMemberOr(const json& object,
+                           const char* key,
+                           const std::string& fallback = {}) {
+    if (!object.is_object()) {
+        return fallback;
+    }
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_string()) {
+        return fallback;
+    }
+    return it->get<std::string>();
+}
+
 bool readStreamContentBlockIndex(const json& object, int& outIndex) {
     outIndex = 0;
     if (!object.is_object()) {
@@ -239,12 +263,15 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         if (!readStreamContentBlockIndex(ev, idx)) {
             return;
         }
-        const auto& cb = ev.value("content_block", json::object());
+        const json* cb = objectMember(ev, "content_block");
+        if (!cb) {
+            return;
+        }
         StreamState::Block block;
-        block.type = cb.value("type", std::string{});
+        block.type = stringMemberOr(*cb, "type");
         if (block.type == "tool_use") {
-            block.toolId   = cb.value("id", std::string{});
-            block.toolName = cb.value("name", std::string{});
+            block.toolId   = stringMemberOr(*cb, "id");
+            block.toolName = stringMemberOr(*cb, "name");
             // input may be {} initially; deltas stream the real value as JSON
             // fragments via input_json_delta.
         }
@@ -261,10 +288,13 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         if (it == state.blocks.end()) {
             return;
         }
-        const auto& delta = ev.value("delta", json::object());
-        const std::string deltaType = delta.value("type", std::string{});
+        const json* delta = objectMember(ev, "delta");
+        if (!delta) {
+            return;
+        }
+        const std::string deltaType = stringMemberOr(*delta, "type");
         if (deltaType == "text_delta") {
-            const std::string chunk = delta.value("text", std::string{});
+            const std::string chunk = stringMemberOr(*delta, "text");
             if (chunk.empty()) return;
             it->second.text += chunk;
             state.accumulatedText += chunk;
@@ -278,7 +308,7 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
             UIMessageQueue::getInstance().push(std::move(m));
         } else if (deltaType == "input_json_delta") {
             // Accumulate raw JSON fragments for the current tool_use block.
-            const std::string chunk = delta.value("partial_json", std::string{});
+            const std::string chunk = stringMemberOr(*delta, "partial_json");
             it->second.toolArgs += chunk;
         }
         return;
@@ -322,10 +352,9 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         state.completed = true;
         ProviderError err;
         err.category = ErrorCategory::InvalidResponse;
-        if (ev.contains("error") && ev["error"].is_object()) {
-            const auto& e = ev["error"];
-            err.providerErrorCode = e.value("type", std::string{});
-            err.message           = e.value("message", std::string("stream error"));
+        if (const json* e = objectMember(ev, "error")) {
+            err.providerErrorCode = stringMemberOr(*e, "type");
+            err.message           = stringMemberOr(*e, "message", "stream error");
         } else {
             err.message = "stream error";
         }
@@ -469,11 +498,13 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
     }
 
     // Error envelope: { "type": "error", "error": { ... } }
-    if (j.value("type", std::string{}) == "error" && j.contains("error")) {
-        const auto& e = j["error"];
+    if (stringMemberOr(j, "type") == "error") {
         out.error.category          = ErrorCategory::InvalidResponse;
-        out.error.providerErrorCode = e.value("type", std::string{});
-        out.error.message           = e.value("message", std::string("unknown error"));
+        out.error.message           = "unknown error";
+        if (const json* e = objectMember(j, "error")) {
+            out.error.providerErrorCode = stringMemberOr(*e, "type");
+            out.error.message           = stringMemberOr(*e, "message", "unknown error");
+        }
         return out;
     }
 
@@ -482,17 +513,17 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
         std::string text;
         for (const auto& block : j["content"]) {
             if (!block.is_object()) continue;
-            const std::string bt = block.value("type", std::string{});
+            const std::string bt = stringMemberOr(block, "type");
             if (bt == "text") {
-                text += block.value("text", std::string{});
+                text += stringMemberOr(block, "text");
             } else if (bt == "tool_use") {
                 ToolCall tc;
-                tc.id        = block.value("id", std::string{});
-                tc.name      = block.value("name", std::string{});
+                tc.id        = stringMemberOr(block, "id");
+                tc.name      = stringMemberOr(block, "name");
                 // input is an object; re-serialize as a string so the rest of
                 // the pipeline can treat arguments uniformly.
-                const json input = block.value("input", json::object());
-                tc.arguments = input.dump();
+                const json* input = objectMember(block, "input");
+                tc.arguments = input ? input->dump() : std::string("{}");
                 out.message.toolCalls.push_back(std::move(tc));
             }
         }
