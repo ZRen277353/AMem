@@ -2665,16 +2665,16 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "symbol_init",
-        "Initialize the symbol table for a module base address.",
+        "Initialize the active symbol table for a module base address. Requires user confirmation.",
         kSchemaSymbolInit,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execSymbolInit);
 
     registerTool(
         "symbol_list",
-        "List symbols from the initialized symbol table, optionally initializing a module first.",
+        "List symbols from the active symbol table, optionally initializing a module first. Requires user confirmation.",
         kSchemaSymbolList,
-        ToolSafety::ReadOnly,
+        ToolSafety::Write,
         &execSymbolList);
 
     registerTool(
