@@ -8,6 +8,9 @@ from ..helpers import clamp_page, parse_int
 from ..ipc_client import IpcClient
 
 
+MAX_OFFSET_CHAIN_LENGTH = 1024
+
+
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
@@ -95,6 +98,10 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         parse_int(base_offset)
         if offsets is not None and not isinstance(offsets, list):
             raise ValueError("offsets must be a list")
+        if offsets is not None and len(offsets) > MAX_OFFSET_CHAIN_LENGTH:
+            raise ValueError(
+                f"offsets is too long (max {MAX_OFFSET_CHAIN_LENGTH})"
+            )
         parsed_offsets = [parse_int(offset) for offset in (offsets or [])]
         r = ipc.call_or_raise("resolve_offset_chain", {
             "module": module,
