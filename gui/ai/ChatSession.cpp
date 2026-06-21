@@ -226,7 +226,10 @@ void ChatSession::setSystemPrompt(const std::string& prompt) {
     }
 }
 
-const std::string& ChatSession::getSystemPrompt() const {
+std::string ChatSession::getSystemPrompt() const {
+    // Return by value under the lock: a reference into systemPrompt_ could
+    // dangle if setSystemPrompt() reassigns the string concurrently.
+    std::lock_guard<std::mutex> lock(mutex_);
     return systemPrompt_;
 }
 
@@ -242,6 +245,7 @@ void ChatSession::setTokenLimit(int limit) {
 }
 
 int ChatSession::getTokenLimit() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return tokenLimit_;
 }
 

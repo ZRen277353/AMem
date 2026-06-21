@@ -33,7 +33,7 @@ public:
 
     // System prompt (max 4000 chars, truncated silently per AC 8.2)
     void setSystemPrompt(const std::string& prompt);
-    const std::string& getSystemPrompt() const;
+    std::string getSystemPrompt() const;
 
     // Token management
     // Default 16000, clamped to [1000, 200000] per AC 8.3
