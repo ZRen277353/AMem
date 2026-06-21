@@ -35,7 +35,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             memory_type: all / anonymous / c_alloc / c_heap / c_data / c_bss /
                          java_heap / java / stack / code_app / code_system /
-                         video / ashmem / bad
+                         video / ashmem / bad / other
         """
         memory_type = normalize_memory_type(memory_type)
         mt = MEMORY_TYPE_MAP[memory_type]

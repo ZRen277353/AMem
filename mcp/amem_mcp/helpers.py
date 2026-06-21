@@ -81,17 +81,36 @@ def clamp_page(offset: int, count: int, max_count: int = 1000) -> tuple[int, int
 
 
 def encode_value_hex(value: str, data_type: str) -> str:
-    """Encode a typed scalar value as little-endian hex."""
+    """Encode a typed scalar value as little-endian hex.
+
+    Integer types accept signed input (e.g. "-1"): a negative value is wrapped
+    to its two's-complement representation for the type width, matching the C++
+    encodeScanValue/parseIntegerBits behaviour so the same value scans
+    identically through the GUI, the in-app AI agent, and MCP.
+    """
     data_type = normalize_data_type(data_type)
     fmt = DATA_TYPE_FMT[data_type]
     if data_type in ("float", "double"):
         if isinstance(value, bool):
             raise ValueError(f"{data_type} value must not be boolean")
-        parsed = float(value)
-        if not math.isfinite(parsed):
+        parsed_float = float(value)
+        if not math.isfinite(parsed_float):
             raise ValueError(f"{data_type} value must be finite")
-    else:
-        parsed = int(str(value).strip(), 0)
+        return struct.pack(fmt, parsed_float).hex()
+
+    if isinstance(value, bool):
+        raise ValueError(f"{data_type} value must not be boolean")
+    parsed = int(str(value).strip(), 0)
+    bit_width = DATA_TYPE_SIZE[data_type] * 8
+    signed_min = -(1 << (bit_width - 1))
+    unsigned_max = (1 << bit_width) - 1
+    if parsed < signed_min or parsed > unsigned_max:
+        raise ValueError(
+            f"{data_type} value {parsed} is out of range for a "
+            f"{bit_width}-bit integer"
+        )
+    if parsed < 0:
+        parsed &= unsigned_max  # two's-complement wrap to match the C++ side
     return struct.pack(fmt, parsed).hex()
 
 
