@@ -3,6 +3,7 @@
 #include "AiSettings.h"
 
 #include "../../third_party/nlohmann/json.hpp"
+#include "../../utils/AtomicFileWrite.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -59,7 +60,7 @@ bool AiSettings::loadFromFile(const std::string& filepath) {
         const auto& p = root["proxy"];
         loaded.proxy.enabled = p.value("enabled", false);
         loaded.proxy.host    = p.value("host", std::string{});
-        loaded.proxy.port    = p.value("port", 0);
+        loaded.proxy.port    = clamp(p.value("port", 0), 0, 65535);
     }
 
     data_ = std::move(loaded);
@@ -87,7 +88,6 @@ bool AiSettings::saveToFile(const std::string& filepath) {
     root["proxy"]    = std::move(proxy);
 
     // Atomic write: dump to sibling `.tmp`, then rename over the target.
-    std::error_code ec;
     std::filesystem::path targetPath(filepath);
     std::filesystem::path tmpPath = targetPath;
     tmpPath += ".tmp";
@@ -104,17 +104,7 @@ bool AiSettings::saveToFile(const std::string& filepath) {
         if (!out.good()) return false;
     }
 
-    std::filesystem::rename(tmpPath, targetPath, ec);
-    if (ec) {
-        std::filesystem::remove(targetPath, ec);
-        ec.clear();
-        std::filesystem::rename(tmpPath, targetPath, ec);
-        if (ec) {
-            std::filesystem::remove(tmpPath, ec); // best-effort cleanup
-            return false;
-        }
-    }
-    return true;
+    return utils::installTempFile(tmpPath, targetPath);
 }
 
 AiSettingsData AiSettings::get() const {
@@ -130,6 +120,7 @@ void AiSettings::set(const AiSettingsData& data) {
         data_.maxAgentSteps = clamp(data_.maxAgentSteps, 1, 64);
         data_.maxToolCallsPerTurn = clamp(data_.maxToolCallsPerTurn, 1, 64);
         data_.tokenLimit       = clamp(data_.tokenLimit, 1000, 1000000);
+        data_.proxy.port       = clamp(data_.proxy.port, 0, 65535);
     }
     saveToFile(lastPath_);
 }
@@ -170,6 +161,7 @@ void AiSettings::setProxy(const ProxyConfig& proxy) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.proxy = proxy;
+        data_.proxy.port = clamp(data_.proxy.port, 0, 65535);
     }
     saveToFile(lastPath_);
 }

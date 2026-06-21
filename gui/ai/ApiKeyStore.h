@@ -48,9 +48,10 @@ public:
 
     // Retrieve a provider configuration. The apiKey in outConfig is the
     // decrypted plaintext. Returns false if the provider is not stored or
-    // if decryption fails; on decryption failure the entry is removed and
-    // the provider name is added to getDecryptionFailures() so the UI can
-    // prompt the user to re-enter the key (per AC 10.5).
+    // if decryption fails; on decryption failure the entry is RETAINED (so a
+    // transient DPAPI failure can't cause permanent key loss on the next
+    // save) and the provider name is added to getDecryptionFailures() so the
+    // UI can prompt the user to re-enter the key (per AC 10.5).
     bool loadConfig(const std::string& providerName, ProviderConfig& outConfig);
 
     bool hasConfig(const std::string& providerName) const;

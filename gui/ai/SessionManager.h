@@ -118,6 +118,10 @@ private:
     std::string activeId_;
     std::vector<SessionInfo> sessions_;
     bool initialized_ = false;
+    // True once the one-time ai_session.json → ai_sessions/ migration has been
+    // handled. Persisted in index.json so a leftover legacy file can't be
+    // re-imported on a later launch (e.g. after the user deletes all sessions).
+    bool legacyMigrated_ = false;
 };
 
 } // namespace AI

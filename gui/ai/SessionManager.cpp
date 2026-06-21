@@ -3,6 +3,7 @@
 #include "SessionManager.h"
 
 #include "../../third_party/nlohmann/json.hpp"
+#include "../../utils/AtomicFileWrite.h"
 
 #include <algorithm>
 #include <cctype>
@@ -59,11 +60,12 @@ void SessionManager::init(const std::string& sessionsDir,
     // Load index (if any).
     loadIndexUnlocked();
 
-    // Legacy migration: promote `ai_session.json` into the new layout
-    // exactly once. We only trigger this when the index has no sessions
-    // yet, so users who've already migrated don't see the old file
-    // resurface in the list.
-    if (sessions_.empty() && !legacySessionFile.empty()) {
+    // Legacy migration: promote `ai_session.json` into the new layout exactly
+    // once, tracked by the persisted `legacyMigrated_` flag rather than by an
+    // empty session list — otherwise a leftover legacy file (e.g. one whose
+    // removal failed below) would be re-imported every time the user empties
+    // their session list.
+    if (!legacyMigrated_ && !legacySessionFile.empty()) {
         std::error_code fec;
         if (std::filesystem::exists(legacySessionFile, fec)) {
             SessionInfo info;
@@ -102,8 +104,17 @@ void SessionManager::init(const std::string& sessionsDir,
             if (!mec) {
                 sessions_.push_back(std::move(info));
                 activeId_ = sessions_.back().id;
+                // Record success so a failed removal (below) or a later restore
+                // of the legacy file can't trigger a duplicate re-import.
+                legacyMigrated_ = true;
                 saveIndexUnlocked();
             }
+            // On failure leave legacyMigrated_ false so the next launch retries.
+        } else {
+            // No legacy file present; persist the migrated decision so one that
+            // appears later isn't imported into an existing install.
+            legacyMigrated_ = true;
+            saveIndexUnlocked();
         }
     }
 
@@ -253,6 +264,7 @@ std::string SessionManager::deriveTitle(const std::string& firstUserMessage) {
 bool SessionManager::loadIndexUnlocked() {
     sessions_.clear();
     activeId_.clear();
+    legacyMigrated_ = false;
 
     std::error_code ec;
     if (!std::filesystem::exists(indexPath_, ec)) {
@@ -285,6 +297,12 @@ bool SessionManager::loadIndexUnlocked() {
         }
     }
 
+    // Default the migration flag to "already migrated" when an existing index
+    // has sessions but no explicit flag — those users predate this field and
+    // must not have a leftover legacy file re-imported. A flagless empty index
+    // (fresh install / all sessions deleted) defaults to not-migrated.
+    legacyMigrated_ = root.value("legacyMigrated", !sessions_.empty());
+
     // If the index referenced an active id that no longer exists, clear
     // it so the caller can pick a sane default.
     if (!activeId_.empty()) {
@@ -297,8 +315,9 @@ bool SessionManager::loadIndexUnlocked() {
 
 bool SessionManager::saveIndexUnlocked() const {
     nlohmann::json root = nlohmann::json::object();
-    root["version"]  = kIndexVersion;
-    root["activeId"] = activeId_;
+    root["version"]        = kIndexVersion;
+    root["activeId"]       = activeId_;
+    root["legacyMigrated"] = legacyMigrated_;
 
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& s : sessions_) {
@@ -330,18 +349,10 @@ bool SessionManager::saveIndexUnlocked() const {
         if (!out.good()) return false;
     }
 
-    std::error_code ec;
-    std::filesystem::rename(tmp, target, ec);
-    if (ec) {
-        std::filesystem::remove(target, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, target, ec);
-        if (ec) {
-            std::filesystem::remove(tmp, ec);
-            return false;
-        }
-    }
-    return true;
+    // Install the temp over the index without risking the only good copy —
+    // a held-open index.json no longer leads to the whole session list being
+    // deleted (see utils::installTempFile).
+    return utils::installTempFile(tmp, target);
 }
 
 std::string SessionManager::allocIdUnlocked() const {

@@ -13,6 +13,7 @@
 #include <wincrypt.h>
 
 #include "../../third_party/nlohmann/json.hpp"
+#include "../../utils/AtomicFileWrite.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -225,14 +226,17 @@ bool ApiKeyStore::loadConfig(const std::string& providerName, ProviderConfig& ou
     bool ok = false;
     std::string plaintext = decryptWithDPAPI(it->second.encryptedApiKey, ok);
     if (!ok) {
-        // AC 10.5: discard the corrupted entry and flag it for the UI so
-        // the user can re-enter the key.
+        // AC 10.5: flag the entry for the UI so the user can re-enter the key.
+        // Do NOT erase the entry: decryption can fail transiently (e.g. the
+        // user profile / DPAPI state isn't ready yet at early startup), and
+        // dropping it here would let the next saveToFile() delete the key
+        // from disk too — turning a transient glitch into permanent loss.
+        // The encrypted blob is kept so it round-trips and can be retried.
         if (std::find(decryptionFailures_.begin(),
                       decryptionFailures_.end(),
                       providerName) == decryptionFailures_.end()) {
             decryptionFailures_.push_back(providerName);
         }
-        configs_.erase(it);
         return false;
     }
 
@@ -363,7 +367,6 @@ bool ApiKeyStore::saveToFile(const std::string& filepath) {
     // rename over the target. std::filesystem::rename is atomic on NTFS
     // when both paths sit on the same volume, which is what we guarantee
     // by keeping the temp next to the target.
-    std::error_code ec;
     std::filesystem::path targetPath(filepath);
     std::filesystem::path tmpPath = targetPath;
     tmpPath += ".tmp";
@@ -384,21 +387,10 @@ bool ApiKeyStore::saveToFile(const std::string& filepath) {
         }
     }
 
-    std::filesystem::rename(tmpPath, targetPath, ec);
-    if (ec) {
-        // rename can fail if the target is held open; fall back to
-        // remove-then-rename which is still better than leaving the
-        // half-written .tmp around.
-        std::filesystem::remove(targetPath, ec);
-        ec.clear();
-        std::filesystem::rename(tmpPath, targetPath, ec);
-        if (ec) {
-            std::filesystem::remove(tmpPath, ec); // best-effort cleanup
-            return false;
-        }
-    }
-
-    return true;
+    // Install the temp over the target without ever risking the only good
+    // copy (see utils::installTempFile). A held-open target no longer leads
+    // to all encrypted keys being deleted.
+    return utils::installTempFile(tmpPath, targetPath);
 }
 
 } // namespace AI
