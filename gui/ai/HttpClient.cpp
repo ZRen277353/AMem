@@ -221,6 +221,26 @@ ProxyConfig HttpClient::getProxy() const {
     return proxy_;
 }
 
+HttpClient::~HttpClient() {
+    shutdown();
+}
+
+void HttpClient::shutdown() {
+    std::unique_lock<std::mutex> lock(activeMutex_);
+    shuttingDown_ = true;
+    for (auto& kv : activeRequests_) {
+        if (kv.second) {
+            kv.second->store(true);
+        }
+    }
+    // Detached workers can't be joined, so give them a bounded window to
+    // observe cancellation and finish touching shared state. A worker blocked
+    // in a slow network read may exceed this; the wait is a best-effort guard
+    // against use-after-free of this singleton at exit, not a hard guarantee.
+    activeCv_.wait_for(lock, std::chrono::seconds(3),
+                       [this] { return inFlight_ == 0; });
+}
+
 uint64_t HttpClient::postAsync(const std::string& url,
                                const std::map<std::string, std::string>& headers,
                                const std::string& body,
@@ -234,7 +254,13 @@ uint64_t HttpClient::postAsync(const std::string& url,
 
     {
         std::lock_guard<std::mutex> lock(activeMutex_);
+        if (shuttingDown_) {
+            // App is tearing down; don't launch new work that could touch
+            // singletons mid-destruction. Caller treats id 0 as not dispatched.
+            return 0;
+        }
         activeRequests_[requestId] = cancelToken;
+        ++inFlight_;
     }
 
     // 捕获当前配置快照，避免后台线程读取时与 setter 竞争
@@ -264,6 +290,13 @@ uint64_t HttpClient::postAsync(const std::string& url,
         auto removeFromActive = [this, requestId]() {
             std::lock_guard<std::mutex> lock(activeMutex_);
             activeRequests_.erase(requestId);
+            // Signal shutdown() once the last in-flight worker is done with
+            // HttpClient state. (completeSafely runs after this but only
+            // touches the caller's callback, not this singleton.)
+            if (--inFlight_ <= 0) {
+                inFlight_ = 0;
+                activeCv_.notify_all();
+            }
         };
 
         auto completeSafely = [&](HttpResponse resp) {

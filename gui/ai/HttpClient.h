@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -68,9 +69,15 @@ public:
     // 取消进行中的请求
     void cancelRequest(uint64_t requestId);
 
+    // Cancel every in-flight request and wait (bounded) for their detached
+    // worker threads to stop touching shared state, so a streaming request
+    // can't outlive this singleton (or UIMessageQueue) during app teardown.
+    // Call this from main() before static destruction; idempotent.
+    void shutdown();
+
 private:
     HttpClient() = default;
-    ~HttpClient() = default;
+    ~HttpClient();
     HttpClient(const HttpClient&) = delete;
     HttpClient& operator=(const HttpClient&) = delete;
 
@@ -82,7 +89,10 @@ private:
 
     // Active request table: requestId -> cancellation token.
     std::mutex activeMutex_;
+    std::condition_variable activeCv_;
     std::unordered_map<uint64_t, CancellationToken> activeRequests_;
+    int inFlight_ = 0;          // detached workers still running; guarded by activeMutex_
+    bool shuttingDown_ = false; // set by shutdown(); guarded by activeMutex_
 
     std::atomic<uint64_t> nextRequestId_{1};
 };

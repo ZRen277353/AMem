@@ -8,6 +8,9 @@
 #include "renderer/StyleSetup.h"
 #include "ExceptionHandler.h"
 #include "ipc/IpcServer.h"
+#ifdef HAVE_AI_CHAT
+#include "ai/HttpClient.h"
+#endif
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -120,6 +123,13 @@ int main(int, char**)
 
     // 停止 IPC Server
     IpcServer::GetInstance().Stop();
+
+#ifdef HAVE_AI_CHAT
+    // Drain in-flight AI HTTP requests so their detached worker threads can't
+    // outlive the singletons (HttpClient / UIMessageQueue) they touch during
+    // static destruction.
+    AI::HttpClient::getInstance().shutdown();
+#endif
 
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
