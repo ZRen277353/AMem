@@ -1261,25 +1261,29 @@ std::string execGetScanCount(const std::string& /*argsJson*/) {
 std::string execGetScanResults(const std::string& argsJson) {
     try {
         const json args = argsJson.empty() ? json::object() : json::parse(argsJson);
-        const int offset = optionalIntArg(
-            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
-        const int count = optionalIntArg(args, "count", 100, 1, 1000);
 
-        std::vector<std::pair<uint64_t, uint64_t>> raw;
-        if (!GetScanResult(offset, count, raw, PORT_MAIN)) {
-            return makeError("socket communication error: get_scan_results");
-        }
+        // Fetch the total first so the offset can be clamped against it. This
+        // avoids sending an out-of-range offset to the device (which surfaces
+        // as an opaque socket error) and mirrors the IPC get_scan_results path.
         const int total = GetScanResultCount(PORT_MAIN);
         if (total < 0) {
             return makeError("socket communication error: get_scan_count");
         }
+        const int offset = optionalIntArg(args, "offset", 0, 0, (std::max)(total, 0));
+        const int count = optionalIntArg(args, "count", 100, 1, 1000);
 
         json entries = json::array();
-        for (const auto& kv : raw) {
-            json entry;
-            entry["address"] = toHexAddress(kv.first);
-            entry["value"] = static_cast<uint64_t>(kv.second);
-            entries.push_back(std::move(entry));
+        if (offset < total) {
+            std::vector<std::pair<uint64_t, uint64_t>> raw;
+            if (!GetScanResult(offset, count, raw, PORT_MAIN)) {
+                return makeError("socket communication error: get_scan_results");
+            }
+            for (const auto& kv : raw) {
+                json entry;
+                entry["address"] = toHexAddress(kv.first);
+                entry["value"] = static_cast<uint64_t>(kv.second);
+                entries.push_back(std::move(entry));
+            }
         }
 
         json result;
