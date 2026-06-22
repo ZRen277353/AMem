@@ -1,7 +1,9 @@
 #include "IpcServer.h"
 #include "../socket/client_singleton.h"
+#include "../socket/socket_io_timeout.h"
 #include "../gui/AppContext.h"
 #include "../gui/Gui.h"
+#include "../gui/MemoryTypes.h"
 
 #ifdef HAVE_LUAJIT
 #include "../lua/LuaEngine.h"
@@ -24,6 +26,22 @@ namespace {
 constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
 constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
 constexpr size_t kMaxIpcBatchReadCount = 100000;
+constexpr uint64_t kMaxIpcBatchReadTotalBytes = 256ull * 1024ull * 1024ull;
+constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
+constexpr int kMaxIpcLuaTimeoutSeconds = 300;
+constexpr size_t kMaxIpcStringParamBytes = 4096;
+constexpr size_t kMaxIpcLuaCodeBytes = 256 * 1024;
+constexpr size_t kMaxIpcScanHexBytes = 4096;
+constexpr size_t kMaxIpcOffsetChainLength = 1024;
+constexpr int kKnownMemoryTypeMask =
+    Anonymous | C_Alloc | C_Heap | C_Data | C_Bss | Java_Heap |
+    Java | Stack | Video | Code_App | Code_System | Ashmem | Bad;
+
+bool isBlankString(const std::string& value) {
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    });
+}
 
 bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const char* expected) {
     size_t expectedLen = 0;
@@ -43,8 +61,45 @@ bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const c
     return true;
 }
 
-bool parseContentLengthHeader(const std::string& headers, size_t& outLength) {
+struct HttpRequestLine {
+    std::string method;
+    std::string target;
+};
+
+bool parseRequestLine(const std::string& headers, HttpRequestLine& out) {
+    const size_t lineEnd = headers.find("\r\n");
+    const std::string line =
+        headers.substr(0, lineEnd == std::string::npos ? headers.size() : lineEnd);
+    const size_t methodEnd = line.find(' ');
+    if (methodEnd == std::string::npos || methodEnd == 0) {
+        return false;
+    }
+
+    const size_t targetEnd = line.find(' ', methodEnd + 1);
+    if (targetEnd == std::string::npos || targetEnd == methodEnd + 1) {
+        return false;
+    }
+
+    const std::string version = line.substr(targetEnd + 1);
+    if (version.rfind("HTTP/", 0) != 0) {
+        return false;
+    }
+
+    out.method = line.substr(0, methodEnd);
+    out.target = line.substr(methodEnd + 1, targetEnd - methodEnd - 1);
+    return true;
+}
+
+std::string pathWithoutQuery(const std::string& target) {
+    const size_t query = target.find('?');
+    return query == std::string::npos ? target : target.substr(0, query);
+}
+
+bool parseContentLengthHeader(const std::string& headers,
+                              size_t& outLength,
+                              bool& outFound) {
     outLength = 0;
+    outFound = false;
     size_t lineStart = 0;
     while (lineStart < headers.size()) {
         size_t lineEnd = headers.find("\r\n", lineStart);
@@ -93,6 +148,7 @@ bool parseContentLengthHeader(const std::string& headers, size_t& outLength) {
                     parsed = parsed * 10 + digit;
                 }
                 outLength = parsed;
+                outFound = true;
                 return true;
             }
         }
@@ -136,8 +192,198 @@ uint32_t getPositiveSizeParam(const json& params,
     return static_cast<uint32_t>(value);
 }
 
+std::string getStringParam(const json& params,
+                           const char* key,
+                           const std::string& defaultValue,
+                           bool required,
+                           bool allowEmpty,
+                           size_t maxLength) {
+    if (!params.contains(key)) {
+        if (required) {
+            throw std::invalid_argument(std::string(key) + " is required");
+        }
+        return defaultValue;
+    }
+
+    const auto& raw = params.at(key);
+    if (!raw.is_string()) {
+        throw std::invalid_argument(std::string(key) + " must be a string");
+    }
+
+    std::string value = raw.get<std::string>();
+    if (!allowEmpty && isBlankString(value)) {
+        throw std::invalid_argument(std::string(key) + " must not be empty");
+    }
+    if (value.size() > maxLength) {
+        throw std::invalid_argument(std::string(key) + " is too long");
+    }
+    return value;
+}
+
+int getClampedIntParam(const json& params,
+                       const char* key,
+                       int defaultValue,
+                       int minValue,
+                       int maxValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+
+    int64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        const uint64_t unsignedValue = raw.get<uint64_t>();
+        value = unsignedValue > static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())
+                    ? (std::numeric_limits<int64_t>::max)()
+                    : static_cast<int64_t>(unsignedValue);
+    } else if (raw.is_number_integer()) {
+        value = raw.get<int64_t>();
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return static_cast<int>(value);
+}
+
+int getOptionalIntParam(const json& params, const char* key, int defaultValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+
+    int64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        const uint64_t unsignedValue = raw.get<uint64_t>();
+        if (unsignedValue > static_cast<uint64_t>((std::numeric_limits<int>::max)())) {
+            throw std::invalid_argument(std::string(key) + " out of range");
+        }
+        value = static_cast<int64_t>(unsignedValue);
+    } else if (raw.is_number_integer()) {
+        value = raw.get<int64_t>();
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value < (std::numeric_limits<int>::min)() ||
+        value > (std::numeric_limits<int>::max)()) {
+        throw std::invalid_argument(std::string(key) + " out of range");
+    }
+    return static_cast<int>(value);
+}
+
+int getRequiredPositiveIntParam(const json& params, const char* key) {
+    if (!params.contains(key)) {
+        throw std::invalid_argument(std::string(key) + " is required");
+    }
+
+    uint64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        value = raw.get<uint64_t>();
+    } else if (raw.is_number_integer()) {
+        const int64_t signedValue = raw.get<int64_t>();
+        if (signedValue <= 0) {
+            throw std::invalid_argument(std::string(key) + " must be positive");
+        }
+        value = static_cast<uint64_t>(signedValue);
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value == 0 ||
+        value > static_cast<uint64_t>((std::numeric_limits<int>::max)())) {
+        throw std::invalid_argument(std::string(key) + " out of range");
+    }
+    return static_cast<int>(value);
+}
+
+uint32_t getOptionalPositiveUintParam(const json& params,
+                                      const char* key,
+                                      uint32_t defaultValue,
+                                      uint32_t maxValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+
+    uint64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        value = raw.get<uint64_t>();
+    } else if (raw.is_number_integer()) {
+        const int64_t signedValue = raw.get<int64_t>();
+        if (signedValue <= 0) {
+            throw std::invalid_argument(std::string(key) + " must be positive");
+        }
+        value = static_cast<uint64_t>(signedValue);
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value == 0 || value > maxValue) {
+        throw std::invalid_argument(std::string(key) + " out of range");
+    }
+    return static_cast<uint32_t>(value);
+}
+
+uint32_t getRequiredUint32Param(const json& params, const char* key) {
+    if (!params.contains(key)) {
+        throw std::invalid_argument(std::string(key) + " is required");
+    }
+
+    uint64_t value = 0;
+    const auto& raw = params.at(key);
+    if (raw.is_number_unsigned()) {
+        value = raw.get<uint64_t>();
+    } else if (raw.is_number_integer()) {
+        const int64_t signedValue = raw.get<int64_t>();
+        if (signedValue < 0) {
+            throw std::invalid_argument(std::string(key) + " must be non-negative");
+        }
+        value = static_cast<uint64_t>(signedValue);
+    } else {
+        throw std::invalid_argument(std::string(key) + " must be an integer");
+    }
+
+    if (value > static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())) {
+        throw std::invalid_argument(std::string(key) + " out of range");
+    }
+    return static_cast<uint32_t>(value);
+}
+
+uint32_t getRequiredScanFlagsParam(const json& params) {
+    uint32_t flags = getRequiredUint32Param(params, "flags");
+    if (params.contains("scan_flag")) {
+        uint32_t scanFlag = getRequiredUint32Param(params, "scan_flag");
+        if (scanFlag != flags) {
+            throw std::invalid_argument(
+                "flags and scan_flag must match when both are provided");
+        }
+    }
+    return flags;
+}
+
+bool getOptionalBoolParam(const json& params, const char* key, bool defaultValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+    const auto& raw = params.at(key);
+    if (!raw.is_boolean()) {
+        throw std::invalid_argument(std::string(key) + " must be a boolean");
+    }
+    return raw.get<bool>();
+}
+
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
+bool isValidMemoryTypeFlags(int type) {
+    if (type == All || type == Other) {
+        return true;
+    }
+    return type > 0 && (type & ~kKnownMemoryTypeMask) == 0;
 }
 } // namespace
 
@@ -235,6 +481,9 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     bool contentLengthKnown = false;
     bool badRequest = false;
     bool requestTooLarge = false;
+    int earlyStatusCode = 0;
+    std::string earlyError;
+    HttpRequestLine requestLine;
     size_t headerEnd = std::string::npos;
 
     while (true) {
@@ -247,11 +496,40 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             headerEnd = raw.find("\r\n\r\n");
             if (headerEnd != std::string::npos) {
                 const std::string headers = raw.substr(0, headerEnd);
-                if (!parseContentLengthHeader(headers, contentLength)) {
+                if (!parseRequestLine(headers, requestLine)) {
                     badRequest = true;
+                    earlyError = "Invalid HTTP request line";
                     break;
                 }
-                contentLengthKnown = true;
+
+                const std::string path = pathWithoutQuery(requestLine.target);
+                if (path != "/") {
+                    earlyStatusCode = 404;
+                    earlyError = "Unknown IPC endpoint";
+                    break;
+                }
+
+                if (requestLine.method != "POST" &&
+                    requestLine.method != "OPTIONS") {
+                    earlyStatusCode = 405;
+                    earlyError = "Unsupported HTTP method";
+                    break;
+                }
+
+                if (!parseContentLengthHeader(headers,
+                                              contentLength,
+                                              contentLengthKnown)) {
+                    badRequest = true;
+                    earlyError = "Invalid Content-Length";
+                    break;
+                }
+
+                if (requestLine.method == "POST" && !contentLengthKnown) {
+                    badRequest = true;
+                    earlyError = "Missing Content-Length";
+                    break;
+                }
+
                 if (contentLength > kMaxHttpRequestBytes ||
                     headerEnd + 4 > kMaxHttpRequestBytes - contentLength) {
                     requestTooLarge = true;
@@ -265,14 +543,30 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             if (raw.size() >= bodyStart && raw.size() - bodyStart >= contentLength) break;
         }
 
+        if (headerEnd != std::string::npos &&
+            requestLine.method == "OPTIONS" &&
+            !contentLengthKnown) {
+            break;
+        }
+
         if (raw.size() > kMaxHttpRequestBytes) {
             requestTooLarge = true;
             break;
         }
     }
 
+    if (earlyStatusCode != 0) {
+        json response = {{"success", false}, {"error", earlyError}};
+        std::string httpResp = BuildHttpResponse(earlyStatusCode, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
+    }
+
     if (badRequest || headerEnd == std::string::npos) {
-        json response = {{"success", false}, {"error", "Invalid HTTP request"}};
+        json response = {{"success", false},
+                         {"error", earlyError.empty() ? "Invalid HTTP request"
+                                                       : earlyError}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
         ::closesocket(sock);
@@ -288,13 +582,23 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     }
 
     // 提取 body
-    std::string body;
     const size_t bodyStart = headerEnd + 4;
-    if (raw.size() >= bodyStart)
+    if (contentLengthKnown &&
+        (raw.size() < bodyStart || raw.size() - bodyStart < contentLength)) {
+        json response = {{"success", false},
+                         {"error", "Incomplete HTTP request body"}};
+        std::string httpResp = BuildHttpResponse(400, response.dump());
+        ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
+        ::closesocket(sock);
+        return;
+    }
+
+    std::string body;
+    if (contentLengthKnown && raw.size() >= bodyStart)
         body = raw.substr(bodyStart, contentLength);
 
     // 处理 CORS preflight
-    if (raw.substr(0, 7) == "OPTIONS") {
+    if (requestLine.method == "OPTIONS") {
         std::string resp = "HTTP/1.1 204 No Content\r\n"
             "Access-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
@@ -333,6 +637,7 @@ std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body
     case 204: reason = "No Content"; break;
     case 400: reason = "Bad Request"; break;
     case 404: reason = "Not Found"; break;
+    case 405: reason = "Method Not Allowed"; break;
     case 413: reason = "Payload Too Large"; break;
     case 500: reason = "Internal Server Error"; break;
     default:  reason = "Unknown"; break;
@@ -356,6 +661,9 @@ json IpcServer::DispatchRequest(const json& request) {
 
     std::string method = request["method"].get<std::string>();
     json params = request.value("params", json::object());
+    if (!params.is_object()) {
+        return {{"success", false}, {"error", "params must be an object"}};
+    }
 
     Gui::log("[IPC] 收到请求: %s", method.c_str());
 
@@ -398,21 +706,119 @@ static int HexNibble(char c) {
 }
 
 static std::vector<unsigned char> HexToBytes(const std::string& hex) {
-    if ((hex.size() % 2) != 0) {
+    std::string cleaned;
+    cleaned.reserve(hex.size());
+    for (char ch : hex) {
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
+            cleaned.push_back(ch);
+        }
+    }
+
+    if ((cleaned.size() % 2) != 0) {
         throw std::invalid_argument("hex string must contain an even number of digits");
     }
 
     std::vector<unsigned char> out;
-    out.reserve(hex.size() / 2);
-    for (size_t i = 0; i < hex.size(); i += 2) {
-        int hi = HexNibble(hex[i]);
-        int lo = HexNibble(hex[i + 1]);
+    out.reserve(cleaned.size() / 2);
+    for (size_t i = 0; i < cleaned.size(); i += 2) {
+        int hi = HexNibble(cleaned[i]);
+        int lo = HexNibble(cleaned[i + 1]);
         if (hi < 0 || lo < 0) {
             throw std::invalid_argument("hex string contains non-hex characters");
         }
         out.push_back(static_cast<unsigned char>((hi << 4) | lo));
     }
     return out;
+}
+
+static bool ScanNextFlagRequiresValue(uint32_t flag) {
+    return (flag & (_ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+                    _CHANGED_VAL | _UNCHANGED_VAL)) == 0;
+}
+
+constexpr uint32_t kIpcValueScanFlags =
+    _ACCURATE_VAL | _LARGER_THAN_VAL |
+    _LESS_THAN_VAL | _BETWEEN_VAL;
+constexpr uint32_t kIpcNextScanFlags =
+    _ACCURATE_VAL | _LARGER_THAN_VAL | _LESS_THAN_VAL | _BETWEEN_VAL |
+    _ADD_UNKNOW_VAL | _ADD_ACCURATE_VAL |
+    _SUB_UNKNOW_VAL | _SUB_ACCURATE_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kIpcFuzzyScanFlags =
+    _UNKNOW_VAL | _ADD_UNKNOW_VAL | _SUB_UNKNOW_VAL |
+    _CHANGED_VAL | _UNCHANGED_VAL;
+constexpr uint32_t kIpcDataTypeFlags =
+    BYTE_ | WORD_ | DWORD_ | XOR_ | FLOAT_ | QWORD_ | DOUBLE_;
+
+static void ValidateScanFlags(uint32_t flags,
+                              uint32_t allowedScanFlags,
+                              const char* method,
+                              bool allowMissingScanMode) {
+    if ((flags & ~(allowedScanFlags | kIpcDataTypeFlags)) != 0) {
+        throw std::invalid_argument(std::string(method) + " flags contain unsupported bits");
+    }
+
+    const uint32_t scanModeBits = flags & allowedScanFlags;
+    if (scanModeBits == 0 && !allowMissingScanMode) {
+        throw std::invalid_argument(std::string(method) + " flags must contain a scan type");
+    }
+    if (scanModeBits != 0 && (scanModeBits & (scanModeBits - 1)) != 0) {
+        throw std::invalid_argument(std::string(method) + " flags contain multiple scan types");
+    }
+
+    const uint32_t dataTypeBits = flags & kIpcDataTypeFlags;
+    if (dataTypeBits == 0 || (dataTypeBits & (dataTypeBits - 1)) != 0) {
+        throw std::invalid_argument(std::string(method) +
+                                    " flags must contain exactly one data type");
+    }
+}
+
+static size_t ScanValueSizeFromFlags(uint32_t flags) {
+    if ((flags & BYTE_) != 0) return 1;
+    if ((flags & WORD_) != 0) return 2;
+    if ((flags & (DWORD_ | XOR_ | FLOAT_)) != 0) return 4;
+    if ((flags & (QWORD_ | DOUBLE_)) != 0) return 8;
+    return 4;
+}
+
+static std::vector<unsigned char> ScanBytesFromIpcValue(const json& params,
+                                                        uint32_t flags,
+                                                        bool requireValue) {
+    std::vector<unsigned char> bytes;
+    if (params.contains("value_hex") && params["value_hex"].is_string()) {
+        bytes = HexToBytes(params["value_hex"].get<std::string>());
+    } else if (params.contains("hex") && params["hex"].is_string()) {
+        bytes = HexToBytes(params["hex"].get<std::string>());
+    } else if (requireValue) {
+        throw std::invalid_argument("value_hex is required for this scan type");
+    } else {
+        bytes.assign(ScanValueSizeFromFlags(flags), 0);
+        return bytes;
+    }
+
+    if ((flags & _BETWEEN_VAL) != 0) {
+        const size_t singleSize = ScanValueSizeFromFlags(flags);
+        if (params.contains("value2_hex") && params["value2_hex"].is_string()) {
+            std::vector<unsigned char> upper =
+                HexToBytes(params["value2_hex"].get<std::string>());
+            if (bytes.size() != singleSize || upper.size() != singleSize) {
+                throw std::invalid_argument(
+                    "between scan values must match data type size");
+            }
+            bytes.insert(bytes.end(), upper.begin(), upper.end());
+        } else if (bytes.size() != singleSize * 2) {
+            throw std::invalid_argument(
+                "between scan requires value2_hex or combined value_hex");
+        }
+    } else if (bytes.size() != ScanValueSizeFromFlags(flags)) {
+        throw std::invalid_argument(
+            "scan value size must match data type size");
+    }
+
+    if (bytes.empty()) {
+        throw std::invalid_argument("value_hex is empty");
+    }
+    return bytes;
 }
 
 static uint64_t ParseAddress(const json& params, const std::string& key) {
@@ -489,7 +895,8 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── init_driver ──────────────────────────────────────────────
     RegisterMethod("init_driver", [](const json& p) -> json {
-        std::string card = p.value("card", "");
+        std::string card = getStringParam(
+            p, "card", "", true, false, kMaxIpcStringParamBytes);
         std::string resStr;
         if (!InitDriver(card, resStr))
             return {{"success", false}, {"error", "初始化驱动失败: " + resStr}};
@@ -508,7 +915,7 @@ void IpcServer::RegisterBuiltinMethods() {
     });
     // ── open_process ──────────────────────────────────────────────
     RegisterMethod("open_process", [](const json& p) -> json {
-        int pid = p.at("pid").get<int>();
+        int pid = getRequiredPositiveIntParam(p, "pid");
         AppContext::Get().selectProcess(pid, "");
         int handle = AppContext::Get().processHandle.load(std::memory_order_relaxed);
         if (handle == 0)
@@ -523,7 +930,8 @@ void IpcServer::RegisterBuiltinMethods() {
             return {{"success", false}, {"error", "获取模块列表失败"}};
 
         // 可选：名称过滤（大小写不敏感子串匹配）
-        std::string filter = p.value("filter", "");
+        std::string filter = getStringParam(
+            p, "filter", "", false, true, kMaxIpcStringParamBytes);
         std::vector<ModuleInfoItem*> filtered;
         if (!filter.empty()) {
             std::string lowerFilter = filter;
@@ -541,11 +949,8 @@ void IpcServer::RegisterBuiltinMethods() {
         }
 
         int total = (int)filtered.size();
-        int offset = p.value("offset", 0);
-        int count = p.value("count", 200);
-        if (count > 1000) count = 1000;
-        if (offset < 0) offset = 0;
-        if (offset > total) offset = total;
+        int offset = getClampedIntParam(p, "offset", 0, 0, total);
+        int count = getClampedIntParam(p, "count", 200, 1, 1000);
         int end = (std::min)(offset + count, total);
 
         json arr = json::array();
@@ -576,14 +981,15 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── write_memory ─────────────────────────────────────────────
     RegisterMethod("write_memory", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        std::string hexStr = p.at("hex").get<std::string>();
-        if (hexStr.empty()) {
-            return {{"success", false}, {"error", "hex 不能为空"}};
-        }
-        if (hexStr.size() > static_cast<size_t>(kMaxIpcMemoryTransferBytes) * 2) {
-            return {{"success", false}, {"error", "写入数据超过 IPC 限制"}};
-        }
+        std::string hexStr = getStringParam(
+            p, "hex", "", true, false, kMaxHttpRequestBytes);
         auto data = HexToBytes(hexStr);
+        if (data.empty()) {
+            return {{"success", false}, {"error", "hex is empty"}};
+        }
+        if (data.size() > kMaxIpcMemoryTransferBytes) {
+            return {{"success", false}, {"error", "write data exceeds IPC limit"}};
+        }
         uint32_t size = (uint32_t)data.size();
         if (!WriteProcessMemoryBytes(addr, size, data))
             return {{"success", false}, {"error", "写入内存失败"}};
@@ -592,7 +998,10 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── read_batch ───────────────────────────────────────────────
     RegisterMethod("read_batch", [](const json& p) -> json {
-        auto& addrsArr = p.at("addresses");
+        if (!p.contains("addresses")) {
+            throw std::invalid_argument("addresses is required");
+        }
+        const auto& addrsArr = p.at("addresses");
         if (!addrsArr.is_array()) {
             return {{"success", false}, {"error", "addresses 必须是数组"}};
         }
@@ -601,9 +1010,14 @@ void IpcServer::RegisterBuiltinMethods() {
         }
         std::vector<std::pair<uint64_t, int32_t>> addrs;
         addrs.reserve(addrsArr.size());
+        uint64_t totalBytes = 0;
         for (auto& item : addrsArr) {
             uint64_t a = ParseAddress(item, "address");
             uint32_t s = getPositiveSizeParam(item, "size", 4u, kMaxIpcMemoryTransferBytes);
+            if (totalBytes > kMaxIpcBatchReadTotalBytes - s) {
+                return {{"success", false}, {"error", "read_batch total size exceeds IPC limit"}};
+            }
+            totalBytes += s;
             addrs.push_back({a, s});
         }
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> out;
@@ -620,7 +1034,10 @@ void IpcServer::RegisterBuiltinMethods() {
     });
     // ── scan_set_range ────────────────────────────────────────────
     RegisterMethod("scan_set_range", [](const json& p) -> json {
-        int type = p.value("type", -1); // -1 = MEM_ALL
+        int type = getOptionalIntParam(p, "type", All);
+        if (!isValidMemoryTypeFlags(type)) {
+            return {{"success", false}, {"error", "type contains unsupported memory flags"}};
+        }
         if (!ScanSetRange(type))
             return {{"success", false}, {"error", "设置扫描范围失败"}};
         return {{"success", true}, {"result", nullptr}};
@@ -628,9 +1045,9 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_value ───────────────────────────────────────────────
     RegisterMethod("scan_value", [](const json& p) -> json {
-        uint32_t flags = p.at("flags").get<uint32_t>();
-        std::string hexVal = p.at("value_hex").get<std::string>();
-        auto valBytes = HexToBytes(hexVal);
+        uint32_t flags = getRequiredScanFlagsParam(p);
+        ValidateScanFlags(flags, kIpcValueScanFlags, "scan_value", false);
+        auto valBytes = ScanBytesFromIpcValue(p, flags, true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -642,10 +1059,15 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_next ────────────────────────────────────────────────
     RegisterMethod("scan_next", [](const json& p) -> json {
-        uint32_t flags = p.at("flags").get<uint32_t>();
-        std::string hexVal = p.at("value_hex").get<std::string>();
-        auto valBytes = HexToBytes(hexVal);
-        int flag = p.value("scan_flag", static_cast<int>(flags));
+        uint32_t flagValue = getRequiredScanFlagsParam(p);
+        ValidateScanFlags(flagValue, kIpcNextScanFlags, "scan_next", false);
+        if (flagValue > static_cast<uint32_t>((std::numeric_limits<int>::max)())) {
+            return {{"success", false}, {"error", "scan_flag out of range"}};
+        }
+        int flag = static_cast<int>(flagValue);
+        auto valBytes = ScanBytesFromIpcValue(
+            p, static_cast<uint32_t>(flag),
+            ScanNextFlagRequiresValue(static_cast<uint32_t>(flag)));
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -657,7 +1079,8 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_fuzzy ───────────────────────────────────────────────
     RegisterMethod("scan_fuzzy", [](const json& p) -> json {
-        uint32_t flags = p.at("flags").get<uint32_t>();
+        uint32_t flags = getRequiredScanFlagsParam(p);
+        ValidateScanFlags(flags, kIpcFuzzyScanFlags, "scan_fuzzy", true);
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -669,8 +1092,15 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── scan_hex ─────────────────────────────────────────────────
     RegisterMethod("scan_hex", [](const json& p) -> json {
-        std::string hexPattern = p.at("pattern_hex").get<std::string>();
+        std::string hexPattern = getStringParam(
+            p, "pattern_hex", "", true, false, kMaxHttpRequestBytes);
         auto patternBytes = HexToBytes(hexPattern);
+        if (patternBytes.empty()) {
+            return {{"success", false}, {"error", "pattern_hex is empty"}};
+        }
+        if (patternBytes.size() > kMaxIpcScanHexBytes) {
+            return {{"success", false}, {"error", "HEX scan pattern exceeds IPC limit"}};
+        }
         uint64_t start = 0, end = UINT64_MAX;
         if (p.contains("start")) start = ParseAddress(p, "start");
         if (p.contains("end")) end = ParseAddress(p, "end");
@@ -693,11 +1123,8 @@ void IpcServer::RegisterBuiltinMethods() {
         int total = GetScanResultCount();
         if (total < 0)
             return {{"success", false}, {"error", "获取扫描结果数量失败"}};
-        int offset = p.value("offset", 0);
-        int count = p.value("count", 20);
-        if (count < 1) count = 1;
-        if (count > 1000) count = 1000;
-        if (offset < 0) offset = 0;
+        int offset = getClampedIntParam(p, "offset", 0, 0, (std::max)(total, 0));
+        int count = getClampedIntParam(p, "count", 20, 1, 1000);
         if (offset >= total) {
             return {{"success", true}, {"result", {{"total", total}, {"offset", offset}, {"items", json::array()}}}};
         }
@@ -722,13 +1149,16 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── set_breakpoint ────────────────────────────────────────────
     RegisterMethod("set_breakpoint", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        uint32_t bpType = p.value("bp_type", 1u);
-        uint32_t bpSize = p.value("bp_size", 4u);
+        uint32_t bpType = getOptionalPositiveUintParam(p, "bp_type", 2u, 4u);
+        uint32_t bpSize = getOptionalPositiveUintParam(p, "bp_size", 4u, 8u);
         if (bpType < 1 || bpType > 4) {
             return {{"success", false}, {"error", "bp_type 必须在 1 到 4 之间"}};
         }
         if (!isValidBreakpointSize(bpSize)) {
             return {{"success", false}, {"error", "bp_size 必须为 1、2、4 或 8"}};
+        }
+        if (bpType == 4) {
+            bpSize = 4;
         }
         if (!SetKernelBreakpoint(addr, bpType, bpSize))
             return {{"success", false}, {"error", "设置断点失败"}};
@@ -788,14 +1218,23 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── execute_lua ───────────────────────────────────────────────
 #ifdef HAVE_LUAJIT
     RegisterMethod("execute_lua", [](const json& p) -> json {
-        std::string code = p.at("code").get<std::string>();
+        std::string code = getStringParam(
+            p, "code", "", true, false, kMaxIpcLuaCodeBytes);
+        int timeoutSeconds = getClampedIntParam(
+            p, "timeout_seconds", kDefaultIpcLuaTimeoutSeconds,
+            1, kMaxIpcLuaTimeoutSeconds);
         auto& engine = LuaEngine::GetInstance();
         if (!engine.IsInitialized()) {
             if (!engine.Initialize())
                 return {{"success", false}, {"error", "Lua 引擎初始化失败: " + engine.GetLastError()}};
         }
         std::string output;
-        bool ok = engine.ExecuteStringCapture(code, "ipc", output);
+        SocketIoTimeout::ScopedTimeout luaTimeout(timeoutSeconds);
+        bool ok = engine.ExecuteStringCapture(
+            code,
+            "ipc",
+            output,
+            static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()));
         if (!ok)
             return {{"success", false}, {"error", engine.GetLastError()}, {"output", output}};
         return {{"success", true}, {"result", {{"output", output}}}};
@@ -804,7 +1243,8 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── get_module_base ──────────────────────────────────────────
     RegisterMethod("get_module_base", [](const json& p) -> json {
-        std::string name = p.at("name").get<std::string>();
+        std::string name = getStringParam(
+            p, "name", "", true, false, kMaxIpcStringParamBytes);
         uint64_t base = 0;
         if (!GetModuleBaseByName(name, base))
             return {{"success", false}, {"error", "获取模块基址失败"}};
@@ -815,14 +1255,23 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── resolve_offset_chain ─────────────────────────────────────
     RegisterMethod("resolve_offset_chain", [](const json& p) -> json {
-        std::string moduleName = p.at("module").get<std::string>();
+        std::string moduleName = getStringParam(
+            p, "module", "", true, false, kMaxIpcStringParamBytes);
         uint64_t baseOffset = ParseAddress(p, "base_offset");
         std::vector<uint64_t> offsets;
         if (p.contains("offsets")) {
-            for (auto& o : p["offsets"])
-                offsets.push_back(o.get<uint64_t>());
+            const auto& offsetValues = p["offsets"];
+            if (!offsetValues.is_array()) {
+                throw std::invalid_argument("offsets must be an array");
+            }
+            if (offsetValues.size() > kMaxIpcOffsetChainLength) {
+                throw std::invalid_argument("offsets is too long");
+            }
+            for (const auto& o : offsetValues) {
+                offsets.push_back(ParseAddress(json{{"offset", o}}, "offset"));
+            }
         }
-        bool derefFinal = p.value("deref_final", true);
+        bool derefFinal = getOptionalBoolParam(p, "deref_final", true);
         uint64_t result = 0;
         if (!ResolveModuleOffsetChain(result, moduleName, baseOffset, offsets, derefFinal))
             return {{"success", false}, {"error", "解析偏移链失败"}};
@@ -842,11 +1291,9 @@ void IpcServer::RegisterBuiltinMethods() {
 
     // ── symbol_list ────────────────────────────────────────────────
     RegisterMethod("symbol_list", [](const json& p) -> json {
-        int offset = p.value("offset", 0);
-        int count = p.value("count", 100);
-        if (offset < 0) offset = 0;
-        if (count < 0) count = 0;
-        if (count > 1000) count = 1000;
+        int offset = getClampedIntParam(
+            p, "offset", 0, 0, (std::numeric_limits<int>::max)());
+        int count = getClampedIntParam(p, "count", 100, 1, 1000);
 
         int totalCount = 0;
         std::vector<std::pair<uint64_t, std::string>> symbols;
@@ -872,7 +1319,8 @@ void IpcServer::RegisterBuiltinMethods() {
     // ── symbol_find ────────────────────────────────────────────────
     RegisterMethod("symbol_find", [](const json& p) -> json {
         uint64_t moduleBase = ParseAddress(p, "module_base");
-        std::string name = p.at("name").get<std::string>();
+        std::string name = getStringParam(
+            p, "name", "", true, false, kMaxIpcStringParamBytes);
         uint64_t address = 0;
         if (!SymbolFind(moduleBase, name, address) || address == 0)
             return {{"success", false}, {"error", "查找符号失败"}};
