@@ -470,14 +470,12 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
                                 const std::string& eventData) {
             CompletionResponse delta = this->parseSSEChunk(eventData);
             if (delta.error) {
-                // Surface the parse failure to the UI via a Token message is
-                // inappropriate; deliver it as a completion-style error on
-                // the UI queue so the window can show it inline.
-                UIMessage msg;
-                msg.type = UIMessageType::Error;
-                msg.runId = requestCopy->runId;
-                msg.data = delta.error.message;
-                UIMessageQueue::getInstance().push(std::move(msg));
+                // A single malformed SSE chunk is non-fatal: skip it and keep
+                // consuming the stream (matching DeepSeekProvider). The final
+                // message is still assembled from the chunks that parsed, and a
+                // genuinely broken response is caught via the HTTP status in the
+                // completion callback. Aborting the whole turn here would discard
+                // good content already streamed for one transient bad chunk.
                 return;
             }
 

@@ -750,11 +750,32 @@ std::vector<unsigned char> encodeScanValue(const std::string& valueType, const j
     } else if (t == "int64") {
         out = integerToLittleEndian(parseIntegerBits(asString(), 64, valueType), 8);
     } else if (t == "float") {
-        const float fv = parseFloatValueStrict(asString(), valueType);
+        // Take a JSON number directly rather than round-tripping through
+        // std::to_string(): std::to_string(double) formats with "%f" (6
+        // fractional digits), which would silently truncate the value before
+        // it is re-parsed. Only string inputs go through the strict parser.
+        float fv;
+        if (value.is_number()) {
+            fv = value.get<float>();
+            if (!std::isfinite(fv)) {
+                throw std::runtime_error("invalid " + valueType + " value");
+            }
+        } else {
+            fv = parseFloatValueStrict(asString(), valueType);
+        }
         out.resize(sizeof(fv));
         std::memcpy(out.data(), &fv, sizeof(fv));
     } else if (t == "double") {
-        const double dv = parseDoubleValueStrict(asString(), valueType);
+        // See the float branch above: avoid the lossy std::to_string round-trip.
+        double dv;
+        if (value.is_number()) {
+            dv = value.get<double>();
+            if (!std::isfinite(dv)) {
+                throw std::runtime_error("invalid " + valueType + " value");
+            }
+        } else {
+            dv = parseDoubleValueStrict(asString(), valueType);
+        }
         out.resize(sizeof(dv));
         std::memcpy(out.data(), &dv, sizeof(dv));
     } else if (t == "bytes") {
