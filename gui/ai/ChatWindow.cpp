@@ -993,10 +993,15 @@ void ChatWindow::drawInputArea() {
         ImGui::EndDisabled();
     }
 
-    // Stop can cancel model streaming and pending tool approval. Once a
-    // tool has started, let its result return so side effects are audited.
+    // Stop cancels model streaming, a pending tool approval, or an in-flight
+    // tool run. Once a tool has started we can't recall a side effect that
+    // already reached the device, but the user still gets an escape hatch: the
+    // run returns to Idle and the tool's late result is dropped by the runId
+    // gate in pollMessages(). The worker's socket I/O is bounded by the tool
+    // timeout, so the detached thread exits on its own.
     if (state_ == State::WaitingResponse ||
-        state_ == State::ToolConfirmation) {
+        state_ == State::ToolConfirmation ||
+        state_ == State::ToolExecuting) {
         if (ImGui::Button("Stop", ImVec2(80.0f, 36.0f))) {
             cancelRequest();
         }

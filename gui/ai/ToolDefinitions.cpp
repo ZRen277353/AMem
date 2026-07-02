@@ -1290,7 +1290,10 @@ std::string execGetScanResults(const std::string& argsJson) {
         if (total < 0) {
             return makeError("socket communication error: get_scan_count");
         }
-        const int offset = optionalIntArg(args, "offset", 0, 0, (std::max)(total, 0));
+        // Clamp a past-the-end offset to `total` (an empty page) instead of
+        // erroring, matching get_module_list and the IPC get_scan_results path.
+        int offset = optionalIntArg(args, "offset", 0, 0, (std::numeric_limits<int>::max)());
+        if (offset > total) offset = total;
         const int count = optionalIntArg(args, "count", 100, 1, 1000);
 
         json entries = json::array();
@@ -2798,9 +2801,9 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "symbol_list",
-        "List symbols from the active symbol table, optionally initializing a module first. Requires user confirmation.",
+        "List symbols from the active symbol table, optionally initializing a module first.",
         kSchemaSymbolList,
-        ToolSafety::Write,
+        ToolSafety::ReadOnly,
         &execSymbolList);
 
     registerTool(
