@@ -14,6 +14,14 @@ set(PROTOCOL_VERSION_PATCH 0)
 set(PROTOCOL_VERSION "${PROTOCOL_VERSION_MAJOR}.${PROTOCOL_VERSION_MINOR}.${PROTOCOL_VERSION_PATCH}")
 
 
+# ==================== 完全静态链接（单 exe 分发） ====================
+# 目标：产出自包含 exe，无需随附任何第三方 DLL 或 VC 运行时 DLL。
+# 静态 CRT（/MT）是硬约束：预编译的 LuaJIT lua51.lib 与官方 capstone.lib 均为 /MT（LIBCMT），
+# 整个 exe 必须 /MT 才能避免 CRT 状态/堆不一致的冲突。
+# CMP0091 需在第一个 project() 之前设为 NEW，MSVC_RUNTIME_LIBRARY 抽象方可生效。
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "静态 CRT (/MT)，单 exe 分发")
+
 project(ImGuiProject VERSION ${PROJECT_VERSION})
 set(CMAKE_CXX_STANDARD 17)
 
@@ -69,8 +77,8 @@ else()
     message(WARNING "Capstone not found! Disassembly features will be disabled.")
 endif()
 
-# 查找 Keystone 库
-set(keystone_ROOT "C:/vcpkg/installed/x64-windows" CACHE PATH "Keystone installation directory")
+# 查找 Keystone 库（完全静态，vcpkg x64-windows-static，/MT）
+set(keystone_ROOT "C:/vcpkg/installed/x64-windows-static" CACHE PATH "Keystone installation directory")
 
 find_path(KEYSTONE_INCLUDE_DIR keystone/keystone.h
     HINTS "${keystone_ROOT}/include" "${keystone_ROOT}" PATH_SUFFIXES include)
@@ -239,32 +247,14 @@ if(HAVE_LUAJIT)
     endif()
 endif()
 
-# 链接 Capstone 库
+# 链接 Capstone 库（静态 /MT，整体链入 exe，不分发 DLL）
 if(HAVE_CAPSTONE)
     target_link_libraries(ImGuiProject ${CAPSTONE_LIBRARIES})
     target_compile_definitions(ImGuiProject PRIVATE HAVE_CAPSTONE)
-
-    # 拷贝 capstone.dll 到输出目录
-    get_filename_component(_capstone_lib_dir ${CAPSTONE_LIBRARY} DIRECTORY)
-    get_filename_component(_capstone_bin_dir "${_capstone_lib_dir}/../bin" ABSOLUTE)
-    if(EXISTS "${_capstone_bin_dir}/capstone.dll")
-        add_custom_command(TARGET ImGuiProject POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_capstone_bin_dir}/capstone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/capstone.dll")
-    endif()
 endif()
 
-# 链接 Keystone 库
+# 链接 Keystone 库（静态 /MT，整体链入 exe，不分发 DLL）
 if(HAVE_KEYSTONE)
     target_link_libraries(ImGuiProject ${KEYSTONE_LIBRARIES})
     target_compile_definitions(ImGuiProject PRIVATE HAVE_KEYSTONE)
-
-    # 拷贝 keystone.dll 到输出目录
-    get_filename_component(_keystone_lib_dir ${KEYSTONE_LIBRARY} DIRECTORY)
-    get_filename_component(_keystone_bin_dir "${_keystone_lib_dir}/../bin" ABSOLUTE)
-    if(EXISTS "${_keystone_bin_dir}/keystone.dll")
-        add_custom_command(TARGET ImGuiProject POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_keystone_bin_dir}/keystone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/keystone.dll")
-    endif()
 endif()

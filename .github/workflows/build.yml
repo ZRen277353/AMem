@@ -43,17 +43,15 @@ jobs:
       run: cmake --build build --config ${{ env.BUILD_TYPE }}
       shell: bash
 
-    - name: Copy runtime DLLs
-      run: |
-        # 项目中已有预编译的 DLL，确保它们在输出目录
-        ls -la bin/
+    - name: Show build output
+      run: ls -la bin/
       shell: bash
 
     - name: Upload artifacts
+      # 完全静态链接（/MT + 静态第三方库）：产物是单个自包含 exe，无随附 DLL。
       uses: actions/upload-artifact@v4
       with:
         name: AMem-${{ github.sha }}
-        path: |
-          bin/ImGuiProject.exe
-          bin/*.dll
+        path: bin/ImGuiProject.exe
+        if-no-files-found: error
         retention-days: 7
