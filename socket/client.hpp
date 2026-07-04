@@ -306,8 +306,10 @@ public:
             if (sent == SOCKET_ERROR) {
                 int err = WSAGetLastError();
                 std::cerr << "send() failed: " << err << std::endl;
-                if (err == WSAETIMEDOUT || err == WSAECONNRESET ||
-                    err == WSAECONNABORTED) {
+                // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
+                // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接，
+                // 下一次请求前的 DrainPending() 会重新同步协议。
+                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
                     timeoutGuard.dismissRestore();
                     Close();
                 }
@@ -330,8 +332,11 @@ public:
             if (received == SOCKET_ERROR) {
                 int err = WSAGetLastError();
                 std::cerr << "recv() failed: " << err << std::endl;
-                if (err == WSAETIMEDOUT || err == WSAECONNRESET ||
-                    err == WSAECONNABORTED) {
+                // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
+                // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接。
+                // 此时设备的响应可能仍在途/已在缓冲区，下一次请求前的
+                // DrainPending() 会清掉这些过期字节、重新同步协议。
+                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
                     timeoutGuard.dismissRestore();
                     Close();
                 }

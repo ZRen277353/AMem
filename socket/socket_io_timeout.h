@@ -12,6 +12,16 @@ inline thread_local std::chrono::steady_clock::time_point g_threadDeadline;
 
 inline constexpr DWORD kMaxTimeoutMs = 300000;
 
+// 单次 socket I/O 的最小超时下限。
+//
+// 调用级的"剩余总预算"会被当作单次 recv/send 的 SO_RCVTIMEO/SO_SNDTIMEO。
+// 一旦命令已经发出，就必须给设备至少一个网络往返的时间把响应读回来，否则
+// 会出现：命令已送达设备、设备也正常回包，但客户端因为剩余预算（可能只有
+// 几毫秒）小于往返时延而误判 recv 超时（WSAETIMEDOUT/10060）。
+// 总预算仍由各请求入口在"两次往返之间"通过 IsThreadTimeoutExpired() 把关，
+// 所以这里给单次 I/O 设下限不会让超时整体失效，最多多放行一个在途往返。
+inline constexpr DWORD kMinIoTimeoutMs = 5000;
+
 inline DWORD ClampTimeoutMs(unsigned long long requestedMs) {
     return requestedMs > kMaxTimeoutMs
                ? kMaxTimeoutMs
@@ -91,7 +101,11 @@ public:
             return;
         }
 
-        const DWORD timeoutMs = GetRemainingTimeoutMs();
+        // 用剩余预算，但不低于单次 I/O 下限：命令一旦发出就要给足时间读回
+        // 响应，避免在途响应被预算耗尽掐断（见 kMinIoTimeoutMs 注释）。
+        const DWORD remainingMs = GetRemainingTimeoutMs();
+        const DWORD timeoutMs =
+            remainingMs < kMinIoTimeoutMs ? kMinIoTimeoutMs : remainingMs;
         int optLen = sizeof(previous_);
         restore_ = ::getsockopt(sock_, SOL_SOCKET, option_,
                                 reinterpret_cast<char*>(&previous_),
