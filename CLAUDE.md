@@ -39,9 +39,10 @@ amem-mcp                # starts the stdio MCP server (talks to the GUI's IPC se
 
 - **Required**: Visual Studio 2022 (C++17), CMake 3.16+, DirectX 12 SDK, Windows SDK
 - **Required**: LuaJIT — must be placed in `third_party/LuaJIT/` with `include/` and `lib/lua51.lib` (a `FATAL_ERROR` otherwise)
-- **AI chat** (`ENABLE_AI_CHAT`, default ON): `third_party/httplib/httplib.h` and `third_party/nlohmann/json.hpp` are vendored in-tree; additionally requires **OpenSSL** for HTTPS (`vcpkg install openssl:x64-windows`). If OpenSSL is missing, AI chat is silently disabled but the rest of the app builds.
-- **Optional**: Capstone — disassembly (`vcpkg install capstone:x64-windows` or set `capstone_ROOT`)
-- **Optional**: Keystone — assembly-to-machine-code (`vcpkg install keystone:x64-windows` or set `keystone_ROOT`)
+- **AI chat** (`ENABLE_AI_CHAT`, default ON): `third_party/httplib/httplib.h` and `third_party/nlohmann/json.hpp` are vendored in-tree; additionally requires **OpenSSL** for HTTPS via `vcpkg install openssl:x64-windows-static` (static `/MT`; linked into the exe, no DLL shipped). If OpenSSL is missing, AI chat is silently disabled but the rest of the app builds.
+- **Optional**: Capstone — disassembly. Static `/MT` only: official installer at `capstone_ROOT` (default `C:/Program Files/capstone`, 6.x) or `vcpkg install capstone[core,arm,arm64,x86,mips]:x64-windows-static` (5.x). Linked into the exe. Do NOT use the dynamic `x64-windows` triplet — its `/MD` import lib conflicts with the `/MT` build.
+- **Optional**: Keystone — assembly-to-machine-code. Static `/MT`: `vcpkg install keystone:x64-windows-static` (or set `keystone_ROOT`). Linked into the exe.
+- **Static single-exe distribution**: the whole app links `/MT` (static CRT via `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` + CMP0091) plus static capstone/keystone/OpenSSL/LuaJIT. **This is a hard constraint**: the prebuilt `lua51.lib` and official `capstone.lib` are both `/MT` (LIBCMT), so the exe must be `/MT` to avoid CRT conflicts. Result: `bin/ImGuiProject.exe` (~34MB) is fully self-contained — no capstone/keystone/OpenSSL DLLs, no VC runtime DLLs, no VC++ Redistributable needed; only Windows 10/11 x64 system DLLs. Copy the exe alone to another machine and it runs.
 
 CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `LUAJIT_STATIC` (default ON).
 

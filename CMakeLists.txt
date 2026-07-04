@@ -14,6 +14,14 @@ set(PROTOCOL_VERSION_PATCH 0)
 set(PROTOCOL_VERSION "${PROTOCOL_VERSION_MAJOR}.${PROTOCOL_VERSION_MINOR}.${PROTOCOL_VERSION_PATCH}")
 
 
+# ==================== 完全静态链接（单 exe 分发） ====================
+# 目标：产出自包含 exe，无需随附任何第三方 DLL 或 VC 运行时 DLL。
+# 静态 CRT（/MT）是硬约束：预编译的 LuaJIT lua51.lib 与官方 capstone.lib 均为 /MT（LIBCMT），
+# 整个 exe 必须 /MT 才能避免 CRT 状态/堆不一致的冲突。
+# CMP0091 需在第一个 project() 之前设为 NEW，MSVC_RUNTIME_LIBRARY 抽象方可生效。
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "静态 CRT (/MT)，单 exe 分发")
+
 project(ImGuiProject VERSION ${PROJECT_VERSION})
 set(CMAKE_CXX_STANDARD 17)
 
@@ -49,19 +57,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 
-# 查找 Capstone 库
+# 查找 Capstone 库（完全静态）：优先官方安装器静态版（C:/Program Files/capstone，6.x，/MT），
+# 整体链入 exe，不分发 DLL；也接受 vcpkg 静态三元组 x64-windows-static（5.x，/MT）。
+# 切勿使用 vcpkg x64-windows 动态版（/MD 导入库 + DLL）——会与 /MT 冲突且需分发 capstone.dll。
 set(capstone_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation directory")
-find_package(capstone CONFIG QUIET)
 
-if(capstone_FOUND)
-    find_library(CAPSTONE_LIBRARY NAMES capstone capstone_static
-        HINTS "${capstone_ROOT}/lib" "${capstone_ROOT}/build" "${capstone_ROOT}" PATH_SUFFIXES lib lib64)
-    find_path(CAPSTONE_INCLUDE_DIR NAMES capstone/capstone.h
-        HINTS "${capstone_ROOT}/include" "${capstone_ROOT}" PATH_SUFFIXES include)
-else()
-    find_path(CAPSTONE_INCLUDE_DIR capstone/capstone.h)
-    find_library(CAPSTONE_LIBRARY NAMES capstone)
-endif()
+find_path(CAPSTONE_INCLUDE_DIR NAMES capstone/capstone.h
+    HINTS "${capstone_ROOT}/include" "C:/vcpkg/installed/x64-windows-static/include" PATH_SUFFIXES include)
+find_library(CAPSTONE_LIBRARY NAMES capstone capstone_static
+    HINTS "${capstone_ROOT}/lib" "C:/vcpkg/installed/x64-windows-static/lib" PATH_SUFFIXES lib lib64)
 
 if(CAPSTONE_INCLUDE_DIR AND CAPSTONE_LIBRARY)
     set(HAVE_CAPSTONE TRUE)
@@ -72,8 +76,8 @@ else()
     message(WARNING "Capstone not found! Disassembly features will be disabled.")
 endif()
 
-# 查找 Keystone 库
-set(keystone_ROOT "C:/vcpkg/installed/x64-windows" CACHE PATH "Keystone installation directory")
+# 查找 Keystone 库（完全静态，vcpkg x64-windows-static，/MT）
+set(keystone_ROOT "C:/vcpkg/installed/x64-windows-static" CACHE PATH "Keystone installation directory")
 
 find_path(KEYSTONE_INCLUDE_DIR keystone/keystone.h
     HINTS "${keystone_ROOT}/include" "${keystone_ROOT}" PATH_SUFFIXES include)
@@ -98,8 +102,14 @@ if(ENABLE_AI_CHAT)
 
     if(EXISTS "${HTTPLIB_HEADER}" AND EXISTS "${NLOHMANN_JSON_HEADER}")
         # cpp-httplib 需要 OpenSSL 才能支持 HTTPS（CPPHTTPLIB_OPENSSL_SUPPORT）
-        if(NOT OPENSSL_ROOT_DIR AND EXISTS "C:/vcpkg/installed/x64-windows/include/openssl/ssl.h")
-            set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows")
+        # 完全静态：使用 vcpkg 静态 OpenSSL（x64-windows-static，/MT），链入 exe 不分发 DLL。
+        # 不用 x64-windows-static-md（那是 /MD，会与本项目 /MT 冲突）。
+        # 注意：不要设 OPENSSL_USE_STATIC_LIBS —— clang（GNU 驱动）下 MSVC=FALSE，
+        # FindOpenSSL 会把查找后缀硬改成 .a，永远匹配不到 vcpkg 的 libssl.lib/libcrypto.lib；
+        # 该三元组目录下只有静态库，按默认 .lib 后缀即可找到正确文件。
+        if(NOT OPENSSL_ROOT_DIR AND EXISTS "C:/vcpkg/installed/x64-windows-static/include/openssl/ssl.h")
+            set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows-static")
+            set(AMEM_OPENSSL_STATIC TRUE)
         endif()
         find_package(OpenSSL QUIET)
 
@@ -304,34 +314,16 @@ if(HAVE_LUAJIT)
     endif()
 endif()
 
-# 链接 Capstone 库
+# 链接 Capstone 库（静态 /MT，整体链入 exe，不分发 DLL）
 if(HAVE_CAPSTONE)
     target_link_libraries(ImGuiProject ${CAPSTONE_LIBRARIES})
     target_compile_definitions(ImGuiProject PRIVATE HAVE_CAPSTONE)
-
-    # 拷贝 capstone.dll 到输出目录
-    get_filename_component(_capstone_lib_dir ${CAPSTONE_LIBRARY} DIRECTORY)
-    get_filename_component(_capstone_bin_dir "${_capstone_lib_dir}/../bin" ABSOLUTE)
-    if(EXISTS "${_capstone_bin_dir}/capstone.dll")
-        add_custom_command(TARGET ImGuiProject POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_capstone_bin_dir}/capstone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/capstone.dll")
-    endif()
 endif()
 
-# 链接 Keystone 库
+# 链接 Keystone 库（静态 /MT，整体链入 exe，不分发 DLL）
 if(HAVE_KEYSTONE)
     target_link_libraries(ImGuiProject ${KEYSTONE_LIBRARIES})
     target_compile_definitions(ImGuiProject PRIVATE HAVE_KEYSTONE)
-
-    # 拷贝 keystone.dll 到输出目录
-    get_filename_component(_keystone_lib_dir ${KEYSTONE_LIBRARY} DIRECTORY)
-    get_filename_component(_keystone_bin_dir "${_keystone_lib_dir}/../bin" ABSOLUTE)
-    if(EXISTS "${_keystone_bin_dir}/keystone.dll")
-        add_custom_command(TARGET ImGuiProject POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_keystone_bin_dir}/keystone.dll" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/keystone.dll")
-    endif()
 endif()
 
 # 链接 AI 聊天依赖（Requirements 13.1, 13.3）
@@ -346,4 +338,15 @@ if(HAVE_AI_CHAT)
     )
     # crypt32 for Windows DPAPI (CryptProtectData/CryptUnprotectData in ApiKeyStore)
     target_link_libraries(ImGuiProject OpenSSL::SSL OpenSSL::Crypto crypt32)
+
+    # 静态 OpenSSL（libssl/libcrypto）在 Windows 上额外依赖的系统库。
+    # keystone 静态库自带的 /DEFAULTLIB 指令（ole32/uuid/advapi32 等）由链接器自动采纳，此处只补 OpenSSL 所需。
+    if(AMEM_OPENSSL_STATIC)
+        target_link_libraries(ImGuiProject ws2_32 advapi32 user32 gdi32 bcrypt)
+    endif()
 endif()
+
+# ==================== 分发说明 ====================
+# 采用 /MT 静态 CRT + 静态第三方库（capstone/keystone/OpenSSL/LuaJIT），exe 完全自包含：
+# 无需分发 capstone.dll / keystone.dll / libssl / libcrypto，也无需 VC 运行时 DLL 或 VC++ Redistributable。
+# 只依赖 Windows 10/11 x64 自带的系统 DLL。Debug 与 Release 均静态，产物可直接拷贝到其他机器运行。
