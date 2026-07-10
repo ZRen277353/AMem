@@ -47,6 +47,7 @@ bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port
     return false;
   }
 
+  m_connection_generation.fetch_add(1, std::memory_order_acq_rel);
   m_connected.store(true, std::memory_order_release);
   std::cout << "[MultiPort] All ports connected successfully!" << std::endl;
   return true;
@@ -54,6 +55,8 @@ bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port
 
 void WinSocketClientMgr::DisconnectMultiPort() {
   bool wasConnected = m_connected.exchange(false, std::memory_order_acq_rel);
+  if (wasConnected)
+    m_connection_generation.fetch_add(1, std::memory_order_acq_rel);
   AppContext::Get().clearProcess();
   m_main_client.Close();
   m_debug_client.Close();

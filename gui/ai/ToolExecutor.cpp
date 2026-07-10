@@ -6,6 +6,7 @@
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <future>
 #include <memory>
@@ -301,7 +302,8 @@ void ToolExecutor::registerTool(const std::string& name,
                                 const std::string& description,
                                 const std::string& parametersSchema,
                                 ToolSafety safety,
-                                std::function<std::string(const std::string&)> executor) {
+                                std::function<std::string(const std::string&)> executor,
+                                bool advertised) {
     // Enforce AC 5.2 invariants by truncation so the registry can never hold
     // an over-length entry, regardless of caller discipline.
     ToolRegistration reg;
@@ -310,6 +312,7 @@ void ToolExecutor::registerTool(const std::string& name,
     reg.definition.parametersSchema = parametersSchema;
     reg.safety = safety;
     reg.executor = std::move(executor);
+    reg.advertised = advertised;
 
     std::lock_guard<std::mutex> lock(mutex_);
     tools_[reg.definition.name] = std::move(reg);
@@ -419,7 +422,9 @@ std::vector<ToolDefinition> ToolExecutor::getToolDefinitions() const {
     std::vector<ToolDefinition> defs;
     defs.reserve(tools_.size());
     for (const auto& kv : tools_) {
-        defs.push_back(kv.second.definition);
+        if (kv.second.advertised) {
+            defs.push_back(kv.second.definition);
+        }
     }
     return defs;
 }
@@ -447,6 +452,40 @@ void ToolExecutor::setExecutionTimeout(int seconds) {
 int ToolExecutor::getExecutionTimeout() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return executionTimeout_;
+}
+
+bool ToolExecutor::beginToolWorker() {
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+    if (shuttingDown_) {
+        return false;
+    }
+    ++inFlightWorkers_;
+    return true;
+}
+
+void ToolExecutor::endToolWorker() {
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+    if (--inFlightWorkers_ <= 0) {
+        inFlightWorkers_ = 0;
+        lifecycleCv_.notify_all();
+    }
+}
+
+bool ToolExecutor::isShuttingDown() const {
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+    return shuttingDown_;
+}
+
+void ToolExecutor::shutdown() {
+    std::unique_lock<std::mutex> lock(lifecycleMutex_);
+    shuttingDown_ = true;
+    // Detached tool workers can't be joined; give them a bounded window to
+    // finish delivering their result (and stop touching UIMessageQueue /
+    // socket singletons) before we return into static destruction. A worker
+    // blocked on slow device I/O may exceed this — the wait is a best-effort
+    // guard, not a hard guarantee, matching HttpClient::shutdown().
+    lifecycleCv_.wait_for(lock, std::chrono::seconds(3),
+                          [this] { return inFlightWorkers_ == 0; });
 }
 
 } // namespace AI

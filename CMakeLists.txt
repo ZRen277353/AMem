@@ -24,6 +24,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "静态 CRT (/MT)，
 
 project(ImGuiProject VERSION ${PROJECT_VERSION})
 set(CMAKE_CXX_STANDARD 17)
+include(CTest)
 
 # 渲染后端选项
 option(USE_DX11 "Use DirectX 11 backend" OFF)
@@ -147,6 +148,8 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/SessionManager.cpp
     gui/ai/AgentController.cpp
     gui/ai/AgentRunner.cpp
+    gui/ai/AgentMemTools.cpp
+    gui/ai/AgentMemToolsSystem.cpp
     gui/ai/ChatWindow.cpp
     gui/ai/ChatWindowSettings.cpp
 )
@@ -239,6 +242,12 @@ set(SOCKET_SOURCES
     socket/SymbolCommands.cpp
 )
 
+set(MEM_SOURCES
+    mem/Address.cpp
+    mem/MemService.cpp
+    mem/SystemMemService.cpp
+)
+
 set(RENDERER_SOURCES
     renderer/DX12Renderer.cpp
     renderer/StyleSetup.cpp
@@ -270,6 +279,7 @@ add_executable(ImGuiProject
     main.cpp
     ${IMGUI_SOURCES}
     ${GUI_SOURCES}
+    ${MEM_SOURCES}
     ${SOCKET_SOURCES}
     ${RENDERER_SOURCES}
     ${IPC_SOURCES}
@@ -278,7 +288,7 @@ add_executable(ImGuiProject
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
-    imgui imgui/backends gui lua renderer utils ipc
+    imgui imgui/backends gui lua mem renderer utils ipc
     ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_BINARY_DIR}/generated
 )
@@ -344,6 +354,30 @@ if(HAVE_AI_CHAT)
     if(AMEM_OPENSSL_STATIC)
         target_link_libraries(ImGuiProject ws2_32 advapi32 user32 gdi32 bcrypt)
     endif()
+endif()
+
+if(BUILD_TESTING)
+    add_executable(NativeAgentMemTests
+        tests/MemServiceTests.cpp
+        mem/Address.cpp
+        mem/MemService.cpp
+        gui/ai/AgentMemTools.cpp
+        gui/ai/ToolExecutor.cpp
+    )
+    target_include_directories(NativeAgentMemTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_definitions(NativeAgentMemTests PRIVATE HAVE_AI_CHAT)
+    if(MSVC)
+        target_compile_options(NativeAgentMemTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeAgentMemTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeAgentMemTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_agent_mem_service COMMAND NativeAgentMemTests)
 endif()
 
 # ==================== 分发说明 ====================

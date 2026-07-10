@@ -34,6 +34,7 @@ private:
 
   // 连接状态（原子操作）
   std::atomic<bool> m_connected{false};
+  std::atomic<uint64_t> m_connection_generation{0};
 
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
@@ -65,6 +66,11 @@ public:
   // 检查多端口是否已连接
   bool IsMultiPortConnected();
 
+  // 当前连接身份。每次成功连接或断开活动连接时递增。
+  uint64_t GetConnectionGeneration() const {
+    return m_connection_generation.load(std::memory_order_acquire);
+  }
+
 };
 
 // ==================== 全局便捷接口（向后兼容） ====================
@@ -82,6 +88,10 @@ inline void DisconnectMultiPort() { GetSocketMgr().DisconnectMultiPort(); }
 
 inline bool IsMultiPortConnected() {
   return GetSocketMgr().IsMultiPortConnected();
+}
+
+inline uint64_t GetConnectionGeneration() {
+  return GetSocketMgr().GetConnectionGeneration();
 }
 
 inline WindowsSocketClient *GetPortClient(PortType type) {

@@ -4,6 +4,25 @@
 #include "../imgui/imgui.h"
 #include <algorithm>
 
+namespace {
+
+class ProcessRevisionGuard {
+public:
+    explicit ProcessRevisionGuard(std::atomic<uint64_t>& revision)
+        : revision_(revision) {
+        revision_.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    ~ProcessRevisionGuard() {
+        revision_.fetch_add(1, std::memory_order_release);
+    }
+
+private:
+    std::atomic<uint64_t>& revision_;
+};
+
+} // namespace
+
 void AppContext::cleanupCurrentProcessServices() {
     if (!hasProcess()) {
         return;
@@ -18,10 +37,8 @@ void AppContext::cleanupCurrentProcessServices() {
 }
 
 void AppContext::selectProcess(int pid, const std::string& name) {
-    const bool hadProcess = hasProcess();
-    if (hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
+    std::lock_guard<std::mutex> stateLock(processStateMutex_);
+    ProcessRevisionGuard revisionGuard(processRevision);
 
     cleanupCurrentProcessServices();
     selectedPid.store(0, std::memory_order_relaxed);
@@ -46,16 +63,11 @@ void AppContext::selectProcess(int pid, const std::string& name) {
     }
 
     moduleCache.invalidate();
-    if (!hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
 }
 
 void AppContext::clearProcess() {
-    const bool hadProcess = hasProcess();
-    if (hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
+    std::lock_guard<std::mutex> stateLock(processStateMutex_);
+    ProcessRevisionGuard revisionGuard(processRevision);
 
     cleanupCurrentProcessServices();
     selectedPid.store(0, std::memory_order_relaxed);
@@ -65,9 +77,17 @@ void AppContext::clearProcess() {
         selectedName_.clear();
     }
     moduleCache.invalidate();
-    if (!hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
+}
+
+Mem::TargetSnapshot AppContext::snapshotTarget(
+    uint64_t connectionGeneration) const {
+    std::lock_guard<std::mutex> stateLock(processStateMutex_);
+    Mem::TargetSnapshot snapshot;
+    snapshot.pid = selectedPid.load(std::memory_order_relaxed);
+    snapshot.processHandle = processHandle.load(std::memory_order_relaxed);
+    snapshot.processRevision = processRevision.load(std::memory_order_acquire);
+    snapshot.connectionGeneration = connectionGeneration;
+    return snapshot;
 }
 
 void AppContext::ModuleCache::refresh() {

@@ -1,0 +1,25 @@
+#pragma once
+
+#include "MemResult.h"
+#include "MemTypes.h"
+
+namespace Mem {
+
+class IMemService {
+public:
+    virtual ~IMemService() = default;
+
+    virtual OperationContext captureContext(bool includeTarget) const = 0;
+    virtual Result<Status> status(const OperationContext& context) = 0;
+    virtual Result<ProcessPage> listProcesses(
+        const OperationContext& context,
+        const ProcessListRequest& request) = 0;
+    virtual Result<OpenProcessResult> openProcess(
+        const OperationContext& context,
+        const OpenProcessRequest& request) = 0;
+    virtual Result<MemoryBlock> readMemory(
+        const OperationContext& context,
+        const MemoryReadRequest& request) = 0;
+};
+
+} // namespace Mem

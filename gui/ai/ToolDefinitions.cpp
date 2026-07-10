@@ -2,11 +2,10 @@
 
 // ToolDefinitions.cpp
 //
-// Concrete implementations of the 10 built-in tools exposed to the AI
-// (Requirement 5.3). Each tool is registered with ToolExecutor during
-// ToolExecutor::initBuiltinTools(), providing a JSON Schema for argument
-// validation and an executor lambda that wraps the corresponding socket
-// command from `socket/client_singleton.h`.
+// Tool registry and legacy tool implementations. Migrated tools delegate to
+// AgentMemTools -> MemService; tools not migrated yet still wrap the socket
+// command layer directly. Each registration provides a JSON Schema and may
+// be hidden from providers when retained only as a compatibility alias.
 //
 // Design notes:
 //   * Socket command functions (ReadProcessMemoryBytes, ScanValue, etc.)
@@ -23,6 +22,7 @@
 //     DisassemblyHelper header from the AI chat module.
 
 #include "ToolExecutor.h"
+#include "AgentMemTools.h"
 
 #include "../AppContext.h"
 #include "../MemoryTypes.h"
@@ -889,52 +889,19 @@ std::vector<unsigned char> placeholderScanValue(const std::string& valueType, ui
 // Individual tool executors
 // ---------------------------------------------------------------------------
 
-// get_status
+// status / get_status compatibility alias
 std::string execGetStatus(const std::string& /*argsJson*/) {
-    try {
-        auto& ctx = AppContext::Get();
-        json result;
-        result["connected"] = IsMultiPortConnected();
-        result["pid"] = ctx.selectedPid.load();
-        result["process_name"] = ctx.getSelectedName();
-        result["handle"] = ctx.processHandle.load();
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_status: ") + e.what());
-    }
+    return getAgentMemTools().status("{}");
 }
 
 // get_server_version
 std::string execGetServerVersion(const std::string& /*argsJson*/) {
-    try {
-        ServerVersionInfo info;
-        if (!FetchServerVersion(info, PORT_MAIN)) {
-            return makeError("socket communication error: get_server_version");
-        }
-        json result;
-        result["version"] = info.version;
-        result["version_string"] = info.versionString;
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_server_version: ") + e.what());
-    }
+    return getAgentMemTools().serverVersion("{}");
 }
 
 // get_architecture
 std::string execGetArchitecture(const std::string& /*argsJson*/) {
-    try {
-        int type = 0;
-        if (!GetMemType(type, PORT_MAIN)) {
-            return makeError("socket communication error: get_architecture");
-        }
-        const char* names[] = {"Null", "IO", "Syscall", "Kernel", "SysHook"};
-        json result;
-        result["type"] = type;
-        result["name"] = (type >= 0 && type <= 4) ? names[type] : "Unknown";
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_architecture: ") + e.what());
-    }
+    return getAgentMemTools().architecture("{}");
 }
 
 // init_driver
@@ -955,50 +922,14 @@ std::string execInitDriver(const std::string& argsJson) {
     }
 }
 
-// memory_read
+// canonical memory_read
 std::string execMemoryRead(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const uint64_t address = parseAddressJson(args.at("address"));
-        const int sizeRaw = requiredIntArg(args, "size", 1, 4096);
-        const uint32_t size = static_cast<uint32_t>(sizeRaw);
-
-        std::vector<unsigned char> bytes;
-        if (!ReadProcessMemoryBytes(address, size, bytes, PORT_MAIN)) {
-            return makeError("socket communication error: memory_read");
-        }
-
-        json result;
-        result["address"] = toHexAddress(address);
-        result["size"] = static_cast<int>(bytes.size());
-        result["data"] = bytesToHex(bytes);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("memory_read: ") + e.what());
-    }
+    return getAgentMemTools().memoryRead(argsJson, false);
 }
 
-// read_memory (MCP-compatible alias with larger read cap and compact hex)
+// hidden read_memory compatibility alias
 std::string execReadMemory(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const uint64_t address = parseAddressJson(args.at("address"));
-        const int sizeRaw = optionalPositiveClampedIntArg(args, "size", 256, 65536);
-
-        std::vector<unsigned char> bytes;
-        if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(sizeRaw), bytes, PORT_MAIN)) {
-            return makeError("socket communication error: read_memory");
-        }
-
-        json result;
-        result["address"] = toHexAddress(address);
-        result["size"] = static_cast<int>(bytes.size());
-        result["hex"] = bytesToCompactHex(bytes);
-        result["data"] = bytesToHex(bytes);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("read_memory: ") + e.what());
-    }
+    return getAgentMemTools().memoryRead(argsJson, true);
 }
 
 // read_value
@@ -1389,88 +1320,20 @@ std::string execListModules(const std::string& argsJson) {
     return execGetModuleList(argsJson);
 }
 
-// get_process_list
+// process_list / get_process_list compatibility alias
 std::string execGetProcessList(const std::string& /*argsJson*/) {
-    try {
-        std::vector<ProcessInfoItem> procs;
-        if (!FetchProcessList(procs, PORT_MAIN)) {
-            return makeError("socket communication error: get_process_list");
-        }
-
-        json arr = json::array();
-        for (const auto& p : procs) {
-            json item;
-            item["pid"] = p.pid;
-            item["name"] = p.name;
-            arr.push_back(std::move(item));
-        }
-        json result;
-        result["processes"] = std::move(arr);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_process_list: ") + e.what());
-    }
+    return getAgentMemTools().processList("{}");
 }
 
 // list_processes
 std::string execListProcesses(const std::string& argsJson) {
-    return execGetProcessList(argsJson);
+    return getAgentMemTools().processList(argsJson);
 }
 
-// open_process
-//
-// Attaches AMem to the given pid so that subsequent memory / scan / module
-// tools operate against the new target. Matches the GUI's process-picker
-// flow and the MCP `open_process` tool by going through
-// AppContext::selectProcess(), which:
-//   * stores the pid in the atomic,
-//   * calls OpenProcessHandle (via SetCurrentPid + socket),
-//   * invalidates the module cache so the next get_module_list is fresh.
-// Classified as a Write tool so the user gets a confirmation prompt
-// before we flip the global target — changing the attached process
-// mid-conversation has wide blast radius for any other window relying on
-// the previous pid.
+// process_open / open_process compatibility alias. MemService resolves the
+// optional name, performs the target switch, and returns a new snapshot.
 std::string execOpenProcess(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const int pid = requiredIntArg(
-            args, "pid", 1, (std::numeric_limits<int>::max)());
-        const std::string name =
-            optionalStringArg(args, "name", "", kMaxToolStringParamBytes);
-
-        // Resolve name if the caller didn't supply one so the process-bar
-        // label shows something meaningful after attach. Best-effort only
-        // — a lookup failure should not block the attach itself.
-        std::string resolvedName = name;
-        if (resolvedName.empty()) {
-            std::vector<ProcessInfoItem> procs;
-            if (FetchProcessList(procs, PORT_MAIN)) {
-                for (const auto& p : procs) {
-                    if (p.pid == pid) {
-                        resolvedName = p.name;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // selectProcess() handles SetCurrentPid + OpenProcessHandle and
-        // updates AppContext for other windows. It does not return a
-        // status, so we verify success by reading back the handle.
-        AppContext::Get().selectProcess(pid, resolvedName);
-        const int handle = AppContext::Get().processHandle.load();
-        if (handle == 0) {
-            return makeError("socket communication error: open_process (handle=0)");
-        }
-
-        json result;
-        result["pid"] = pid;
-        result["name"] = resolvedName;
-        result["handle"] = handle;
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("open_process: ") + e.what());
-    }
+    return getAgentMemTools().processOpen(argsJson);
 }
 
 // get_module_base
@@ -1863,16 +1726,17 @@ std::string execExecuteLua(const std::string& argsJson) {
 // terminate the raw string early.
 constexpr const char* kSchemaMemoryRead = R"JSON({
   "type": "object",
-  "required": ["address", "size"],
+  "required": ["address"],
   "properties": {
     "address": {
-      "description": "Memory address as hex string or integer"
+      "type": "string",
+      "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "size": {
       "type": "integer",
-      "description": "Number of bytes to read (1-4096)",
+      "description": "Number of bytes to read (default 256, max 65536)",
       "minimum": 1,
-      "maximum": 4096
+      "maximum": 65536
     }
   }
 })JSON";
@@ -2545,13 +2409,35 @@ constexpr const char* kSchemaOpenProcess = R"JSON({
   "properties": {
     "pid": {
       "type": "integer",
-      "description": "Target process pid (positive integer) obtained from get_process_list",
+      "description": "Target process pid (positive integer) obtained from process_list",
       "minimum": 1
     },
     "name": {
       "type": "string",
       "description": "Optional process name; resolved automatically from the process list when omitted",
       "maxLength": 4096
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaProcessList = R"JSON({
+  "type": "object",
+  "properties": {
+    "filter": {
+      "type": "string",
+      "description": "Optional case-insensitive process-name filter",
+      "maxLength": 4096
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Zero-based result offset",
+      "minimum": 0
+    },
+    "count": {
+      "type": "integer",
+      "description": "Maximum results to return (default 200, max 1000)",
+      "minimum": 1,
+      "maximum": 1000
     }
   }
 })JSON";
@@ -2568,25 +2454,35 @@ constexpr const char* kSchemaOpenProcess = R"JSON({
 
 void ToolExecutor::initBuiltinTools() {
     registerTool(
-        "get_status",
-        "Get AMem connection and currently attached process status.",
+        "status",
+        "Get connection, server, architecture, feature, and attached-target status.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetStatus);
+
+    registerTool(
+        "get_status",
+        "Compatibility alias for status.",
+        kSchemaEmptyObject,
+        ToolSafety::ReadOnly,
+        &execGetStatus,
+        false);
 
     registerTool(
         "get_server_version",
         "Get the connected Android server version information.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execGetServerVersion);
+        &execGetServerVersion,
+        false);
 
     registerTool(
         "get_architecture",
         "Get the connected Android memory-driver architecture/type.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execGetArchitecture);
+        &execGetArchitecture,
+        false);
 
     registerTool(
         "init_driver",
@@ -2597,7 +2493,7 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "memory_read",
-        "Read bytes from target process memory at the specified address.",
+        "Read up to 65536 bytes from an explicit 0x-prefixed target address.",
         kSchemaMemoryRead,
         ToolSafety::ReadOnly,
         &execMemoryRead);
@@ -2607,7 +2503,8 @@ void ToolExecutor::initBuiltinTools() {
         "Read process memory and return compact hex plus spaced hex data.",
         kSchemaReadMemory,
         ToolSafety::ReadOnly,
-        &execReadMemory);
+        &execReadMemory,
+        false);
 
     registerTool(
         "read_value",
@@ -2715,26 +2612,42 @@ void ToolExecutor::initBuiltinTools() {
         &execGetModuleBase);
 
     registerTool(
+        "process_list",
+        "List and page processes available on the connected Android device.",
+        kSchemaProcessList,
+        ToolSafety::ReadOnly,
+        &execListProcesses);
+
+    registerTool(
         "get_process_list",
-        "List processes available on the connected device.",
+        "Compatibility alias for process_list.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execGetProcessList);
+        &execGetProcessList,
+        false);
 
     registerTool(
         "list_processes",
         "List processes available on the connected device.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execListProcesses);
+        &execListProcesses,
+        false);
 
     registerTool(
-        "open_process",
-        "Attach AMem to a process by pid. Subsequent memory and scan tools "
-        "operate against the attached target. Requires user confirmation.",
+        "process_open",
+        "Attach AMem to an observed process id. Requires user confirmation.",
         kSchemaOpenProcess,
         ToolSafety::Write,
         &execOpenProcess);
+
+    registerTool(
+        "open_process",
+        "Compatibility alias for process_open.",
+        kSchemaOpenProcess,
+        ToolSafety::Write,
+        &execOpenProcess,
+        false);
 
     registerTool(
         "resolve_offset_chain",
@@ -2794,9 +2707,9 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "symbol_init",
-        "Initialize the active symbol table for a module base address. Requires user confirmation.",
+        "Initialize the active symbol table for a module base address.",
         kSchemaSymbolInit,
-        ToolSafety::Write,
+        ToolSafety::ReadOnly,
         &execSymbolInit);
 
     registerTool(

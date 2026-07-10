@@ -3,6 +3,7 @@
 
 #include "AIProvider.h"
 
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -17,6 +18,7 @@ struct ToolRegistration {
     ToolDefinition definition;
     ToolSafety safety = ToolSafety::ReadOnly;
     std::function<std::string(const std::string& argsJson)> executor;
+    bool advertised = true;
 };
 
 // Result returned by ToolExecutor::execute(). On success, resultJson contains
@@ -48,7 +50,8 @@ public:
                       const std::string& description,
                       const std::string& parametersSchema,
                       ToolSafety safety,
-                      std::function<std::string(const std::string&)> executor);
+                      std::function<std::string(const std::string&)> executor,
+                      bool advertised = true);
 
     // Initialise the built-in tool set. Definition lives in
     // ToolDefinitions.cpp (task 5.2) so that the executor core stays
@@ -61,8 +64,8 @@ public:
     // and surfaced as a ToolResult with success=false.
     ToolResult execute(const ToolCall& call);
 
-    // Return a snapshot of every registered tool's AI-facing definition.
-    // Used by ChatSession / providers to advertise tools on each request.
+    // Return advertised AI-facing definitions. Hidden compatibility aliases
+    // remain executable for saved sessions but are not sent to providers.
     std::vector<ToolDefinition> getToolDefinitions() const;
 
     // Safety classification for a given tool name. Returns ToolSafety::ReadOnly
@@ -75,6 +78,24 @@ public:
     void setExecutionTimeout(int seconds);
     int getExecutionTimeout() const;
 
+    // Drain in-flight tool-execution worker threads during app teardown so
+    // a detached worker can't push to UIMessageQueue or touch socket
+    // singletons after they've been destroyed. Bounded, best-effort, and
+    // idempotent — mirrors HttpClient::shutdown(). Call from main() before
+    // static destruction begins.
+    void shutdown();
+
+    // True once shutdown() has begun. Tool workers check this before
+    // delivering a result so a late worker (one that outran shutdown()'s
+    // bounded wait) does not touch already-destroyed singletons.
+    bool isShuttingDown() const;
+
+    // Register / retire a tool-execution worker around its full lifetime
+    // (execute() + result delivery). beginToolWorker() returns false when a
+    // shutdown is already in progress, signalling the caller not to start.
+    bool beginToolWorker();
+    void endToolWorker();
+
 private:
     ToolExecutor() = default;
     ToolExecutor(const ToolExecutor&) = delete;
@@ -83,6 +104,14 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ToolRegistration> tools_;
     int executionTimeout_ = 30; // seconds, AC 6.5 default
+
+    // Lifecycle tracking for detached tool-execution workers (teardown
+    // drain). Guarded independently of mutex_ so a long-running executor
+    // never blocks registry queries.
+    mutable std::mutex lifecycleMutex_;
+    std::condition_variable lifecycleCv_;
+    int inFlightWorkers_ = 0;   // detached workers still running
+    bool shuttingDown_ = false; // set by shutdown()
 };
 
 } // namespace AI

@@ -1,13 +1,13 @@
 #pragma once
 
+#include "../mem/MemTypes.h"
 #include "../socket/client_singleton.h"
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <mutex>
-#include <cstdint>
 
 class AppContext {
 public:
@@ -24,6 +24,7 @@ public:
     void selectProcess(int pid, const std::string& name);
     void clearProcess();
     void cleanupCurrentProcessServices();
+    Mem::TargetSnapshot snapshotTarget(uint64_t connectionGeneration) const;
     bool hasProcess() const {
         return selectedPid.load(std::memory_order_relaxed) != 0 &&
                processHandle.load(std::memory_order_relaxed) != 0;
@@ -78,5 +79,6 @@ private:
     AppContext& operator=(const AppContext&) = delete;
 
     mutable std::mutex nameMutex_;
+    mutable std::mutex processStateMutex_;
     std::string selectedName_;
 };

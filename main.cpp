@@ -10,6 +10,7 @@
 #include "ipc/IpcServer.h"
 #ifdef HAVE_AI_CHAT
 #include "ai/HttpClient.h"
+#include "ai/ToolExecutor.h"
 #endif
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -125,10 +126,11 @@ int main(int, char**)
     IpcServer::GetInstance().Stop();
 
 #ifdef HAVE_AI_CHAT
-    // Drain in-flight AI HTTP requests so their detached worker threads can't
-    // outlive the singletons (HttpClient / UIMessageQueue) they touch during
-    // static destruction.
+    // Drain in-flight AI HTTP requests and tool-execution workers so their
+    // detached threads can't outlive the singletons (HttpClient /
+    // ToolExecutor / UIMessageQueue) they touch during static destruction.
     AI::HttpClient::getInstance().shutdown();
+    AI::ToolExecutor::getInstance().shutdown();
 #endif
 
     ImGui_ImplDX12_Shutdown();

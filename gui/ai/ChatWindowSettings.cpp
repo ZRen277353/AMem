@@ -58,10 +58,32 @@ bool isHttpsUrl(const std::string& url) {
 void ChatWindow::drawSettingsPanel() {
     if (!showSettings_) return;
 
+    // Cross-frame edit buffers for the panel. Declared before the popup
+    // Begin so the dismissal path below can reset them. These are
+    // function-local statics; ChatWindow is a getOrCreate singleton in
+    // practice, so a single shared edit context is correct.
+    static char systemPromptBuf[4096] = {};
+    static bool systemPromptLoaded = false;
+    static int tokenLimitBuf = 0;
+    static int executionTimeoutBuf = 0;
+    static int maxAgentStepsBuf = 0;
+    static int maxToolCallsPerTurnBuf = 0;
+    static bool autoApproveWritesBuf = false;
+    static bool numericSettingsLoaded = false;
+
     ImGui::SetNextWindowSize(ImVec2(640.0f, 460.0f), ImGuiCond_Appearing);
     ImGui::OpenPopup("AI Chat Settings");
     if (!ImGui::BeginPopupModal("AI Chat Settings", &showSettings_,
                                 ImGuiWindowFlags_NoCollapse)) {
+        // Dismissed via the title-bar [X], Esc, or click-outside rather
+        // than the Save/Cancel buttons. Drop cached edits so the next open
+        // reloads fresh values from disk instead of resurrecting stale
+        // unsaved edits (matches the Cancel button's reset).
+        if (!showSettings_) {
+            settingsBuffers_.clear();
+            systemPromptLoaded = false;
+            numericSettingsLoaded = false;
+        }
         return;
     }
 
@@ -143,19 +165,12 @@ void ChatWindow::drawSettingsPanel() {
 
     AiSettingsData settings = AiSettings::getInstance().get();
 
-    // The edit buffers below must survive across frames — `settings` is
-    // a fresh snapshot on every draw, so writing straight back into its
+    // The edit buffers (declared at the top of this function so the
+    // dismissal path can reset them) must survive across frames: `settings`
+    // is a fresh snapshot on every draw, so writing straight back into its
     // fields and reading them next frame would revert every edit. The
-    // systemPromptBuf / numericSettingsLoaded pattern keeps the user's
-    // in-progress edits until Save or Cancel commits/discards them.
-    static char systemPromptBuf[4096] = {};
-    static bool systemPromptLoaded = false;
-    static int tokenLimitBuf = 0;
-    static int executionTimeoutBuf = 0;
-    static int maxAgentStepsBuf = 0;
-    static int maxToolCallsPerTurnBuf = 0;
-    static bool autoApproveWritesBuf = false;
-    static bool numericSettingsLoaded = false;
+    // *Loaded flags keep the user's in-progress edits until Save, Cancel,
+    // or dismissal commits/discards them.
     if (!systemPromptLoaded) {
         const size_t n = std::min(settings.systemPrompt.size(),
                                   sizeof(systemPromptBuf) - 1);

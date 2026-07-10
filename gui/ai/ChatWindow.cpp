@@ -1602,10 +1602,31 @@ void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
 void ChatWindow::startToolExecution(const ToolCall& call) {
     activeToolRunId_ = agentController_.runId();
     const std::string runId = activeToolRunId_;
+
+    // Register the worker with ToolExecutor so app teardown can drain it
+    // before UIMessageQueue / socket singletons are destroyed. If a
+    // shutdown is already underway, don't start a new worker.
+    if (!ToolExecutor::getInstance().beginToolWorker()) {
+        return;
+    }
     std::thread([call, runId]() {
+        // Retire the worker registration no matter how this scope exits so
+        // shutdown()'s drain can observe completion.
+        struct WorkerGuard {
+            ~WorkerGuard() { ToolExecutor::getInstance().endToolWorker(); }
+        } workerGuard;
+
         const long long startMs = nowSteadyMs();
         ToolResult result = ToolExecutor::getInstance().execute(call);
         const long long durationMs = nowSteadyMs() - startMs;
+
+        // If teardown began while this worker was running, skip delivery:
+        // UIMessageQueue may already be gone. On-time workers still deliver
+        // because shutdown() waits for endToolWorker() (via WorkerGuard)
+        // before returning into static destruction.
+        if (ToolExecutor::getInstance().isShuttingDown()) {
+            return;
+        }
 
         UIMessage msg;
         msg.type = UIMessageType::ToolResult;
