@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+namespace Mem {
+class IMemService;
+}
+
 namespace AI {
 
 // Owns model-request dispatch for an agent run. ChatWindow still owns the UI
@@ -38,6 +42,8 @@ public:
         std::string error;
         AgentTraceEvent traceEvent;
     };
+
+    explicit AgentController(Mem::IMemService& memService);
 
     DispatchResult dispatchModelRequest(const ModelRequest& request,
                                         CancellationToken cancelToken);
@@ -71,8 +77,15 @@ public:
     const std::vector<AgentTraceEvent>& trace() const { return run_.trace; }
     const ToolCall* pendingApproval() const;
     AgentRunSnapshot snapshot() const;
+    Mem::OperationContext operationContext() const {
+        return run_.context.operation;
+    }
 
 private:
+    ToolOutcome consumeToolOutcome(ToolOutcome outcome,
+                                   const ToolConfig& config);
+    std::optional<Mem::Error> validateToolContext(
+        const ToolCall& call) const;
     void trimTrace();
     void updateRunFromToolOutcome(const ToolOutcome& outcome);
     void markWaitingModel();
@@ -84,6 +97,7 @@ private:
 
     AgentRun run_;
     AgentRunner runner_;
+    Mem::IMemService& memService_;
 };
 
 } // namespace AI

@@ -14,6 +14,7 @@
 #include "../ColorScheme.h"
 #include "../Gui.h"
 #include "../../imgui/imgui.h"
+#include "../../mem/SystemMemService.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <algorithm>
@@ -318,7 +319,8 @@ void renderSelectableTextBlock(const char* id,
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
-ChatWindow::ChatWindow() {
+ChatWindow::ChatWindow()
+    : agentController_(Mem::getSystemMemService()) {
     name = "AI Chat";
     cancelToken_ = makeCancellationToken();
 
@@ -1549,6 +1551,20 @@ void ChatWindow::drawToolConfirmationModal() {
         const ToolCall* pending = agentController_.pendingApproval();
         if (pending) {
             ImGui::Text("AI wants to execute tool: %s", pending->name.c_str());
+            const AgentRunSnapshot approvalSnapshot = agentController_.snapshot();
+            const Mem::OperationContext& expected =
+                approvalSnapshot.context.operation;
+            ImGui::TextDisabled(
+                "Expected connection generation: %llu",
+                static_cast<unsigned long long>(
+                    expected.connectionGeneration));
+            if (expected.target) {
+                ImGui::TextDisabled(
+                    "Expected target: PID %d, revision %llu",
+                    expected.target->pid,
+                    static_cast<unsigned long long>(
+                        expected.target->processRevision));
+            }
             ImGui::Separator();
 
             // Pretty-print the arguments JSON when possible so the user can
@@ -1602,6 +1618,8 @@ void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
 void ChatWindow::startToolExecution(const ToolCall& call) {
     activeToolRunId_ = agentController_.runId();
     const std::string runId = activeToolRunId_;
+    const Mem::OperationContext operationContext =
+        agentController_.operationContext();
 
     // Register the worker with ToolExecutor so app teardown can drain it
     // before UIMessageQueue / socket singletons are destroyed. If a
@@ -1609,7 +1627,7 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
     if (!ToolExecutor::getInstance().beginToolWorker()) {
         return;
     }
-    std::thread([call, runId]() {
+    std::thread([call, runId, operationContext]() {
         // Retire the worker registration no matter how this scope exits so
         // shutdown()'s drain can observe completion.
         struct WorkerGuard {
@@ -1617,7 +1635,8 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
         } workerGuard;
 
         const long long startMs = nowSteadyMs();
-        ToolResult result = ToolExecutor::getInstance().execute(call);
+        ToolResult result =
+            ToolExecutor::getInstance().execute(call, operationContext);
         const long long durationMs = nowSteadyMs() - startMs;
 
         // If teardown began while this worker was running, skip delivery:

@@ -217,6 +217,26 @@ Result<OpenProcessResult> MemService::openProcess(
     const OperationContext& context,
     const OpenProcessRequest& request) {
     const auto start = Clock::now();
+    const auto validateSelectionTarget = [&]() -> std::optional<Error> {
+        if (!context.target) {
+            return std::nullopt;
+        }
+        if (context.target->connectionGeneration !=
+            context.connectionGeneration) {
+            return Error{
+                ErrorCode::ConnectionChanged,
+                "target selection belongs to a different connection generation",
+                true};
+        }
+        if (backend_.targetSnapshot() != *context.target) {
+            return Error{
+                ErrorCode::TargetChanged,
+                "target process changed before process open was sent",
+                false};
+        }
+        return std::nullopt;
+    };
+
     if (request.pid <= 0) {
         return Result<OpenProcessResult>::failure(
             ErrorCode::InvalidArgument,
@@ -234,6 +254,9 @@ Result<OpenProcessResult> MemService::openProcess(
     if (const auto error = validateContext(context, true, false, true)) {
         return failureFrom<OpenProcessResult>(*error, start);
     }
+    if (const auto error = validateSelectionTarget()) {
+        return failureFrom<OpenProcessResult>(*error, start);
+    }
 
     std::string resolvedName = request.name;
     if (resolvedName.empty()) {
@@ -249,6 +272,9 @@ Result<OpenProcessResult> MemService::openProcess(
     }
 
     if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<OpenProcessResult>(*error, start);
+    }
+    if (const auto error = validateSelectionTarget()) {
         return failureFrom<OpenProcessResult>(*error, start);
     }
     if (!backend_.openProcess(request.pid, resolvedName)) {

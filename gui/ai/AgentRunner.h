@@ -44,6 +44,9 @@ public:
     Outcome beginToolCalls(const std::vector<ToolCall>& calls, const Config& config);
     Outcome resumeApproved(const Config& config);
     Outcome resumeDenied(const Config& config);
+    Outcome failPendingTool(const ToolResult& result,
+                            long long durationMs,
+                            const Config& config);
     Outcome completeToolExecution(const ToolCall& call,
                                   const ToolResult& result,
                                   long long durationMs,

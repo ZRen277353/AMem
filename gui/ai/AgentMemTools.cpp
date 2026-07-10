@@ -143,8 +143,9 @@ std::string spacedHex(const std::vector<unsigned char>& bytes) {
 
 AgentMemTools::AgentMemTools(Mem::IMemService& service) : service_(service) {}
 
-std::string AgentMemTools::status(const std::string& /*argsJson*/) {
-    const Mem::OperationContext context = service_.captureContext(false);
+std::string AgentMemTools::status(
+    const std::string& /*argsJson*/,
+    const Mem::OperationContext& context) {
     const auto response = service_.status(context);
     if (!response.ok()) {
         return errorResult(response.error(), response.durationMs());
@@ -193,8 +194,9 @@ std::string AgentMemTools::status(const std::string& /*argsJson*/) {
     return output.dump();
 }
 
-std::string AgentMemTools::serverVersion(const std::string& /*argsJson*/) {
-    const Mem::OperationContext context = service_.captureContext(false);
+std::string AgentMemTools::serverVersion(
+    const std::string& /*argsJson*/,
+    const Mem::OperationContext& context) {
     const auto response = service_.status(context);
     if (!response.ok()) {
         return errorResult(response.error(), response.durationMs());
@@ -215,8 +217,9 @@ std::string AgentMemTools::serverVersion(const std::string& /*argsJson*/) {
     return output.dump();
 }
 
-std::string AgentMemTools::architecture(const std::string& /*argsJson*/) {
-    const Mem::OperationContext context = service_.captureContext(false);
+std::string AgentMemTools::architecture(
+    const std::string& /*argsJson*/,
+    const Mem::OperationContext& context) {
     const auto response = service_.status(context);
     if (!response.ok()) {
         return errorResult(response.error(), response.durationMs());
@@ -237,7 +240,9 @@ std::string AgentMemTools::architecture(const std::string& /*argsJson*/) {
     return output.dump();
 }
 
-std::string AgentMemTools::processList(const std::string& argsJson) {
+std::string AgentMemTools::processList(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         Mem::ProcessListRequest request;
@@ -247,7 +252,6 @@ std::string AgentMemTools::processList(const std::string& argsJson) {
         request.limit = optionalSize(args, "count", 200,
                                      Mem::kMaxProcessPageSize);
 
-        const Mem::OperationContext context = service_.captureContext(false);
         const auto response = service_.listProcesses(context, request);
         if (!response.ok()) {
             return errorResult(response.error(), response.durationMs());
@@ -276,14 +280,15 @@ std::string AgentMemTools::processList(const std::string& argsJson) {
     }
 }
 
-std::string AgentMemTools::processOpen(const std::string& argsJson) {
+std::string AgentMemTools::processOpen(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         Mem::OpenProcessRequest request;
         request.pid = requiredPositiveInt(args, "pid");
         request.name = optionalString(args, "name");
 
-        const Mem::OperationContext context = service_.captureContext(false);
         const auto response = service_.openProcess(context, request);
         if (!response.ok()) {
             return errorResult(response.error(), response.durationMs());
@@ -307,7 +312,8 @@ std::string AgentMemTools::processOpen(const std::string& argsJson) {
 }
 
 std::string AgentMemTools::memoryRead(const std::string& argsJson,
-                                      bool allowLegacyAddress) {
+                                      bool allowLegacyAddress,
+                                      const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         if (!args.contains("address")) {
@@ -325,7 +331,6 @@ std::string AgentMemTools::memoryRead(const std::string& argsJson,
         request.address = parsedAddress.value();
         request.size = static_cast<uint32_t>(size);
 
-        const Mem::OperationContext context = service_.captureContext(true);
         const auto response = service_.readMemory(context, request);
         if (!response.ok()) {
             return errorResult(response.error(), response.durationMs());

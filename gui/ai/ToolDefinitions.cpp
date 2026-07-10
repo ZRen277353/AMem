@@ -890,18 +890,21 @@ std::vector<unsigned char> placeholderScanValue(const std::string& valueType, ui
 // ---------------------------------------------------------------------------
 
 // status / get_status compatibility alias
-std::string execGetStatus(const std::string& /*argsJson*/) {
-    return getAgentMemTools().status("{}");
+std::string execGetStatus(const std::string& /*argsJson*/,
+                          const Mem::OperationContext& context) {
+    return getAgentMemTools().status("{}", context);
 }
 
 // get_server_version
-std::string execGetServerVersion(const std::string& /*argsJson*/) {
-    return getAgentMemTools().serverVersion("{}");
+std::string execGetServerVersion(const std::string& /*argsJson*/,
+                                 const Mem::OperationContext& context) {
+    return getAgentMemTools().serverVersion("{}", context);
 }
 
 // get_architecture
-std::string execGetArchitecture(const std::string& /*argsJson*/) {
-    return getAgentMemTools().architecture("{}");
+std::string execGetArchitecture(const std::string& /*argsJson*/,
+                                const Mem::OperationContext& context) {
+    return getAgentMemTools().architecture("{}", context);
 }
 
 // init_driver
@@ -923,13 +926,15 @@ std::string execInitDriver(const std::string& argsJson) {
 }
 
 // canonical memory_read
-std::string execMemoryRead(const std::string& argsJson) {
-    return getAgentMemTools().memoryRead(argsJson, false);
+std::string execMemoryRead(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryRead(argsJson, false, context);
 }
 
 // hidden read_memory compatibility alias
-std::string execReadMemory(const std::string& argsJson) {
-    return getAgentMemTools().memoryRead(argsJson, true);
+std::string execReadMemory(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryRead(argsJson, true, context);
 }
 
 // read_value
@@ -1321,19 +1326,22 @@ std::string execListModules(const std::string& argsJson) {
 }
 
 // process_list / get_process_list compatibility alias
-std::string execGetProcessList(const std::string& /*argsJson*/) {
-    return getAgentMemTools().processList("{}");
+std::string execGetProcessList(const std::string& /*argsJson*/,
+                               const Mem::OperationContext& context) {
+    return getAgentMemTools().processList("{}", context);
 }
 
 // list_processes
-std::string execListProcesses(const std::string& argsJson) {
-    return getAgentMemTools().processList(argsJson);
+std::string execListProcesses(const std::string& argsJson,
+                              const Mem::OperationContext& context) {
+    return getAgentMemTools().processList(argsJson, context);
 }
 
 // process_open / open_process compatibility alias. MemService resolves the
 // optional name, performs the target switch, and returns a new snapshot.
-std::string execOpenProcess(const std::string& argsJson) {
-    return getAgentMemTools().processOpen(argsJson);
+std::string execOpenProcess(const std::string& argsJson,
+                            const Mem::OperationContext& context) {
+    return getAgentMemTools().processOpen(argsJson, context);
 }
 
 // get_module_base
@@ -2458,7 +2466,8 @@ void ToolExecutor::initBuiltinTools() {
         "Get connection, server, architecture, feature, and attached-target status.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execGetStatus);
+        &execGetStatus,
+        ToolTargetPolicy::None);
 
     registerTool(
         "get_status",
@@ -2466,6 +2475,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetStatus,
+        ToolTargetPolicy::None,
         false);
 
     registerTool(
@@ -2474,6 +2484,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetServerVersion,
+        ToolTargetPolicy::None,
         false);
 
     registerTool(
@@ -2482,6 +2493,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetArchitecture,
+        ToolTargetPolicy::None,
         false);
 
     registerTool(
@@ -2489,14 +2501,17 @@ void ToolExecutor::initBuiltinTools() {
         "Initialize the Android memory driver with an authorization card/key. Requires user confirmation.",
         kSchemaStatusInitDriver,
         ToolSafety::Write,
-        &execInitDriver);
+        &execInitDriver,
+        true,
+        ToolTargetPolicy::None);
 
     registerTool(
         "memory_read",
         "Read up to 65536 bytes from an explicit 0x-prefixed target address.",
         kSchemaMemoryRead,
         ToolSafety::ReadOnly,
-        &execMemoryRead);
+        &execMemoryRead,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "read_memory",
@@ -2504,6 +2519,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaReadMemory,
         ToolSafety::ReadOnly,
         &execReadMemory,
+        ToolTargetPolicy::Bound,
         false);
 
     registerTool(
@@ -2511,112 +2527,143 @@ void ToolExecutor::initBuiltinTools() {
         "Read a single typed scalar value from process memory.",
         kSchemaReadValue,
         ToolSafety::ReadOnly,
-        &execReadValue);
+        &execReadValue,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "memory_write",
         "Write bytes to target process memory. Requires user confirmation.",
         kSchemaMemoryWrite,
         ToolSafety::Write,
-        &execMemoryWrite);
+        &execMemoryWrite,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "write_bytes",
         "Write raw bytes to target process memory. Requires user confirmation.",
         kSchemaWriteBytes,
         ToolSafety::Write,
-        &execWriteBytes);
+        &execWriteBytes,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "write_value",
         "Write a single typed scalar value to process memory. Requires user confirmation.",
         kSchemaWriteValue,
         ToolSafety::Write,
-        &execWriteValue);
+        &execWriteValue,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_set_range",
         "Set the memory range used by subsequent scans. Requires user confirmation.",
         kSchemaScanSetRange,
         ToolSafety::Write,
-        &execScanSetRange);
+        &execScanSetRange,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_value",
         "Start a scan and replace the current scan result set. Requires user confirmation.",
         kSchemaScanValue,
         ToolSafety::Write,
-        &execScanValue);
+        &execScanValue,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_next",
         "Filter the current scan result set. Requires user confirmation.",
         kSchemaScanNext,
         ToolSafety::Write,
-        &execScanNext);
+        &execScanNext,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_fuzzy",
         "Run a fuzzy scan and replace the current scan result set. Requires user confirmation.",
         kSchemaScanFuzzy,
         ToolSafety::Write,
-        &execScanFuzzy);
+        &execScanFuzzy,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_hex",
         "Scan memory for a hex byte pattern and replace the current scan result set. Requires user confirmation.",
         kSchemaScanHex,
         ToolSafety::Write,
-        &execScanHex);
+        &execScanHex,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "get_scan_count",
         "Get the current scan result count.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
-        &execGetScanCount);
+        &execGetScanCount,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "get_scan_results",
         "Retrieve a page of results from the most recent scan.",
         kSchemaGetScanResults,
         ToolSafety::ReadOnly,
-        &execGetScanResults);
+        &execGetScanResults,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "clear_scan",
         "Clear all scan results. Requires user confirmation.",
         kSchemaEmptyObject,
         ToolSafety::Write,
-        &execClearScan);
+        &execClearScan,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "get_module_list",
         "List modules loaded in the currently attached target process.",
         kSchemaListModules,
         ToolSafety::ReadOnly,
-        &execGetModuleList);
+        &execGetModuleList,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "list_modules",
         "List modules loaded in the currently attached target process.",
         kSchemaListModules,
         ToolSafety::ReadOnly,
-        &execListModules);
+        &execListModules,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "get_module_base",
         "Resolve a module name/substr to its base address.",
         kSchemaGetModuleBase,
         ToolSafety::ReadOnly,
-        &execGetModuleBase);
+        &execGetModuleBase,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "process_list",
         "List and page processes available on the connected Android device.",
         kSchemaProcessList,
         ToolSafety::ReadOnly,
-        &execListProcesses);
+        &execListProcesses,
+        ToolTargetPolicy::None);
 
     registerTool(
         "get_process_list",
@@ -2624,6 +2671,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetProcessList,
+        ToolTargetPolicy::None,
         false);
 
     registerTool(
@@ -2632,6 +2680,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execListProcesses,
+        ToolTargetPolicy::None,
         false);
 
     registerTool(
@@ -2639,7 +2688,8 @@ void ToolExecutor::initBuiltinTools() {
         "Attach AMem to an observed process id. Requires user confirmation.",
         kSchemaOpenProcess,
         ToolSafety::Write,
-        &execOpenProcess);
+        &execOpenProcess,
+        ToolTargetPolicy::Selection);
 
     registerTool(
         "open_process",
@@ -2647,6 +2697,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaOpenProcess,
         ToolSafety::Write,
         &execOpenProcess,
+        ToolTargetPolicy::Selection,
         false);
 
     registerTool(
@@ -2654,84 +2705,108 @@ void ToolExecutor::initBuiltinTools() {
         "Resolve a module-relative pointer chain to a final address.",
         kSchemaResolveOffsetChain,
         ToolSafety::ReadOnly,
-        &execResolveOffsetChain);
+        &execResolveOffsetChain,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "read_disassembly",
         "Read a range of ARM64 instructions as raw 32-bit encodings plus hex bytes.",
         kSchemaReadDisassembly,
         ToolSafety::ReadOnly,
-        &execReadDisassembly);
+        &execReadDisassembly,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "set_breakpoint",
         "Set a hardware breakpoint at the given address. Requires user confirmation.",
         kSchemaSetBreakpoint,
         ToolSafety::Write,
-        &execSetBreakpoint);
+        &execSetBreakpoint,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "remove_breakpoint",
         "Remove a hardware breakpoint at the given address. Requires user confirmation.",
         kSchemaRemoveBreakpoint,
         ToolSafety::Write,
-        &execRemoveBreakpoint);
+        &execRemoveBreakpoint,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "read_breakpoint_info",
         "Read hit/register information for a hardware breakpoint.",
         kSchemaReadBreakpointInfo,
         ToolSafety::ReadOnly,
-        &execReadBreakpointInfo);
+        &execReadBreakpointInfo,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "suspend_breakpoint",
         "Suspend a hardware breakpoint without removing it. Requires user confirmation.",
         kSchemaReadBreakpointInfo,
         ToolSafety::Write,
-        &execSuspendBreakpoint);
+        &execSuspendBreakpoint,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "resume_breakpoint",
         "Resume a suspended hardware breakpoint. Requires user confirmation.",
         kSchemaReadBreakpointInfo,
         ToolSafety::Write,
-        &execResumeBreakpoint);
+        &execResumeBreakpoint,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "resolve_symbol",
         "Resolve a symbol name to its absolute address inside a loaded module.",
         kSchemaResolveSymbol,
         ToolSafety::ReadOnly,
-        &execResolveSymbol);
+        &execResolveSymbol,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "symbol_init",
         "Initialize the active symbol table for a module base address.",
         kSchemaSymbolInit,
         ToolSafety::ReadOnly,
-        &execSymbolInit);
+        &execSymbolInit,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "symbol_list",
         "List symbols from the active symbol table, optionally initializing a module first.",
         kSchemaSymbolList,
         ToolSafety::ReadOnly,
-        &execSymbolList);
+        &execSymbolList,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "symbol_find",
         "Find a symbol by name in a module base address.",
         kSchemaSymbolFind,
         ToolSafety::ReadOnly,
-        &execSymbolFind);
+        &execSymbolFind,
+        true,
+        ToolTargetPolicy::Bound);
 
     registerTool(
         "execute_lua",
         "Execute Lua code inside AMem. Requires user confirmation.",
         kSchemaExecuteLua,
         ToolSafety::Write,
-        &execExecuteLua);
+        &execExecuteLua,
+        true,
+        ToolTargetPolicy::Bound);
 }
 
 } // namespace AI

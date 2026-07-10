@@ -274,9 +274,42 @@ std::string extractToolError(const std::string& resultJson) {
     }
 }
 
+std::optional<Mem::TargetSnapshot> extractSelectedTarget(
+    const std::string& resultJson,
+    std::string& error) {
+    try {
+        const json result = json::parse(resultJson);
+        if (!result.is_object() ||
+            !result.contains("pid") ||
+            !result.contains("handle") ||
+            !result.contains("process_revision") ||
+            !result.contains("connection_generation")) {
+            error = "target-selection tool did not return a complete target snapshot";
+            return std::nullopt;
+        }
+
+        Mem::TargetSnapshot target;
+        target.pid = result.at("pid").get<int>();
+        target.processHandle = result.at("handle").get<int>();
+        target.processRevision = result.at("process_revision").get<uint64_t>();
+        target.connectionGeneration =
+            result.at("connection_generation").get<uint64_t>();
+        if (!target.isAttached()) {
+            error = "target-selection tool returned an unattached target snapshot";
+            return std::nullopt;
+        }
+        return target;
+    } catch (const std::exception& exception) {
+        error = std::string("invalid target-selection result: ") + exception.what();
+        return std::nullopt;
+    }
+}
+
 std::shared_future<std::string> runExecutorAsync(
-    std::function<std::string(const std::string&)> executor,
+    std::function<std::string(const std::string&,
+                              const Mem::OperationContext&)> executor,
     std::string argsJson,
+    Mem::OperationContext context,
     int timeoutSeconds) {
     auto promise = std::make_shared<std::promise<std::string>>();
     std::shared_future<std::string> future = promise->get_future().share();
@@ -284,10 +317,11 @@ std::shared_future<std::string> runExecutorAsync(
     std::thread([promise,
                  executor = std::move(executor),
                  argsJson = std::move(argsJson),
+                 context = std::move(context),
                  timeoutSeconds]() mutable {
         try {
             SocketIoTimeout::ScopedTimeout socketTimeout(timeoutSeconds);
-            promise->set_value(executor(argsJson));
+            promise->set_value(executor(argsJson, context));
         } catch (...) {
             promise->set_exception(std::current_exception());
         }
@@ -303,7 +337,8 @@ void ToolExecutor::registerTool(const std::string& name,
                                 const std::string& parametersSchema,
                                 ToolSafety safety,
                                 std::function<std::string(const std::string&)> executor,
-                                bool advertised) {
+                                bool advertised,
+                                ToolTargetPolicy targetPolicy) {
     // Enforce AC 5.2 invariants by truncation so the registry can never hold
     // an over-length entry, regardless of caller discipline.
     ToolRegistration reg;
@@ -311,6 +346,36 @@ void ToolExecutor::registerTool(const std::string& name,
     reg.definition.description = description.size() > 256 ? description.substr(0, 256) : description;
     reg.definition.parametersSchema = parametersSchema;
     reg.safety = safety;
+    reg.targetPolicy = targetPolicy;
+    if (executor) {
+        reg.executor = [executor = std::move(executor)](
+                           const std::string& argsJson,
+                           const Mem::OperationContext&) {
+            return executor(argsJson);
+        };
+    }
+    reg.advertised = advertised;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    tools_[reg.definition.name] = std::move(reg);
+}
+
+void ToolExecutor::registerTool(
+    const std::string& name,
+    const std::string& description,
+    const std::string& parametersSchema,
+    ToolSafety safety,
+    std::function<std::string(const std::string&,
+                              const Mem::OperationContext&)> executor,
+    ToolTargetPolicy targetPolicy,
+    bool advertised) {
+    ToolRegistration reg;
+    reg.definition.name = name.size() > 64 ? name.substr(0, 64) : name;
+    reg.definition.description =
+        description.size() > 256 ? description.substr(0, 256) : description;
+    reg.definition.parametersSchema = parametersSchema;
+    reg.safety = safety;
+    reg.targetPolicy = targetPolicy;
     reg.executor = std::move(executor);
     reg.advertised = advertised;
 
@@ -323,6 +388,11 @@ void ToolExecutor::registerTool(const std::string& name,
 // dependencies. Intentionally not defined here.
 
 ToolResult ToolExecutor::execute(const ToolCall& call) {
+    return execute(call, Mem::OperationContext{});
+}
+
+ToolResult ToolExecutor::execute(const ToolCall& call,
+                                 const Mem::OperationContext& context) {
     // Snapshot the registration under the mutex, then release the lock
     // before invoking the executor — executors may take a long time and
     // must not serialise unrelated registry queries.
@@ -381,6 +451,14 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
 
     const std::string normalizedArgsJson = args.dump();
 
+    Mem::OperationContext executionContext = context;
+    const auto timeoutDeadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::seconds(timeoutSeconds);
+    if (executionContext.deadline > timeoutDeadline) {
+        executionContext.deadline = timeoutDeadline;
+    }
+
     // Invoke the executor asynchronously. Read-only tools enforce a
     // wall-clock timeout (AC 6.6); write-classified tools wait for the real
     // result in this background thread so the agent never continues from an
@@ -388,12 +466,25 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
     ToolResult result;
     try {
         std::shared_future<std::string> fut =
-            runExecutorAsync(registration.executor, normalizedArgsJson, timeoutSeconds);
+            runExecutorAsync(registration.executor,
+                             normalizedArgsJson,
+                             executionContext,
+                             timeoutSeconds);
         if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {
             if (registration.safety == ToolSafety::Write) {
                 result.resultJson = fut.get();
                 result.errorMessage = extractToolError(result.resultJson);
                 result.success = result.errorMessage.empty();
+                if (result.success &&
+                    registration.targetPolicy == ToolTargetPolicy::Selection) {
+                    std::string targetError;
+                    result.selectedTarget =
+                        extractSelectedTarget(result.resultJson, targetError);
+                    if (!result.selectedTarget) {
+                        result.success = false;
+                        result.errorMessage = std::move(targetError);
+                    }
+                }
                 return result;
             }
 
@@ -405,6 +496,16 @@ ToolResult ToolExecutor::execute(const ToolCall& call) {
         result.resultJson = fut.get();
         result.errorMessage = extractToolError(result.resultJson);
         result.success = result.errorMessage.empty();
+        if (result.success &&
+            registration.targetPolicy == ToolTargetPolicy::Selection) {
+            std::string targetError;
+            result.selectedTarget =
+                extractSelectedTarget(result.resultJson, targetError);
+            if (!result.selectedTarget) {
+                result.success = false;
+                result.errorMessage = std::move(targetError);
+            }
+        }
     } catch (const std::exception& e) {
         result.success = false;
         result.resultJson.clear();
@@ -440,6 +541,14 @@ ToolSafety ToolExecutor::getToolSafety(const std::string& name) const {
         return ToolSafety::ReadOnly;
     }
     return it->second.safety;
+}
+
+ToolTargetPolicy ToolExecutor::getToolTargetPolicy(
+    const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = tools_.find(name);
+    return it == tools_.end() ? ToolTargetPolicy::None
+                              : it->second.targetPolicy;
 }
 
 void ToolExecutor::setExecutionTimeout(int seconds) {

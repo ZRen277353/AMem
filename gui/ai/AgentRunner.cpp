@@ -85,6 +85,7 @@ AgentRunner::Outcome AgentRunner::beginToolCalls(const std::vector<ToolCall>& ca
                            std::make_move_iterator(run.traceEvents.begin()),
                            std::make_move_iterator(run.traceEvents.end()));
     out.pendingToolCall = std::move(run.pendingToolCall);
+    out.toolCallToExecute = std::move(run.toolCallToExecute);
     out.kind = run.kind;
     return out;
 }
@@ -136,6 +137,26 @@ AgentRunner::Outcome AgentRunner::resumeDenied(const Config& config) {
     appendTrace(out, AgentTraceType::ToolBatchComplete, nullptr);
     out.kind = OutcomeKind::ReadyForFollowUp;
     return out;
+}
+
+AgentRunner::Outcome AgentRunner::failPendingTool(
+    const ToolResult& result,
+    long long durationMs,
+    const Config& config) {
+    if (!awaitingConfirmation_ ||
+        currentToolCallIndex_ >= static_cast<int>(pendingToolCalls_.size())) {
+        Outcome out;
+        reset();
+        out.kind = OutcomeKind::Stopped;
+        return out;
+    }
+
+    awaitingConfirmation_ = false;
+    return completeToolExecution(
+        pendingToolCalls_[currentToolCallIndex_],
+        result,
+        durationMs,
+        config);
 }
 
 AgentRunner::Outcome AgentRunner::completeToolExecution(const ToolCall& call,

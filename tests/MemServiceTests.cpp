@@ -1,4 +1,6 @@
 #include "../gui/ai/AgentMemTools.h"
+#include "../gui/ai/AgentController.h"
+#include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
 #include "../mem/Address.h"
 #include "../mem/MemService.h"
@@ -15,6 +17,17 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace AI {
+
+// AgentController's provider-dispatch path is not exercised by this
+// no-device test binary. Supplying the one referenced registry method keeps
+// the controller's tool/context behavior independently linkable.
+AIProvider* ProviderRegistry::getProvider(const std::string&) {
+    return nullptr;
+}
+
+} // namespace AI
 
 namespace {
 
@@ -359,41 +372,301 @@ void testAgentAdapter() {
     FakeBackend backend;
     Mem::MemService service(backend);
     AI::AgentMemTools tools(service);
+    const Mem::OperationContext connectionContext =
+        service.captureContext(false);
+    const Mem::OperationContext targetContext = service.captureContext(true);
 
-    const json status = json::parse(tools.status("{}"));
+    const json status = json::parse(tools.status("{}", connectionContext));
     expect(status.at("success").get<bool>() &&
                status.at("connection_generation").get<uint64_t>() == 1,
            "status adapter should expose structured success and generation");
 
     const json processes = json::parse(
-        tools.processList(R"({"filter":"game","count":1})"));
+        tools.processList(
+            R"({"filter":"game","count":1})", connectionContext));
     expect(processes.at("success").get<bool>() &&
                processes.at("truncated").get<bool>(),
            "process adapter should expose pagination metadata");
 
     const json strictAddress = json::parse(
-        tools.memoryRead(R"({"address":"1000","size":4})", false));
+        tools.memoryRead(
+            R"({"address":"1000","size":4})", false, targetContext));
     expect(!strictAddress.at("success").get<bool>() &&
                strictAddress.at("error").at("code") == "invalid_argument",
            "canonical memory_read should reject missing 0x prefix");
 
     const json read = json::parse(
-        tools.memoryRead(R"({"address":"0x1000","size":4})", false));
+        tools.memoryRead(
+            R"({"address":"0x1000","size":4})", false, targetContext));
     expect(read.at("success").get<bool>() &&
                read.at("hex") == "DEADBEEF" &&
                read.at("data") == "DE AD BE EF",
            "memory adapter should expose compact and spaced hex");
 
     const json legacyRead = json::parse(
-        tools.memoryRead(R"({"address":4096,"size":4})", true));
+        tools.memoryRead(
+            R"({"address":4096,"size":4})", true, targetContext));
     expect(legacyRead.at("success").get<bool>(),
            "hidden legacy memory alias should accept integer addresses");
 
     backend.connected = false;
-    const json disconnected = json::parse(tools.processList("{}"));
+    const json disconnected = json::parse(
+        tools.processList("{}", connectionContext));
     expect(!disconnected.at("success").get<bool>() &&
                disconnected.at("error").at("code") == "not_connected",
            "adapter should preserve structured service errors");
+}
+
+AI::ToolCall toolCall(std::string id,
+                      std::string name,
+                      std::string arguments = "{}") {
+    AI::ToolCall call;
+    call.id = std::move(id);
+    call.name = std::move(name);
+    call.arguments = std::move(arguments);
+    return call;
+}
+
+void registerContextTestTools(AI::AgentMemTools& tools) {
+    auto& registry = AI::ToolExecutor::getInstance();
+    registry.registerTool(
+        "test_context_status", "status", "{}", AI::ToolSafety::ReadOnly,
+        [&tools](const std::string& args,
+                 const Mem::OperationContext& context) {
+            return tools.status(args, context);
+        },
+        AI::ToolTargetPolicy::None);
+    registry.registerTool(
+        "test_context_process_list", "process list", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&tools](const std::string& args,
+                 const Mem::OperationContext& context) {
+            return tools.processList(args, context);
+        },
+        AI::ToolTargetPolicy::None);
+    registry.registerTool(
+        "test_context_process_open", "process open", "{}",
+        AI::ToolSafety::Write,
+        [&tools](const std::string& args,
+                 const Mem::OperationContext& context) {
+            return tools.processOpen(args, context);
+        },
+        AI::ToolTargetPolicy::Selection);
+    registry.registerTool(
+        "test_context_memory_read", "memory read", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&tools](const std::string& args,
+                 const Mem::OperationContext& context) {
+            return tools.memoryRead(args, false, context);
+        },
+        AI::ToolTargetPolicy::Bound);
+}
+
+bool outcomeContains(const AI::AgentRunner::Outcome& outcome,
+                     const std::string& text) {
+    for (const auto& message : outcome.messages) {
+        if (message.content.find(text) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void testApprovalContextInvalidation() {
+    AI::AgentController::ToolConfig config;
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        const AI::ToolCall open = toolCall(
+            "open-target-switch", "test_context_process_open", R"({"pid":84})");
+        auto waiting = controller.beginToolCalls({open}, config);
+        expect(waiting.kind == AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+               "process open should wait for approval");
+
+        backend.target.processRevision += 2;
+        auto rejected = controller.approvePendingTool(config);
+        expect(rejected.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   outcomeContains(rejected, "target_changed"),
+               "target switch while awaiting approval must reject execution");
+    }
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        const AI::ToolCall open = toolCall(
+            "open-reconnect", "test_context_process_open", R"({"pid":84})");
+        auto waiting = controller.beginToolCalls({open}, config);
+        expect(waiting.kind == AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+               "process open should wait for approval before reconnect test");
+
+        ++backend.generation;
+        auto rejected = controller.approvePendingTool(config);
+        expect(rejected.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   outcomeContains(rejected, "connection_changed"),
+               "reconnect while awaiting approval must reject execution");
+    }
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        const AI::ToolCall open = toolCall(
+            "open-before-send", "test_context_process_open", R"({"pid":84})");
+        auto waiting = controller.beginToolCalls({open}, config);
+        expect(waiting.kind == AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+               "process open should wait for approval before send-time test");
+        auto approved = controller.approvePendingTool(config);
+        expect(approved.kind == AI::AgentRunner::OutcomeKind::NeedsExecution,
+               "stable approved target should be released for execution");
+
+        backend.target.processRevision += 2;
+        const AI::ToolResult rejected =
+            AI::ToolExecutor::getInstance().execute(
+                open, controller.operationContext());
+        expect(!rejected.success &&
+                   rejected.resultJson.find("target_changed") !=
+                       std::string::npos,
+               "target switch after approval but before send must be rejected");
+    }
+}
+
+void testProcessOpenAdvancesRunTarget() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    AI::AgentMemTools tools(service);
+    registerContextTestTools(tools);
+    AI::AgentController controller(service);
+    AI::AgentController::ToolConfig config;
+    controller.resetForNewRun();
+
+    const AI::ToolCall open = toolCall(
+        "open-batch", "test_context_process_open", R"({"pid":84})");
+    const AI::ToolCall read = toolCall(
+        "read-batch", "test_context_memory_read",
+        R"({"address":"0x1000","size":4})");
+
+    auto waiting = controller.beginToolCalls({open, read}, config);
+    expect(waiting.kind == AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+           "target selection should block the tool batch for approval");
+
+    auto openReady = controller.approvePendingTool(config);
+    expect(openReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+               openReady.toolCallToExecute &&
+               openReady.toolCallToExecute->name == open.name,
+           "approved process open should be released for execution");
+
+    AI::ToolResult openResult = AI::ToolExecutor::getInstance().execute(
+        open, controller.operationContext());
+    expect(openResult.success && openResult.selectedTarget &&
+               openResult.selectedTarget->pid == 84,
+           "process open should return a structured selected target");
+
+    auto readReady = controller.completeToolExecution(
+        open, openResult, 1, config);
+    expect(readReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+               readReady.toolCallToExecute &&
+               readReady.toolCallToExecute->name == read.name,
+           "successful process open should release the next bound tool");
+    expect(controller.snapshot().context.operation.target &&
+               controller.snapshot().context.operation.target->pid == 84,
+           "process open must explicitly advance the run target snapshot");
+
+    AI::ToolResult readResult = AI::ToolExecutor::getInstance().execute(
+        read, controller.operationContext());
+    expect(readResult.success,
+           "memory read should use the target selected earlier in the batch");
+    auto complete = controller.completeToolExecution(
+        read, readResult, 1, config);
+    expect(complete.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp,
+           "successful open/read batch should complete normally");
+}
+
+void testNonTargetToolsAndStaleResult() {
+    AI::AgentController::ToolConfig config;
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        backend.target.processRevision += 2;
+        const AI::ToolCall status =
+            toolCall("status-non-target", "test_context_status");
+        const AI::ToolCall list =
+            toolCall("list-non-target", "test_context_process_list");
+        auto statusReady = controller.beginToolCalls({status, list}, config);
+        expect(statusReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   statusReady.toolCallToExecute &&
+                   statusReady.toolCallToExecute->name == status.name,
+               "non-target status should ignore a target-only change");
+
+        const AI::ToolResult statusResult =
+            AI::ToolExecutor::getInstance().execute(
+                status, controller.operationContext());
+        expect(statusResult.success, "status should execute on the run generation");
+        auto listReady = controller.completeToolExecution(
+            status, statusResult, 1, config);
+        expect(listReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   listReady.toolCallToExecute &&
+                   listReady.toolCallToExecute->name == list.name,
+               "process list should follow status despite target change");
+
+        const AI::ToolResult listResult =
+            AI::ToolExecutor::getInstance().execute(
+                list, controller.operationContext());
+        expect(listResult.success, "process list should remain connection-bound only");
+        auto complete = controller.completeToolExecution(
+            list, listResult, 1, config);
+        expect(complete.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp,
+               "non-target tool batch should complete normally");
+    }
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        const AI::ToolCall read = toolCall(
+            "read-stale", "test_context_memory_read",
+            R"({"address":"0x1000","size":4})");
+        auto ready = controller.beginToolCalls({read}, config);
+        expect(ready.kind == AI::AgentRunner::OutcomeKind::NeedsExecution,
+               "bound read should be released while its target is current");
+
+        const AI::ToolResult successfulRead =
+            AI::ToolExecutor::getInstance().execute(
+                read, controller.operationContext());
+        expect(successfulRead.success,
+               "read should initially complete against the expected target");
+        backend.target.processRevision += 2;
+
+        auto rejected = controller.completeToolExecution(
+            read, successfulRead, 1, config);
+        expect(rejected.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   outcomeContains(rejected, "target_changed"),
+               "late success must be rejected after the target changes");
+    }
 }
 
 } // namespace
@@ -407,6 +680,9 @@ int main() {
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},
+        {"approval context invalidation", &testApprovalContextInvalidation},
+        {"process open advances run target", &testProcessOpenAdvancesRunTarget},
+        {"non-target and stale result handling", &testNonTargetToolsAndStaleResult},
     };
 
     int failed = 0;

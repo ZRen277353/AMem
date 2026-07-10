@@ -4,6 +4,8 @@
 
 #include "ProviderRegistry.h"
 #include "ToolExecutor.h"
+#include "../../mem/IMemService.h"
+#include "../../third_party/nlohmann/json.hpp"
 
 #include <atomic>
 #include <cctype>
@@ -11,6 +13,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <utility>
 
 namespace AI {
@@ -74,7 +77,41 @@ std::string validateProviderConfig(const AIProvider& provider,
     return {};
 }
 
+ToolResult contextFailureResult(const Mem::Error& error) {
+    nlohmann::json output;
+    output["success"] = false;
+    output["error"] = {
+        {"code", Mem::errorCodeName(error.code)},
+        {"message", error.message},
+        {"retryable", error.retryable},
+    };
+
+    ToolResult result;
+    result.success = false;
+    result.resultJson = output.dump();
+    result.errorMessage = error.message;
+    return result;
+}
+
+void appendOutcomePayload(AgentRunner::Outcome& destination,
+                          AgentRunner::Outcome source) {
+    destination.messages.insert(
+        destination.messages.end(),
+        std::make_move_iterator(source.messages.begin()),
+        std::make_move_iterator(source.messages.end()));
+    destination.logs.insert(
+        destination.logs.end(),
+        std::make_move_iterator(source.logs.begin()),
+        std::make_move_iterator(source.logs.end()));
+    destination.pendingToolCall = std::move(source.pendingToolCall);
+    destination.toolCallToExecute = std::move(source.toolCallToExecute);
+    destination.kind = source.kind;
+}
+
 } // namespace
+
+AgentController::AgentController(Mem::IMemService& memService)
+    : memService_(memService) {}
 
 void AgentController::trimTrace() {
     constexpr size_t kMaxTraceEvents = 128;
@@ -139,6 +176,7 @@ AgentController::DispatchResult AgentController::dispatchModelRequest(
         cancelToken = std::make_shared<std::atomic<bool>>(false);
     }
     cancelToken->store(false);
+    run_.context.operation.cancellation = cancelToken;
     provider->sendCompletion(completion, std::move(cancelToken));
     result.dispatched = true;
     markWaitingModel();
@@ -149,20 +187,12 @@ AgentController::ToolOutcome AgentController::beginToolCalls(
     const std::vector<ToolCall>& calls,
     const ToolConfig& config) {
     markExecutingTools();
-    AgentRunner::Outcome outcome = runner_.beginToolCalls(calls, config);
-    appendTraceEvents(outcome.traceEvents);
-    outcome.traceEvents.clear();
-    updateRunFromToolOutcome(outcome);
-    return outcome;
+    return consumeToolOutcome(runner_.beginToolCalls(calls, config), config);
 }
 
 AgentController::ToolOutcome AgentController::resumeApprovedTool(
     const ToolConfig& config) {
-    AgentRunner::Outcome outcome = runner_.resumeApproved(config);
-    appendTraceEvents(outcome.traceEvents);
-    outcome.traceEvents.clear();
-    updateRunFromToolOutcome(outcome);
-    return outcome;
+    return consumeToolOutcome(runner_.resumeApproved(config), config);
 }
 
 AgentController::ToolOutcome AgentController::approvePendingTool(
@@ -173,11 +203,7 @@ AgentController::ToolOutcome AgentController::approvePendingTool(
 
 AgentController::ToolOutcome AgentController::resumeDeniedTool(
     const ToolConfig& config) {
-    AgentRunner::Outcome outcome = runner_.resumeDenied(config);
-    appendTraceEvents(outcome.traceEvents);
-    outcome.traceEvents.clear();
-    updateRunFromToolOutcome(outcome);
-    return outcome;
+    return consumeToolOutcome(runner_.resumeDenied(config), config);
 }
 
 AgentController::ToolOutcome AgentController::completeToolExecution(
@@ -185,12 +211,43 @@ AgentController::ToolOutcome AgentController::completeToolExecution(
     const ToolResult& result,
     long long durationMs,
     const ToolConfig& config) {
-    AgentRunner::Outcome outcome =
-        runner_.completeToolExecution(call, result, durationMs, config);
-    appendTraceEvents(outcome.traceEvents);
-    outcome.traceEvents.clear();
-    updateRunFromToolOutcome(outcome);
-    return outcome;
+    ToolResult effectiveResult = result;
+    std::optional<Mem::TargetSnapshot> selectedTarget;
+    const ToolTargetPolicy policy =
+        ToolExecutor::getInstance().getToolTargetPolicy(call.name);
+
+    if (effectiveResult.success) {
+        const Mem::OperationContext current =
+            memService_.captureContext(policy != ToolTargetPolicy::None);
+        std::optional<Mem::Error> contextError;
+        if (policy == ToolTargetPolicy::Selection) {
+            if (!effectiveResult.selectedTarget) {
+                contextError = Mem::Error{
+                    Mem::ErrorCode::InternalError,
+                    "target-selection result is missing its target snapshot",
+                    false};
+            } else {
+                selectedTarget = effectiveResult.selectedTarget;
+                contextError = validateTargetSelectionResult(
+                    run_.context.operation, current, *selectedTarget);
+            }
+        } else {
+            contextError = validateAgentRunContext(
+                run_.context.operation, current, policy);
+        }
+
+        if (contextError) {
+            effectiveResult = contextFailureResult(*contextError);
+        }
+    }
+
+    AgentRunner::Outcome outcome = runner_.completeToolExecution(
+        call, effectiveResult, durationMs, config);
+    if (effectiveResult.success && selectedTarget &&
+        outcome.kind != AgentRunner::OutcomeKind::Stopped) {
+        run_.context.operation.target = *selectedTarget;
+    }
+    return consumeToolOutcome(std::move(outcome), config);
 }
 
 AgentController::ToolOutcome AgentController::denyPendingTool(
@@ -207,11 +264,14 @@ void AgentController::reset() {
     run_.toolSteps = 0;
     run_.pendingApproval.reset();
     run_.approvalDecision = AgentApprovalDecision::Pending;
+    run_.context = {};
 }
 
 void AgentController::resetForNewRun() {
     reset();
     run_.id = makeRunId();
+    run_.context.runId = run_.id;
+    run_.context.operation = memService_.captureContext(true);
     clearTrace();
 }
 
@@ -243,6 +303,49 @@ void AgentController::appendTraceEvents(std::vector<AgentTraceEvent> events) {
 void AgentController::appendTraceEvent(AgentTraceEvent event) {
     run_.trace.push_back(std::move(event));
     trimTrace();
+}
+
+AgentController::ToolOutcome AgentController::consumeToolOutcome(
+    ToolOutcome outcome,
+    const ToolConfig& config) {
+    appendTraceEvents(std::move(outcome.traceEvents));
+    outcome.traceEvents.clear();
+
+    const ToolCall* blockedCall = nullptr;
+    bool awaitingApproval = false;
+    if (outcome.kind == ToolOutcomeKind::NeedsConfirmation &&
+        outcome.pendingToolCall) {
+        blockedCall = &*outcome.pendingToolCall;
+        awaitingApproval = true;
+    } else if (outcome.kind == ToolOutcomeKind::NeedsExecution &&
+               outcome.toolCallToExecute) {
+        blockedCall = &*outcome.toolCallToExecute;
+    }
+
+    if (blockedCall) {
+        if (const auto error = validateToolContext(*blockedCall)) {
+            const ToolResult failure = contextFailureResult(*error);
+            ToolOutcome rejected = awaitingApproval
+                ? runner_.failPendingTool(failure, 0, config)
+                : runner_.completeToolExecution(
+                      *blockedCall, failure, 0, config);
+            appendTraceEvents(std::move(rejected.traceEvents));
+            rejected.traceEvents.clear();
+            appendOutcomePayload(outcome, std::move(rejected));
+        }
+    }
+
+    updateRunFromToolOutcome(outcome);
+    return outcome;
+}
+
+std::optional<Mem::Error> AgentController::validateToolContext(
+    const ToolCall& call) const {
+    const ToolTargetPolicy policy =
+        ToolExecutor::getInstance().getToolTargetPolicy(call.name);
+    const Mem::OperationContext current =
+        memService_.captureContext(policy != ToolTargetPolicy::None);
+    return validateAgentRunContext(run_.context.operation, current, policy);
 }
 
 void AgentController::updateRunFromToolOutcome(const ToolOutcome& outcome) {
@@ -336,6 +439,7 @@ AgentRunSnapshot AgentController::snapshot() const {
     snap.trace = run_.trace;
     snap.pendingApproval = run_.pendingApproval;
     snap.approvalDecision = run_.approvalDecision;
+    snap.context = run_.context;
     return snap;
 }
 

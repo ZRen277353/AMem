@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AIProvider.h"
+#include "AgentRunContext.h"
 #include "AgentTrace.h"
 
 #include <optional>
@@ -56,6 +57,7 @@ struct AgentRun {
     std::vector<AgentTraceEvent> trace;
     std::optional<ToolCall> pendingApproval;
     AgentApprovalDecision approvalDecision = AgentApprovalDecision::Pending;
+    AgentRunContext context;
 };
 
 struct AgentRunSnapshot {
@@ -66,6 +68,7 @@ struct AgentRunSnapshot {
     std::vector<AgentTraceEvent> trace;
     std::optional<ToolCall> pendingApproval;
     AgentApprovalDecision approvalDecision = AgentApprovalDecision::Pending;
+    AgentRunContext context;
 };
 
 } // namespace AI

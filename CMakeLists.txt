@@ -148,6 +148,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/SessionManager.cpp
     gui/ai/AgentController.cpp
     gui/ai/AgentRunner.cpp
+    gui/ai/AgentRunContext.cpp
     gui/ai/AgentMemTools.cpp
     gui/ai/AgentMemToolsSystem.cpp
     gui/ai/ChatWindow.cpp
@@ -364,6 +365,9 @@ if(BUILD_TESTING)
         mem/MemService.cpp
         socket/DeviceSession.cpp
         gui/ai/AgentMemTools.cpp
+        gui/ai/AgentRunContext.cpp
+        gui/ai/AgentRunner.cpp
+        gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp
     )
     target_include_directories(NativeAgentMemTests PRIVATE

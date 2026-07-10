@@ -10,13 +10,19 @@ class AgentMemTools {
 public:
     explicit AgentMemTools(Mem::IMemService& service);
 
-    std::string status(const std::string& argsJson);
-    std::string serverVersion(const std::string& argsJson);
-    std::string architecture(const std::string& argsJson);
-    std::string processList(const std::string& argsJson);
-    std::string processOpen(const std::string& argsJson);
+    std::string status(const std::string& argsJson,
+                       const Mem::OperationContext& context);
+    std::string serverVersion(const std::string& argsJson,
+                              const Mem::OperationContext& context);
+    std::string architecture(const std::string& argsJson,
+                             const Mem::OperationContext& context);
+    std::string processList(const std::string& argsJson,
+                            const Mem::OperationContext& context);
+    std::string processOpen(const std::string& argsJson,
+                            const Mem::OperationContext& context);
     std::string memoryRead(const std::string& argsJson,
-                           bool allowLegacyAddress);
+                           bool allowLegacyAddress,
+                           const Mem::OperationContext& context);
 
 private:
     Mem::IMemService& service_;

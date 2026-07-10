@@ -2,10 +2,12 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AIProvider.h"
+#include "AgentRunContext.h"
 
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,7 +19,9 @@ namespace AI {
 struct ToolRegistration {
     ToolDefinition definition;
     ToolSafety safety = ToolSafety::ReadOnly;
-    std::function<std::string(const std::string& argsJson)> executor;
+    ToolTargetPolicy targetPolicy = ToolTargetPolicy::None;
+    std::function<std::string(const std::string& argsJson,
+                              const Mem::OperationContext& context)> executor;
     bool advertised = true;
 };
 
@@ -29,6 +33,7 @@ struct ToolResult {
     bool success = false;
     std::string resultJson;
     std::string errorMessage;
+    std::optional<Mem::TargetSnapshot> selectedTarget;
 };
 
 // Meyer's singleton that owns the tool registry and drives tool execution on
@@ -51,7 +56,21 @@ public:
                       const std::string& parametersSchema,
                       ToolSafety safety,
                       std::function<std::string(const std::string&)> executor,
-                      bool advertised = true);
+                      bool advertised = true,
+                      ToolTargetPolicy targetPolicy = ToolTargetPolicy::None);
+
+    // Context-aware overload used by tools migrated to MemService. The
+    // supplied operation snapshot is owned by the current agent run and must
+    // not be recaptured from global state inside the executor.
+    void registerTool(
+        const std::string& name,
+        const std::string& description,
+        const std::string& parametersSchema,
+        ToolSafety safety,
+        std::function<std::string(const std::string&,
+                                  const Mem::OperationContext&)> executor,
+        ToolTargetPolicy targetPolicy,
+        bool advertised = true);
 
     // Initialise the built-in tool set. Definition lives in
     // ToolDefinitions.cpp (task 5.2) so that the executor core stays
@@ -63,6 +82,8 @@ public:
     // wrapping. Never throws; any exception from the executor is captured
     // and surfaced as a ToolResult with success=false.
     ToolResult execute(const ToolCall& call);
+    ToolResult execute(const ToolCall& call,
+                       const Mem::OperationContext& context);
 
     // Return advertised AI-facing definitions. Hidden compatibility aliases
     // remain executable for saved sessions but are not sent to providers.
@@ -72,6 +93,7 @@ public:
     // as a safe default when the tool is not registered so that callers
     // never accidentally treat an unknown tool as write-classified.
     ToolSafety getToolSafety(const std::string& name) const;
+    ToolTargetPolicy getToolTargetPolicy(const std::string& name) const;
 
     // Execution timeout configuration. setExecutionTimeout() clamps the
     // argument to the inclusive range [1, 300] seconds (AC 6.5).
