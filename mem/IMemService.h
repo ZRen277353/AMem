@@ -20,6 +20,9 @@ public:
     virtual Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) = 0;
+    virtual Result<WriteReceipt> writeMemory(
+        const OperationContext& context,
+        const MemoryWriteRequest& request) = 0;
 };
 
 } // namespace Mem

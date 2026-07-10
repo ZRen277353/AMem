@@ -87,6 +87,21 @@ public:
                     std::vector<unsigned char>& bytes) override {
         return ReadProcessMemoryBytes(address, size, bytes, PORT_MAIN);
     }
+
+    MemoryWriteBackendResult writeMemory(
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        const MemoryWriteIoResult io = WriteProcessMemoryBytesTracked(
+            address,
+            static_cast<uint32_t>(bytes.size()),
+            bytes,
+            PORT_MAIN);
+        MemoryWriteBackendResult result;
+        result.requestStarted = io.requestStarted;
+        result.responseReceived = io.responseReceived;
+        result.writtenBytes = io.writtenBytes;
+        return result;
+    }
 };
 
 } // namespace

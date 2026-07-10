@@ -72,12 +72,15 @@ bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,
     });
 }
 
-bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
-                             std::vector<unsigned char> &data, PortType port) {
+MemoryWriteIoResult WriteProcessMemoryBytesTracked(
+    uint64_t address, uint32_t size,
+    const std::vector<unsigned char> &data, PortType port) {
+    MemoryWriteIoResult result;
     if (!isValidReadSize(size) || data.size() != static_cast<size_t>(size))
-        return false;
+        return result;
 
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+    SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
 #pragma pack(1)
         struct { unsigned char command; CeWriteProcessMemoryInput input; } op;
 #pragma pack()
@@ -89,11 +92,22 @@ bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
             return false;
         if (!client->Send(data.data(), data.size()))
             return false;
-        CeWriteProcessMemoryOutput output;
+        CeWriteProcessMemoryOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        return output.written == size;
+        result.responseReceived = true;
+        result.writtenBytes = output.written;
+        return true;
     });
+    return result;
+}
+
+bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
+                             std::vector<unsigned char> &data, PortType port) {
+    const MemoryWriteIoResult result =
+        WriteProcessMemoryBytesTracked(address, size, data, port);
+    return result.responseReceived && result.writtenBytes >= 0 &&
+           static_cast<uint32_t>(result.writtenBytes) == size;
 }
 
 bool ReadProcessMemory_(uint64_t address, uint32_t size, void *out,

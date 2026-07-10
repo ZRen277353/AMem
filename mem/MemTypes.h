@@ -95,7 +95,28 @@ struct MemoryBlock {
     TargetSnapshot target;
 };
 
+struct MemoryWriteRequest {
+    uint64_t address = 0;
+    std::vector<unsigned char> bytes;
+};
+
+struct MemoryWriteBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    int32_t writtenBytes = 0;
+};
+
+struct WriteReceipt {
+    uint64_t address = 0;
+    uint32_t requestedBytes = 0;
+    uint32_t writtenBytes = 0;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+    TargetSnapshot target;
+};
+
 inline constexpr uint32_t kMaxAgentMemoryReadBytes = 64u * 1024u;
+inline constexpr uint32_t kMaxAgentMemoryWriteBytes = 4u * 1024u;
 inline constexpr size_t kMaxProcessPageSize = 1000;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
 

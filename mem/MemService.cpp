@@ -368,4 +368,93 @@ Result<MemoryBlock> MemService::readMemory(
                                         elapsedMilliseconds(start));
 }
 
+Result<WriteReceipt> MemService::writeMemory(
+    const OperationContext& context,
+    const MemoryWriteRequest& request) {
+    const auto start = Clock::now();
+    if (request.bytes.empty() ||
+        request.bytes.size() > kMaxAgentMemoryWriteBytes) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "memory write size must be between 1 and 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.address >
+        (std::numeric_limits<uint64_t>::max)() -
+            (request.bytes.size() - 1u)) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "memory write range overflows the uint64 address space",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<WriteReceipt>(*error, start);
+    }
+
+    const MemoryWriteBackendResult backendResult =
+        backend_.writeMemory(request.address, request.bytes);
+    if (!backendResult.responseReceived) {
+        if (backendResult.requestStarted) {
+            return Result<WriteReceipt>::failure(
+                ErrorCode::CompletionUnknown,
+                "memory write was sent but its completion could not be confirmed; reconnect before continuing and do not retry automatically",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<WriteReceipt>(*error, start);
+        }
+        return Result<WriteReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "memory write could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    if (backendResult.writtenBytes < 0 ||
+        static_cast<uint64_t>(backendResult.writtenBytes) >
+            request.bytes.size()) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "memory write returned an invalid byte count",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (static_cast<size_t>(backendResult.writtenBytes) !=
+        request.bytes.size()) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "server confirmed a partial memory write (" +
+                std::to_string(backendResult.writtenBytes) + "/" +
+                std::to_string(request.bytes.size()) +
+                " bytes); do not retry automatically",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "server confirmed the memory write, but the original target context is no longer current: " +
+                error->message,
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    WriteReceipt receipt;
+    receipt.address = request.address;
+    receipt.requestedBytes = static_cast<uint32_t>(request.bytes.size());
+    receipt.writtenBytes =
+        static_cast<uint32_t>(backendResult.writtenBytes);
+    receipt.completedAfterCancelRequest =
+        context.cancellation &&
+        context.cancellation->load(std::memory_order_acquire);
+    receipt.completedAfterDeadline = Clock::now() >= context.deadline;
+    receipt.target = *context.target;
+    return Result<WriteReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
 } // namespace Mem

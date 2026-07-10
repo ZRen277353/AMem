@@ -77,7 +77,8 @@ std::string validateProviderConfig(const AIProvider& provider,
     return {};
 }
 
-ToolResult contextFailureResult(const Mem::Error& error) {
+ToolResult contextFailureResult(const Mem::Error& error,
+                                const ToolResult* staleResult = nullptr) {
     nlohmann::json output;
     output["success"] = false;
     output["error"] = {
@@ -85,6 +86,17 @@ ToolResult contextFailureResult(const Mem::Error& error) {
         {"message", error.message},
         {"retryable", error.retryable},
     };
+    if (staleResult && staleResult->success) {
+        output["stale_result_was_success"] = true;
+        if (!staleResult->resultJson.empty()) {
+            try {
+                output["stale_result"] =
+                    nlohmann::json::parse(staleResult->resultJson);
+            } catch (const nlohmann::json::exception&) {
+                output["stale_result_raw"] = staleResult->resultJson;
+            }
+        }
+    }
 
     ToolResult result;
     result.success = false;
@@ -237,7 +249,8 @@ AgentController::ToolOutcome AgentController::completeToolExecution(
         }
 
         if (contextError) {
-            effectiveResult = contextFailureResult(*contextError);
+            effectiveResult =
+                contextFailureResult(*contextError, &effectiveResult);
         }
     }
 

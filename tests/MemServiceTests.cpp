@@ -58,6 +58,16 @@ public:
     bool changeTargetAfterRead = false;
     bool changeGenerationAfterRead = false;
     bool changeGenerationDuringOpen = false;
+    bool writeRequestStarted = true;
+    bool writeResponseReceived = true;
+    int32_t writeReportedBytes = -1;
+    bool changeTargetAfterWrite = false;
+    bool changeGenerationAfterWrite = false;
+    int writeDelayMs = 0;
+    Mem::CancellationToken cancelDuringWrite;
+    int writeCalls = 0;
+    uint64_t lastWriteAddress = 0;
+    std::vector<unsigned char> lastWriteBytes;
 
     bool isConnected() const override {
         return connected;
@@ -131,6 +141,35 @@ public:
             ++generation;
         }
         return true;
+    }
+
+    Mem::MemoryWriteBackendResult writeMemory(
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        ++writeCalls;
+        lastWriteAddress = address;
+        lastWriteBytes = bytes;
+        if (writeDelayMs > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(writeDelayMs));
+        }
+        if (cancelDuringWrite) {
+            cancelDuringWrite->store(true, std::memory_order_release);
+        }
+        if (changeTargetAfterWrite) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterWrite) {
+            ++generation;
+        }
+
+        Mem::MemoryWriteBackendResult result;
+        result.requestStarted = writeRequestStarted;
+        result.responseReceived = writeResponseReceived;
+        result.writtenBytes = writeReportedBytes >= 0
+            ? writeReportedBytes
+            : static_cast<int32_t>(bytes.size());
+        return result;
     }
 };
 
@@ -277,6 +316,110 @@ void testMemoryReadTargetValidation() {
            "expired operation deadline must fail before backend access");
 }
 
+void testMemoryWriteCompletionContract() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    Mem::MemoryWriteRequest request;
+    request.address = 0x2000;
+    request.bytes = {0x90, 0x90, 0xC0, 0x03, 0x5F, 0xD6};
+
+    const auto written = service.writeMemory(
+        service.captureContext(true), request);
+    expect(written.ok() && written.value().writtenBytes == request.bytes.size(),
+           "confirmed memory write should return a receipt");
+    expect(backend.lastWriteAddress == request.address &&
+               backend.lastWriteBytes == request.bytes,
+           "memory write should pass the exact address and bytes to backend");
+
+    const int callsAfterSuccess = backend.writeCalls;
+    Mem::OperationContext cancelled = service.captureContext(true);
+    cancelled.cancellation = std::make_shared<std::atomic<bool>>(true);
+    const auto cancelledBeforeSend = service.writeMemory(cancelled, request);
+    expect(!cancelledBeforeSend.ok() &&
+               cancelledBeforeSend.error().code ==
+                   Mem::ErrorCode::CancelRequested &&
+               backend.writeCalls == callsAfterSuccess,
+           "cancelled write must stop before backend send");
+
+    Mem::OperationContext cancelledDuringSend = service.captureContext(true);
+    cancelledDuringSend.cancellation =
+        std::make_shared<std::atomic<bool>>(false);
+    backend.cancelDuringWrite = cancelledDuringSend.cancellation;
+    const auto completedAfterCancel = service.writeMemory(
+        cancelledDuringSend, request);
+    expect(completedAfterCancel.ok() &&
+               completedAfterCancel.value().completedAfterCancelRequest,
+           "confirmed write must report completion after a cancel request");
+    backend.cancelDuringWrite.reset();
+
+    Mem::OperationContext completedAfterDeadlineContext =
+        service.captureContext(true);
+    completedAfterDeadlineContext.deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+    backend.writeDelayMs = 40;
+    const auto completedAfterDeadline = service.writeMemory(
+        completedAfterDeadlineContext, request);
+    expect(completedAfterDeadline.ok() &&
+               completedAfterDeadline.value().completedAfterDeadline,
+           "confirmed write must report completion after its deadline");
+    backend.writeDelayMs = 0;
+
+    backend.writeResponseReceived = false;
+    backend.writeRequestStarted = true;
+    const auto completionUnknown = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!completionUnknown.ok() &&
+               completionUnknown.error().code ==
+                   Mem::ErrorCode::CompletionUnknown &&
+               !completionUnknown.error().retryable,
+           "sent write without a response must be completion_unknown");
+
+    backend.writeRequestStarted = false;
+    const auto notSent = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!notSent.ok() &&
+               notSent.error().code == Mem::ErrorCode::ProtocolError &&
+               notSent.error().retryable,
+           "write known not to be sent may report a retryable transport error");
+
+    backend.writeRequestStarted = true;
+    backend.writeResponseReceived = true;
+    backend.writeReportedBytes = 2;
+    const auto partial = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!partial.ok() &&
+               partial.error().code == Mem::ErrorCode::ProtocolError &&
+               !partial.error().retryable,
+           "confirmed partial write must fail without automatic retry");
+
+    backend.writeReportedBytes = -1;
+    backend.changeTargetAfterWrite = true;
+    const auto targetChanged = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!targetChanged.ok() &&
+               targetChanged.error().code ==
+                   Mem::ErrorCode::CompletionUnknown,
+           "confirmed write must not be bound to a target that changed in flight");
+    backend.changeTargetAfterWrite = false;
+
+    backend.changeGenerationAfterWrite = true;
+    const auto connectionChanged = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!connectionChanged.ok() &&
+               connectionChanged.error().code ==
+                   Mem::ErrorCode::CompletionUnknown,
+           "confirmed write on a replaced connection must be completion_unknown");
+    backend.changeGenerationAfterWrite = false;
+
+    request.address = (std::numeric_limits<uint64_t>::max)() - 1;
+    request.bytes = {1, 2, 3, 4};
+    const auto overflow = service.writeMemory(
+        service.captureContext(true), request);
+    expect(!overflow.ok() &&
+               overflow.error().code == Mem::ErrorCode::InvalidArgument,
+           "overflowing memory write range must fail validation");
+}
+
 void testHiddenToolRegistration() {
     auto& registry = AI::ToolExecutor::getInstance();
     registry.registerTool("test_visible_tool", "visible", "{}",
@@ -409,6 +552,35 @@ void testAgentAdapter() {
     expect(legacyRead.at("success").get<bool>(),
            "hidden legacy memory alias should accept integer addresses");
 
+    const json strictWriteAddress = json::parse(
+        tools.memoryWrite(
+            R"({"address":"2000","data_hex":"90 90"})",
+            false,
+            targetContext));
+    expect(!strictWriteAddress.at("success").get<bool>() &&
+               strictWriteAddress.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical memory_write should require a 0x-prefixed address");
+
+    const json write = json::parse(
+        tools.memoryWrite(
+            R"({"address":"0x2000","data_hex":"90 90"})",
+            false,
+            targetContext));
+    expect(write.at("success").get<bool>() &&
+               write.at("written_bytes") == 2 &&
+               write.at("completion") == "completed",
+           "canonical memory_write should expose a confirmed write receipt");
+
+    const json legacyWrite = json::parse(
+        tools.memoryWrite(
+            R"({"address":8192,"hex_string":"C0 03 5F D6"})",
+            true,
+            targetContext));
+    expect(legacyWrite.at("success").get<bool>() &&
+               legacyWrite.at("written_bytes") == 4,
+           "hidden write_bytes alias should retain legacy argument forms");
+
     backend.connected = false;
     const json disconnected = json::parse(
         tools.processList("{}", connectionContext));
@@ -458,6 +630,14 @@ void registerContextTestTools(AI::AgentMemTools& tools) {
         [&tools](const std::string& args,
                  const Mem::OperationContext& context) {
             return tools.memoryRead(args, false, context);
+        },
+        AI::ToolTargetPolicy::Bound);
+    registry.registerTool(
+        "test_context_memory_write", "memory write", "{}",
+        AI::ToolSafety::Write,
+        [&tools](const std::string& args,
+                 const Mem::OperationContext& context) {
+            return tools.memoryWrite(args, false, context);
         },
         AI::ToolTargetPolicy::Bound);
 }
@@ -542,6 +722,35 @@ void testApprovalContextInvalidation() {
                    rejected.resultJson.find("target_changed") !=
                        std::string::npos,
                "target switch after approval but before send must be rejected");
+    }
+
+    {
+        FakeBackend backend;
+        Mem::MemService service(backend);
+        AI::AgentMemTools tools(service);
+        registerContextTestTools(tools);
+        AI::AgentController controller(service);
+        controller.resetForNewRun();
+
+        const AI::ToolCall write = toolCall(
+            "write-before-send",
+            "test_context_memory_write",
+            R"({"address":"0x2000","data_hex":"90 90"})");
+        auto waiting = controller.beginToolCalls({write}, config);
+        expect(waiting.kind == AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+               "memory write should wait for approval");
+        auto approved = controller.approvePendingTool(config);
+        expect(approved.kind == AI::AgentRunner::OutcomeKind::NeedsExecution,
+               "approved memory write should be released while target is current");
+
+        backend.target.processRevision += 2;
+        const AI::ToolResult rejected =
+            AI::ToolExecutor::getInstance().execute(
+                write, controller.operationContext());
+        expect(!rejected.success && backend.writeCalls == 0 &&
+                   rejected.resultJson.find("target_changed") !=
+                       std::string::npos,
+               "memory write must revalidate target before backend send");
     }
 }
 
@@ -664,8 +873,9 @@ void testNonTargetToolsAndStaleResult() {
         auto rejected = controller.completeToolExecution(
             read, successfulRead, 1, config);
         expect(rejected.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
-                   outcomeContains(rejected, "target_changed"),
-               "late success must be rejected after the target changes");
+                   outcomeContains(rejected, "target_changed") &&
+                   outcomeContains(rejected, "stale_result_was_success"),
+               "late success must be rejected but retained for audit after target change");
     }
 }
 
@@ -677,6 +887,7 @@ int main() {
         {"status and generation", &testStatusAndConnectionGeneration},
         {"process pagination and open", &testProcessPaginationAndOpen},
         {"memory target validation", &testMemoryReadTargetValidation},
+        {"memory write completion contract", &testMemoryWriteCompletionContract},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},

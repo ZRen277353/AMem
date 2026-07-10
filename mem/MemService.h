@@ -22,6 +22,9 @@ public:
     Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) override;
+    Result<WriteReceipt> writeMemory(
+        const OperationContext& context,
+        const MemoryWriteRequest& request) override;
 
 private:
     std::optional<Error> validateContext(const OperationContext& context,

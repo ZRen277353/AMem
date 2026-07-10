@@ -981,37 +981,15 @@ std::string execReadValue(const std::string& argsJson) {
 }
 
 // memory_write
-std::string execMemoryWrite(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const uint64_t address = parseAddressJson(args.at("address"));
-        std::string hexBytes = requiredStringArg(
-            args, {"data_hex", "hex", "hex_string"}, "data_hex", kMaxToolHexStringBytes);
-        std::vector<unsigned char> bytes = parseHexBytes(hexBytes);
-        if (bytes.empty()) {
-            return makeError("data_hex must contain at least one byte");
-        }
-        if (bytes.size() > 4096) {
-            return makeError("data_hex exceeds maximum write size of 4096 bytes");
-        }
-
-        const uint32_t size = static_cast<uint32_t>(bytes.size());
-        if (!WriteProcessMemoryBytes(address, size, bytes, PORT_MAIN)) {
-            return makeError("socket communication error: memory_write");
-        }
-
-        json result;
-        result["address"] = toHexAddress(address);
-        result["written_bytes"] = static_cast<int>(size);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("memory_write: ") + e.what());
-    }
+std::string execMemoryWrite(const std::string& argsJson,
+                            const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryWrite(argsJson, false, context);
 }
 
-// write_bytes
-std::string execWriteBytes(const std::string& argsJson) {
-    return execMemoryWrite(argsJson);
+// hidden write_bytes compatibility alias
+std::string execWriteBytes(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryWrite(argsJson, true, context);
 }
 
 // write_value
@@ -1751,31 +1729,15 @@ constexpr const char* kSchemaMemoryRead = R"JSON({
 
 constexpr const char* kSchemaMemoryWrite = R"JSON({
   "type": "object",
-  "required": ["address"],
-  "anyOf": [
-    { "required": ["data_hex"] },
-    { "required": ["hex_string"] },
-    { "required": ["hex"] }
-  ],
+  "required": ["address", "data_hex"],
   "properties": {
     "address": {
-      "description": "Memory address as hex string or integer"
+      "type": "string",
+      "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "data_hex": {
       "type": "string",
       "description": "Hex-encoded bytes to write; whitespace and 0x prefixes are ignored (e.g. '48 65 6C 6C')",
-      "minLength": 2,
-      "maxLength": 16384
-    },
-    "hex_string": {
-      "type": "string",
-      "description": "Alias for data_hex",
-      "minLength": 2,
-      "maxLength": 16384
-    },
-    "hex": {
-      "type": "string",
-      "description": "Alias for data_hex",
       "minLength": 2,
       "maxLength": 16384
     }
@@ -2533,11 +2495,10 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "memory_write",
-        "Write bytes to target process memory. Requires user confirmation.",
+        "Write up to 4096 bytes to an explicit 0x-prefixed target address. Requires user confirmation.",
         kSchemaMemoryWrite,
         ToolSafety::Write,
         &execMemoryWrite,
-        true,
         ToolTargetPolicy::Bound);
 
     registerTool(
@@ -2546,8 +2507,8 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaWriteBytes,
         ToolSafety::Write,
         &execWriteBytes,
-        true,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Bound,
+        false);
 
     registerTool(
         "write_value",

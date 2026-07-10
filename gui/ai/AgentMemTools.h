@@ -23,6 +23,9 @@ public:
     std::string memoryRead(const std::string& argsJson,
                            bool allowLegacyAddress,
                            const Mem::OperationContext& context);
+    std::string memoryWrite(const std::string& argsJson,
+                            bool allowLegacyArguments,
+                            const Mem::OperationContext& context);
 
 private:
     Mem::IMemService& service_;

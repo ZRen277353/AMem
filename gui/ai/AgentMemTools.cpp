@@ -112,6 +112,70 @@ Mem::Result<uint64_t> parseAddressArgument(const json& value,
             : "address must be an explicit 0x-prefixed hexadecimal string");
 }
 
+std::string writeHexArgument(const json& args, bool allowLegacyArguments) {
+    const char* key = "data_hex";
+    if (allowLegacyArguments && !args.contains(key)) {
+        if (args.contains("hex_string")) {
+            key = "hex_string";
+        } else if (args.contains("hex")) {
+            key = "hex";
+        }
+    }
+    if (!args.contains(key) || !args.at(key).is_string()) {
+        throw std::runtime_error(
+            allowLegacyArguments
+                ? "data_hex, hex_string, or hex must be a string"
+                : "data_hex must be a string");
+    }
+    const std::string value = args.at(key).get<std::string>();
+    if (value.size() > 16u * 1024u) {
+        throw std::runtime_error(std::string(key) + " exceeds 16384 bytes");
+    }
+    return value;
+}
+
+std::vector<unsigned char> parseHexBytes(const std::string& input) {
+    std::string digits;
+    digits.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        const char c = input[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',') {
+            continue;
+        }
+        if (c == '0' && i + 1 < input.size() &&
+            (input[i + 1] == 'x' || input[i + 1] == 'X')) {
+            ++i;
+            continue;
+        }
+        digits.push_back(c);
+    }
+    if (digits.empty()) {
+        throw std::runtime_error("hex byte string must contain at least one byte");
+    }
+    if ((digits.size() % 2u) != 0u) {
+        throw std::runtime_error("hex byte string has an odd number of nibbles");
+    }
+
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+        return -1;
+    };
+
+    std::vector<unsigned char> bytes;
+    bytes.reserve(digits.size() / 2u);
+    for (size_t i = 0; i < digits.size(); i += 2u) {
+        const int high = nibble(digits[i]);
+        const int low = nibble(digits[i + 1u]);
+        if (high < 0 || low < 0) {
+            throw std::runtime_error("hex byte string contains a non-hex character");
+        }
+        bytes.push_back(static_cast<unsigned char>((high << 4) | low));
+    }
+    return bytes;
+}
+
 std::string compactHex(const std::vector<unsigned char>& bytes) {
     static constexpr char kHex[] = "0123456789ABCDEF";
     std::string output;
@@ -349,6 +413,60 @@ std::string AgentMemTools::memoryRead(const std::string& argsJson,
         return output.dump();
     } catch (const std::exception& error) {
         return exceptionResult("memory_read", error);
+    }
+}
+
+std::string AgentMemTools::memoryWrite(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto parsedAddress =
+            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        if (!parsedAddress.ok()) {
+            return errorResult(parsedAddress.error(), parsedAddress.durationMs());
+        }
+
+        Mem::MemoryWriteRequest request;
+        request.address = parsedAddress.value();
+        request.bytes = parseHexBytes(
+            writeHexArgument(args, allowLegacyArguments));
+        if (request.bytes.size() > Mem::kMaxAgentMemoryWriteBytes) {
+            throw std::runtime_error(
+                "memory write exceeds maximum size of 4096 bytes");
+        }
+
+        const auto response = service_.writeMemory(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::WriteReceipt& receipt = response.value();
+        json output;
+        output["success"] = true;
+        output["address"] = Mem::formatAddress(receipt.address);
+        output["requested_bytes"] = receipt.requestedBytes;
+        output["written_bytes"] = receipt.writtenBytes;
+        output["completed_after_cancel_request"] =
+            receipt.completedAfterCancelRequest;
+        output["completed_after_deadline"] =
+            receipt.completedAfterDeadline;
+        output["completion"] = receipt.completedAfterCancelRequest
+            ? "completed_after_cancel_request"
+            : (receipt.completedAfterDeadline
+                   ? "completed_after_deadline"
+                   : "completed");
+        output["meta"] = resultMeta(response.durationMs(),
+                                    receipt.target.connectionGeneration,
+                                    &receipt.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "write_bytes" : "memory_write", error);
     }
 }
 

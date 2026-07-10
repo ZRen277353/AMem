@@ -26,6 +26,9 @@ public:
     virtual bool readMemory(uint64_t address,
                             uint32_t size,
                             std::vector<unsigned char>& bytes) = 0;
+    virtual MemoryWriteBackendResult writeMemory(
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) = 0;
 };
 
 } // namespace Mem

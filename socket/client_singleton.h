@@ -166,6 +166,17 @@ bool ReadBratchAddr(
     std::vector<std::pair<uint64_t, std::vector<uint8_t>> /*addr,data*/> &out,
     PortType type = PORT_MAIN);
 
+struct MemoryWriteIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  int32_t writtenBytes = 0;
+};
+
+MemoryWriteIoResult WriteProcessMemoryBytesTracked(
+    uint64_t address, uint32_t size,
+    const std::vector<unsigned char> &data,
+    PortType type = PORT_MAIN);
+
 bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
                              std::vector<unsigned char> &data,
                              PortType type = PORT_MAIN);
