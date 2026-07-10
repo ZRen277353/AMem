@@ -2,13 +2,17 @@
 #include "../gui/ai/ToolExecutor.h"
 #include "../mem/Address.h"
 #include "../mem/MemService.h"
+#include "../socket/DeviceSession.h"
 #include "../third_party/nlohmann/json.hpp"
 
 #include <functional>
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,6 +29,7 @@ void expect(bool condition, const std::string& message) {
 class FakeBackend final : public Mem::IMemBackend {
 public:
     bool connected = true;
+    bool poisoned = false;
     uint64_t generation = 1;
     Mem::TargetSnapshot target{42, 420, 2, 1};
     std::string selectedName = "com.example.game";
@@ -43,6 +48,10 @@ public:
 
     bool isConnected() const override {
         return connected;
+    }
+
+    bool isConnectionPoisoned() const override {
+        return poisoned;
     }
 
     uint64_t connectionGeneration() const override {
@@ -283,6 +292,69 @@ void testHiddenToolRegistration() {
            "hidden compatibility alias must remain executable for old sessions");
 }
 
+void testDeviceSessionLifecycle() {
+    auto& session = DeviceSession::GetInstance();
+    {
+        auto lifecycle = session.AcquireLifecycle();
+        session.Disconnect();
+        session.BeginConnect();
+        session.FinishConnect(true);
+    }
+
+    std::atomic<bool> lifecycleStarted{false};
+    std::atomic<bool> lifecycleAcquired{false};
+    std::thread lifecycleThread;
+    {
+        auto request = session.AcquireRequest();
+        expect(request && request.isCurrent(),
+               "connected session should grant a current request lease");
+        auto nestedRequest = session.AcquireRequest();
+        expect(nestedRequest && nestedRequest.isCurrent() &&
+                   nestedRequest.generation() == request.generation(),
+               "nested commands should reuse the active request lease");
+        lifecycleThread = std::thread([&] {
+            lifecycleStarted.store(true, std::memory_order_release);
+            auto lifecycle = session.AcquireLifecycle();
+            lifecycleAcquired.store(true, std::memory_order_release);
+            session.Disconnect();
+        });
+
+        while (!lifecycleStarted.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        expect(!lifecycleAcquired.load(std::memory_order_acquire),
+               "exclusive lifecycle transition must wait for request lease");
+    }
+    lifecycleThread.join();
+    expect(lifecycleAcquired.load(std::memory_order_acquire),
+           "lifecycle transition should proceed after request lease release");
+
+    {
+        auto lifecycle = session.AcquireLifecycle();
+        session.BeginConnect();
+        session.FinishConnect(true);
+    }
+    {
+        auto request = session.AcquireRequest();
+        const uint64_t generationBeforePoison = session.GetGeneration();
+        session.MarkPoisoned();
+        expect(session.IsPoisoned(), "I/O failure should poison the session");
+        expect(session.GetGeneration() == generationBeforePoison + 1,
+               "first poison event should invalidate connection generation");
+        expect(!request.isCurrent(),
+               "poisoned generation should invalidate an in-flight request lease");
+    }
+    {
+        auto rejected = session.AcquireRequest();
+        expect(!rejected, "poisoned session must reject new requests");
+    }
+    {
+        auto lifecycle = session.AcquireLifecycle();
+        session.Disconnect();
+    }
+}
+
 void testAgentAdapter() {
     FakeBackend backend;
     Mem::MemService service(backend);
@@ -334,6 +406,7 @@ int main() {
         {"memory target validation", &testMemoryReadTargetValidation},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
+        {"device session lifecycle", &testDeviceSessionLifecycle},
     };
 
     int failed = 0;

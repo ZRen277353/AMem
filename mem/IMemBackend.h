@@ -13,6 +13,7 @@ public:
     virtual ~IMemBackend() = default;
 
     virtual bool isConnected() const = 0;
+    virtual bool isConnectionPoisoned() const = 0;
     virtual uint64_t connectionGeneration() const = 0;
     virtual TargetSnapshot targetSnapshot() const = 0;
     virtual std::string processName() const = 0;

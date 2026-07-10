@@ -12,16 +12,21 @@ namespace SocketCommand {
 // fn(WindowsSocketClient* client, int handle) -> bool
 template<typename Func>
 bool execute(PortType port, Func&& fn) {
-    auto* client = GetSocketMgr().GetClient(port);
-    if (!client || !client->IsConnected())
+    auto& socketMgr = GetSocketMgr();
+    auto lease = socketMgr.AcquireRequestLease();
+    if (!lease)
+        return false;
+    auto* client = socketMgr.GetClient(port);
+    if (!client)
         return false;
     int handle = 0;
     if (!EnsureOpenHandle(handle, port))
         return false;
-    auto* portMutex = GetSocketMgr().GetMutex(port);
+    auto* portMutex = socketMgr.GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            client->DrainPending();
+            if (!lease.isCurrent() || !client->IsConnected())
+                return false;
             return fn(client, handle);
         });
 }
@@ -30,13 +35,18 @@ bool execute(PortType port, Func&& fn) {
 // fn(WindowsSocketClient* client) -> bool
 template<typename Func>
 bool executeNoHandle(PortType port, Func&& fn) {
-    auto* client = GetSocketMgr().GetClient(port);
-    if (!client || !client->IsConnected())
+    auto& socketMgr = GetSocketMgr();
+    auto lease = socketMgr.AcquireRequestLease();
+    if (!lease)
         return false;
-    auto* portMutex = GetSocketMgr().GetMutex(port);
+    auto* client = socketMgr.GetClient(port);
+    if (!client)
+        return false;
+    auto* portMutex = socketMgr.GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            client->DrainPending();
+            if (!lease.isCurrent() || !client->IsConnected())
+                return false;
             return fn(client);
         });
 }
@@ -44,17 +54,22 @@ bool executeNoHandle(PortType port, Func&& fn) {
 // 需要句柄的命令，返回 int 结果（扫描类）
 template<typename Func>
 int executeWithResult(PortType port, Func&& fn, int failureValue = 0) {
-    auto* client = GetSocketMgr().GetClient(port);
-    if (!client || !client->IsConnected())
+    auto& socketMgr = GetSocketMgr();
+    auto lease = socketMgr.AcquireRequestLease();
+    if (!lease)
+        return failureValue;
+    auto* client = socketMgr.GetClient(port);
+    if (!client)
         return failureValue;
     int handle = 0;
     if (!EnsureOpenHandle(handle, port))
         return failureValue;
     int result = 0;
-    auto* portMutex = GetSocketMgr().GetMutex(port);
+    auto* portMutex = socketMgr.GetMutex(port);
     bool success = SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            client->DrainPending();
+            if (!lease.isCurrent() || !client->IsConnected())
+                return false;
             return fn(client, handle, result);
         });
     return success ? result : failureValue;

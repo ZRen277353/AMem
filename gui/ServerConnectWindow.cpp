@@ -26,7 +26,7 @@ ServerConnectWindow::ServerConnectWindow()
 	port = 52736;
 	autoReconnect = false;
 	status = "空闲";
-	lastConnected = GetSocketMgr().GetClient(PORT_MAIN)->IsConnected();
+	lastConnected = IsMultiPortConnected();
 	
 	// 初始化新增成员变量
 	currentMemType = 0;
@@ -69,8 +69,7 @@ void ServerConnectWindow::updateStatus(bool ok, const char* action)
 
 void ServerConnectWindow::updateMemType()
 {
-	auto client = GetSocketMgr().GetClient(PORT_MAIN);
-	if (client->IsConnected()) {
+	if (IsMultiPortConnected()) {
 		int memType = 0;
 		if (GetMemType(memType)) {
 			currentMemType = memType;
@@ -122,8 +121,7 @@ void ServerConnectWindow::drawConnectionControls() {
   ImGui::Checkbox("自动重连", &autoReconnect);
   ImGui::Text("状态: %s", status.c_str());
 
-  auto client = GetSocketMgr().GetClient(PORT_MAIN);
-  if (!client->IsConnected()) {
+  if (!IsMultiPortConnected()) {
     if (ImGui::Button("连接")) {
       if (!isValidPort(port)) {
         status = "连接: 失败 -> invalid port";
@@ -140,7 +138,7 @@ void ServerConnectWindow::drawConnectionControls() {
     }
   }
 
-  if (autoReconnect && !client->IsConnected()) {
+  if (autoReconnect && !IsMultiPortConnected()) {
     if (!isValidPort(port)) {
       status = "自动重连: 失败 -> invalid port";
       return;
@@ -185,8 +183,7 @@ void ServerConnectWindow::drawDriverControls() {
     saveConfig();
   }
 
-  auto client = GetSocketMgr().GetClient(PORT_MAIN);
-  if (client->IsConnected()) {
+  if (IsMultiPortConnected()) {
     if (ImGui::Button("初始化驱动")) {
       initializeDriver();
     }

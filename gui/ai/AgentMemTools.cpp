@@ -154,6 +154,7 @@ std::string AgentMemTools::status(const std::string& /*argsJson*/) {
     json output;
     output["success"] = true;
     output["connected"] = status.connected;
+    output["connection_poisoned"] = status.connectionPoisoned;
     output["pid"] = status.target.pid;
     output["process_name"] = status.processName;
     output["handle"] = status.target.processHandle;

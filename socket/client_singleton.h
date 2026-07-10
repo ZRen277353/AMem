@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "DeviceSession.h"
 #include "client.hpp"
 
 
@@ -32,17 +33,15 @@ private:
   std::mutex m_debug_mutex;
   std::mutex m_error_mutex;
 
-  // 连接状态（原子操作）
-  std::atomic<bool> m_connected{false};
-  std::atomic<uint64_t> m_connection_generation{0};
-
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
   WinSocketClientMgr &operator=(const WinSocketClientMgr &) = delete;
 
   // 私有构造函数（单例模式）
-  WinSocketClientMgr() = default;
-  ~WinSocketClientMgr() { DisconnectMultiPort(); }
+  WinSocketClientMgr();
+  ~WinSocketClientMgr();
+
+  void CloseClients();
 
 public:
   // 获取单例实例
@@ -64,11 +63,19 @@ public:
   void DisconnectMultiPort();
 
   // 检查多端口是否已连接
-  bool IsMultiPortConnected();
+  bool IsMultiPortConnected() const;
+
+  DeviceSession::RequestLease AcquireRequestLease() {
+    return DeviceSession::GetInstance().AcquireRequest();
+  }
 
   // 当前连接身份。每次成功连接或断开活动连接时递增。
   uint64_t GetConnectionGeneration() const {
-    return m_connection_generation.load(std::memory_order_acquire);
+    return DeviceSession::GetInstance().GetGeneration();
+  }
+
+  bool IsConnectionPoisoned() const {
+    return DeviceSession::GetInstance().IsPoisoned();
   }
 
 };
@@ -94,8 +101,8 @@ inline uint64_t GetConnectionGeneration() {
   return GetSocketMgr().GetConnectionGeneration();
 }
 
-inline WindowsSocketClient *GetPortClient(PortType type) {
-  return GetSocketMgr().GetClient(type);
+inline bool IsConnectionPoisoned() {
+  return GetSocketMgr().IsConnectionPoisoned();
 }
 
 struct ServerVersionInfo {

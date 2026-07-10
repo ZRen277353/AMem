@@ -233,6 +233,7 @@ if(HAVE_AI_CHAT)
 endif()
 
 set(SOCKET_SOURCES
+    socket/DeviceSession.cpp
     socket/client_singleton.cpp
     socket/ProcessCommands.cpp
     socket/MemoryCommands.cpp
@@ -361,6 +362,7 @@ if(BUILD_TESTING)
         tests/MemServiceTests.cpp
         mem/Address.cpp
         mem/MemService.cpp
+        socket/DeviceSession.cpp
         gui/ai/AgentMemTools.cpp
         gui/ai/ToolExecutor.cpp
     )

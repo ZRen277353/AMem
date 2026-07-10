@@ -27,6 +27,10 @@ public:
         return IsMultiPortConnected();
     }
 
+    bool isConnectionPoisoned() const override {
+        return IsConnectionPoisoned();
+    }
+
     uint64_t connectionGeneration() const override {
         return GetSocketMgr().GetConnectionGeneration();
     }

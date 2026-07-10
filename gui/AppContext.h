@@ -23,6 +23,7 @@ public:
 
     void selectProcess(int pid, const std::string& name);
     void clearProcess();
+    void clearProcessForDisconnect();
     void cleanupCurrentProcessServices();
     Mem::TargetSnapshot snapshotTarget(uint64_t connectionGeneration) const;
     bool hasProcess() const {
@@ -81,4 +82,6 @@ private:
     mutable std::mutex nameMutex_;
     mutable std::mutex processStateMutex_;
     std::string selectedName_;
+
+    void clearProcessInternal(bool cleanupRemote);
 };

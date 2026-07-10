@@ -5,6 +5,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <functional>
+#include <utility>
 
 #include <cstring>
 #include <cstdint>
@@ -245,6 +247,13 @@ private:
     SOCKET sock_;
     bool connected_;
     WSADATA wsaData_;
+    std::function<void()> poisonCallback_;
+
+    void NotifyPoisoned() {
+        if (poisonCallback_) {
+            poisonCallback_();
+        }
+    }
 
 public:
     WindowsSocketClient() : sock_(INVALID_SOCKET), connected_(false) {
@@ -306,13 +315,16 @@ public:
             if (sent == SOCKET_ERROR) {
                 int err = WSAGetLastError();
                 std::cerr << "send() failed: " << err << std::endl;
-                // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
-                // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接，
-                // 下一次请求前的 DrainPending() 会重新同步协议。
-                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
-                    timeoutGuard.dismissRestore();
-                    Close();
-                }
+                // Any failed I/O may leave this unframed stream out of sync.
+                timeoutGuard.dismissRestore();
+                NotifyPoisoned();
+                Close();
+                return false;
+            }
+            if (sent <= 0) {
+                timeoutGuard.dismissRestore();
+                NotifyPoisoned();
+                Close();
                 return false;
             }
             totalSent += sent;
@@ -332,55 +344,21 @@ public:
             if (received == SOCKET_ERROR) {
                 int err = WSAGetLastError();
                 std::cerr << "recv() failed: " << err << std::endl;
-                // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
-                // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接。
-                // 此时设备的响应可能仍在途/已在缓冲区，下一次请求前的
-                // DrainPending() 会清掉这些过期字节、重新同步协议。
-                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
-                    timeoutGuard.dismissRestore();
-                    Close();
-                }
+                timeoutGuard.dismissRestore();
+                NotifyPoisoned();
+                Close();
                 return false;
             }
             if (received == 0) {
                 std::cerr << "Connection closed by server" << std::endl;
-                connected_ = false;
+                timeoutGuard.dismissRestore();
+                NotifyPoisoned();
+                Close();
                 return false;
             }
             totalReceived += received;
         }
         return true;
-    }
-
-    size_t DrainPending(size_t maxBytes = 16 * 1024 * 1024) {
-        if (!connected_ || sock_ == INVALID_SOCKET) return 0;
-
-        std::vector<char> buffer(4096);
-        size_t totalDrained = 0;
-        while (totalDrained < maxBytes) {
-            u_long pending = 0;
-            if (ioctlsocket(sock_, FIONREAD, &pending) == SOCKET_ERROR || pending == 0) {
-                break;
-            }
-
-            const size_t toRead = std::min<size_t>(
-                {buffer.size(), static_cast<size_t>(pending), maxBytes - totalDrained});
-            int received = ::recv(sock_, buffer.data(), static_cast<int>(toRead), 0);
-            if (received == SOCKET_ERROR) {
-                std::cerr << "drain recv() failed: " << WSAGetLastError() << std::endl;
-                break;
-            }
-            if (received == 0) {
-                connected_ = false;
-                break;
-            }
-            totalDrained += static_cast<size_t>(received);
-        }
-
-        if (totalDrained > 0) {
-            std::cerr << "Drained " << totalDrained << " stale socket bytes before request" << std::endl;
-        }
-        return totalDrained;
     }
 
     void Close() {
@@ -392,6 +370,10 @@ public:
     }
 
     bool IsConnected() const { return connected_; }
+
+    void SetPoisonCallback(std::function<void()> callback) {
+        poisonCallback_ = std::move(callback);
+    }
 };
 
 

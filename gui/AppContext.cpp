@@ -37,14 +37,19 @@ void AppContext::cleanupCurrentProcessServices() {
 }
 
 void AppContext::selectProcess(int pid, const std::string& name) {
+    // Keep the connection generation stable across cleanup, open, and local
+    // state publication. Nested socket commands reuse this thread's lease.
+    auto connectionLease = GetSocketMgr().AcquireRequestLease();
     std::lock_guard<std::mutex> stateLock(processStateMutex_);
     ProcessRevisionGuard revisionGuard(processRevision);
 
-    cleanupCurrentProcessServices();
+    if (connectionLease) {
+        cleanupCurrentProcessServices();
+    }
     selectedPid.store(0, std::memory_order_relaxed);
     processHandle.store(0, std::memory_order_relaxed);
     int handle = 0;
-    if (OpenProcessHandle(pid, handle)) {
+    if (connectionLease.isCurrent() && OpenProcessHandle(pid, handle)) {
         SetCurrentPid(pid);
         processHandle.store(handle, std::memory_order_relaxed);
         {
@@ -66,10 +71,21 @@ void AppContext::selectProcess(int pid, const std::string& name) {
 }
 
 void AppContext::clearProcess() {
+    auto connectionLease = GetSocketMgr().AcquireRequestLease();
+    clearProcessInternal(static_cast<bool>(connectionLease));
+}
+
+void AppContext::clearProcessForDisconnect() {
+    clearProcessInternal(false);
+}
+
+void AppContext::clearProcessInternal(bool cleanupRemote) {
     std::lock_guard<std::mutex> stateLock(processStateMutex_);
     ProcessRevisionGuard revisionGuard(processRevision);
 
-    cleanupCurrentProcessServices();
+    if (cleanupRemote) {
+        cleanupCurrentProcessServices();
+    }
     selectedPid.store(0, std::memory_order_relaxed);
     processHandle.store(0, std::memory_order_relaxed);
     {

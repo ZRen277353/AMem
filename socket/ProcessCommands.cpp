@@ -218,9 +218,6 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
 }
 
 bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortType port) {
-    auto* client = GetSocketMgr().GetClient(port);
-    if (!client || !client->IsConnected())
-        return false;
     std::vector<ModuleInfoItem> mods;
     if (!FetchModuleList(mods, port))
         return false;

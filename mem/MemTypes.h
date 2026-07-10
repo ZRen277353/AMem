@@ -46,6 +46,7 @@ struct OperationContext {
 
 struct Status {
     bool connected = false;
+    bool connectionPoisoned = false;
     uint64_t connectionGeneration = 0;
     TargetSnapshot target;
     std::string processName;

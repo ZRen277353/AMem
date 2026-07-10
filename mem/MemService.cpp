@@ -67,6 +67,11 @@ std::optional<Error> MemService::validateContext(
                      true};
     }
 
+    if (requireConnected && backend_.isConnectionPoisoned()) {
+        return Error{ErrorCode::ConnectionPoisoned,
+                     "connection is poisoned and must be reconnected", true};
+    }
+
     if (requireConnected && !backend_.isConnected()) {
         return Error{ErrorCode::NotConnected,
                      "AMem is not connected to the Android server", true};
@@ -103,6 +108,7 @@ Result<Status> MemService::status(const OperationContext& context) {
 
     Status value;
     value.connected = backend_.isConnected();
+    value.connectionPoisoned = backend_.isConnectionPoisoned();
     value.connectionGeneration = backend_.connectionGeneration();
     value.target = backend_.targetSnapshot();
     value.processName = backend_.processName();

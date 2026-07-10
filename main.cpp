@@ -1,4 +1,4 @@
-
+#include "socket/client_singleton.h"
 #include "imgui/imgui.h"
 #include "imgui/backends/imgui_impl_win32.h"
 #include "imgui/backends/imgui_impl_dx12.h"
@@ -124,6 +124,11 @@ int main(int, char**)
 
     // 停止 IPC Server
     IpcServer::GetInstance().Stop();
+
+    // Close the managed device session while AppContext and all socket
+    // consumers are still alive. The socket singleton destructor only has
+    // to release raw clients and never re-enters process cleanup.
+    DisconnectMultiPort();
 
 #ifdef HAVE_AI_CHAT
     // Drain in-flight AI HTTP requests and tool-execution workers so their
