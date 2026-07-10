@@ -1,27 +1,29 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，原生服务、连接生命周期和 run target 绑定已落地
+状态：实施中，原生服务、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
-最后更新：2026-07-10
+最后更新：2026-07-11
 
 本文给出从当前 AI Chat + HTTP IPC + Python MCP 结构迁移到“内置原生内存工具 Agent”的实施方案。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
 
 ## 0. 当前进度
 
-2026-07-10 已完成前两个纵向切片：
+截至 2026-07-11 已完成四个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
 - `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
-- `status`、`process_list`、`process_open`、`memory_read` 已通过薄 Agent adapter 调用 `MemService`。
+- `status`、`process_list`、`process_open`、`memory_read`、`memory_write` 已通过薄 Agent adapter 调用 `MemService`。
+- raw write 保留 request-started/response-received/written-byte 状态，区分发送前取消、`completion_unknown`、部分写和 deadline/cancel 后确认完成。
 - `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
-- 旧名称仍可执行但不再向 provider 广告。当前注册表有 39 个可执行名称，其中 7 个隐藏 alias，模型收到 32 个定义。
-- `NativeAgentMemTests` CTest 覆盖地址、分页、generation、目标变化、取消/期限、连接 lease/poison、审批失效、同批 target 推进、晚到结果拒绝、结果格式和隐藏 alias。
+- `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
+- 旧名称仍可执行但不再向 provider 广告。当前注册表有 39 个可执行名称，其中 8 个隐藏 alias，模型收到 31 个定义。
+- `NativeAgentMemTests` CTest 覆盖地址、分页、generation、目标变化、raw write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：joinable executor、其余 20 个规范工具的 service 迁移、GUI 迁移和 MCP/IPC 删除。未迁移工具目前只有 Controller 的出队/结果保护，尚未在实际 send 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 只能视为部分修复，A-03 仍未修复。
+尚未完成：module/typed value/scan/symbol/breakpoint/Lua 等规范工具的 service 迁移、Stop 后已发送操作的可见审计、GUI 迁移和 MCP/IPC 删除。未迁移工具目前只有 Controller 的出队/结果保护，尚未在实际 send 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
 
 ## 1. 结论
 
@@ -91,7 +93,7 @@ GUI windows ---------------------------+--> MemService
 - 一个 session 管理 main/debug/error 三个端口和单调递增的 `connectionGeneration`。
 - 普通请求持有共享 connection lease；connect/disconnect/reconnect 持有独占 lifecycle gate。
 - 每个端口仍可单独串行 request/response，但连接对象状态由 session 内同一同步边界保护。
-- 任意可能发生 partial send/receive 的超时将对应连接标记为 poisoned；旧连接不再通过 `DrainPending()` 复用。
+- 任意可能发生 partial send/receive 的超时将对应连接标记为 poisoned；旧连接不再通过待处理字节清理路径复用。
 - 重连生成新 generation，并使旧 process handle、扫描状态、断点跟踪和符号缓存失效。
 - 长扫描的取消通过 debug 端口发送 stop；若协议不能确认停止，则结果标为 `cancel_requested` 或 `completion_unknown`，而不是 `cancelled`。
 
@@ -552,4 +554,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 3. run 创建时捕获 target，审批/出队/结果三阶段校验，以及 `process_open` 后显式推进快照。
 4. 目标切换、重连、审批后执行前切换、同批 open/read、非目标工具和晚到结果测试。
 
-两个切片均已通过 Debug/Release 应用构建和无设备 CTest。下一批应先用同一 context 契约迁移 memory write、module、scan 和 breakpoint，再以 joinable `AgentTaskExecutor` 替换两层 detached 执行。
+第三批迁移 raw `memory_write`，并将 `write_bytes` 降为 hidden compatibility alias；service 可证明写入未发送、回执确认或 completion unknown，禁止对不确定写入自动重试。
+
+第四批加入 joinable `AgentTaskExecutor`，删除 `ChatWindow` outer detached worker 和 `ToolExecutor::runExecutorAsync()` inner detached executor。队列固定 absolute deadline，Stop 传递 cancellation，shutdown 取消未开始任务并 join active worker；tool audit 记录规范 completion 状态。
+
+四个切片均已通过 Debug/Release 应用构建和无设备 CTest。下一批应迁移 module/typed value，然后把 scan、symbol 和 breakpoint 复合操作放入 service 事务边界；另需让 Stop 后已发送写入的最终回执进入独立审计，而不是只由 run-id gate 丢弃。

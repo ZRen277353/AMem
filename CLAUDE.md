@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` is the first automated C++ test and covers the initial `MemService`/Agent adapter slice. Provider, IPC, full socket lifecycle, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` is the no-device C++ test for the native `MemService` adapters, raw write completion semantics, target/generation checks, `DeviceSession` lifecycle, and `AgentTaskExecutor` queue/cancellation/shutdown behavior. Provider, IPC, real transport, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ### MCP server (Python)
 
@@ -101,7 +101,7 @@ MCP ▶ IPC ───┘        (the protocol layer)
 - `client.hpp` — `WindowsSocketClient` wrapping Winsock2 send/receive.
 - `client_singleton.h/cpp` — `WinSocketClientMgr` singleton managing three port connections (`PORT_MAIN`, `PORT_DEBUG`, `PORT_ERROR`), each with its own mutex. Declares the entire remote command surface.
 - **Command implementations are split by domain**: `ProcessCommands.cpp`, `MemoryCommands.cpp`, `ScanCommands.cpp`, `BreakpointCommands.cpp`, `FreezeCommands.cpp`, `SymbolCommands.cpp`.
-- `SocketCommand.h` — the modern way to issue a command: `SocketCommand::execute` / `executeNoHandle` / `executeWithResult` templates handle the boilerplate (connection check → `EnsureOpenHandle` → per-port mutex lock → `DrainPending` → run the lambda). Prefer these over hand-rolling the locking.
+- `SocketCommand.h` — the modern way to issue a command: `SocketCommand::execute` / `executeNoHandle` / `executeWithResult` templates acquire a shared `DeviceSession` request lease, check the connection/handle and generation, lock the port, and run the request. Prefer these over hand-rolling the locking.
 - `socket_request_manager.h` — `SocketRequestManager` serializes request/response pairs so concurrent callers don't interleave responses on a shared port.
 - `socket_io_timeout.h` — `SocketIoTimeout::ScopedTimeout` applies a bounded I/O timeout for the current scope (used by long Lua/IPC calls).
 
@@ -110,11 +110,11 @@ MCP ▶ IPC ───┘        (the protocol layer)
 The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatWindow`'s constructor (idempotent `initBuiltin*` calls).
 
 - **Providers**: `AIProvider` is the abstract interface (`sendCompletion` runs async on a background thread). Built-ins `ClaudeProvider`, `OpenAIProvider`, `DeepSeekProvider` are registered in `ProviderRegistry`. `HttpClient` wraps cpp-httplib (HTTPS via OpenSSL).
-- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `ToolExecutor` (thread-safe tool registry + validated execution). The registry currently has **39 executable names**, with 7 hidden aliases and 32 definitions advertised to providers. The first `status`/process/open/read slice goes through `mem/` + `AgentMemTools`; remaining tools still wrap `client_singleton.h` directly.
+- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `AgentTaskExecutor` (bounded queue + one joinable worker) → synchronous `ToolExecutor` (thread-safe registry + validated execution). The registry has **39 executable names**, with 8 hidden aliases and 31 definitions advertised to providers. `status`/process/open/read/raw-write go through `mem/` + `AgentMemTools`; remaining tools still wrap `client_singleton.h` directly.
 - **Tool safety**: every tool is classified `ToolSafety::ReadOnly` or `Write`. Write tools require explicit user approval in the UI unless `autoApproveWrites` is set (`AgentRunner::Config`). `symbol_init` and `symbol_list` are currently ReadOnly but mutate the server's active symbol-table state; keep their registration, default prompt, docs, and retry semantics aligned when the policy is resolved.
-- **Threading model**: providers post results to the ImGui main thread via `UIMessageQueue` (message kinds: `Token`, `Completion`, `Error`, `ToolResult`), consumed in `ChatWindow::pollMessages()`. Never touch ImGui/run state from a worker. Current ownership is not fully closed: HTTP workers are detached, tool execution has a tracked outer detached worker plus an untracked inner detached executor, and bounded shutdown waits are only best effort. Do not add more detached work.
+- **Threading model**: providers and the tool worker post results to the ImGui main thread via `UIMessageQueue` (message kinds: `Token`, `Completion`, `Error`, `ToolResult`), consumed in `ChatWindow::pollMessages()`. Never touch ImGui/run state from a worker. Tool execution is owned and joinable; HTTP workers and IPC handlers are still detached, so application-wide teardown is not fully closed. Do not add more detached work.
 - **Streaming completion**: HTTP 2xx is insufficient. Claude/DeepSeek set terminal state but never validate it, and OpenAI does not track it, so a truncated SSE stream can currently be committed as success. New provider work must require a legal terminal before tool execution.
-- **Target binding**: run ids isolate stale UI messages but do not bind a tool to a PID. The current run/approval flow does not capture `AppContext::processRevision`; process-bound writes need `{pid, handle, revision}` validation before execution.
+- **Target binding**: `AgentRunContext` captures connection generation plus `{pid, handle, processRevision}`. Approval, dequeue, and result collection validate it, and `process_open` explicitly advances a `Selection` context. Migrated `MemService` operations validate again at the service/send boundary; legacy process-bound executors still need this migration. Run ids only isolate UI messages.
 - **Context budget**: `ProviderCapabilities::maxContextTokens` is currently unused. The byte-count heuristic omits tool schemas and output reserve; `tokenLimit` is not a guarantee that a request fits the active model.
 - **Persistence** (all relative to the process working directory; this is only next to the exe when launched from there):
   - `ai_config.json` — provider configs; **API keys are encrypted with Windows DPAPI** (`ApiKeyStore`, base64 over the encrypted blob). Keys are per-Windows-user and never bundled.
@@ -135,7 +135,7 @@ A standalone Python package (`amem_mcp`, FastMCP-based) that proxies MCP tool ca
 
 The MCP path does not pass through `AgentRunner` approval. Address parsing also differs today: an unprefixed address string is hexadecimal in the in-app Agent and decimal in IPC/MCP. Require explicit `0x` strings until the parsers are unified.
 
-The surfaces overlap but are not identical: the in-app registry has 32 advertised definitions / 39 executable names, IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
+The surfaces overlap but are not identical: the in-app registry has 31 advertised definitions / 39 executable names, IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
 
 ### Lua scripting (`lua/`, gated by `HAVE_LUAJIT`)
 
@@ -150,10 +150,10 @@ The surfaces overlap but are not identical: the in-app registry has 32 advertise
 - **Singletons everywhere (Meyer's)**: `WinSocketClientMgr`, `SocketRequestManager`, `LuaEngine`, `IpcServer`, `AppContext`, `EventBus`, and most AI components (`ProviderRegistry`, `ToolExecutor`, `ApiKeyStore`, `AiSettings`, `SessionManager`, `UIMessageQueue`) use `static` local in `GetInstance()`/`Get()`.
 - **Socket thread safety**: never issue a raw send/receive pair without holding the port mutex — use the `SocketCommand::execute*` templates (or the `SocketRequestManager` lock directly). Responses from concurrent callers will interleave otherwise.
 - **Single-command locking is not a transaction**: `ScanSetRange`→scan, `SymbolInit`→`SymbolGetList`, and process switching are multi-command shared-state sequences. Add a higher-level transaction/revision/epoch when correctness spans more than one request.
-- **Timeout poisons unframed connections**: one-shot `DrainPending()` cannot catch a response that arrives after the next command starts, and cannot repair partial I/O. Close/reconnect with a new generation after timeout.
-- **Connection lifecycle**: `ConnectMultiPort`/`DisconnectMultiPort` currently race active requests and access non-atomic client state. Connection replacement needs an exclusive lifecycle gate; commands need a shared lease.
+- **Timeout poisons unframed connections**: timeout, EOF, or partial I/O poisons `DeviceSession`, closes the failed client, and advances the generation. The old pending-data drain recovery path is gone; explicitly reconnect before reuse.
+- **Connection lifecycle**: commands hold a shared `DeviceSession` request lease; connect/disconnect/reconnect hold an exclusive lifecycle lease. Do not bypass this gate with direct client `Connect()`/`Close()` calls.
 - **UI thread isolation for AI**: background provider/HTTP threads communicate with ImGui exclusively through `UIMessageQueue`. ImGui calls happen only on the main thread.
-- **Process target consistency**: process-bound Agent operations must validate `AppContext::processRevision`; runId is not a target identifier.
+- **Process target consistency**: process-bound Agent operations carry an explicit generation/PID/handle/revision snapshot and must validate it at their actual service/send boundary; runId is not a target identifier.
 - **Address format**: use `0x` for address strings across AI, IPC, MCP, docs, and tests.
 - **Resource bounds**: validate untrusted sizes before allocation and cap raw HTTP/SSE data, tool outputs, and persisted session input, not just tool arguments.
 - **Sensitive data**: DPAPI protects provider API keys only. Redact secrets before putting tool arguments/results into session history.

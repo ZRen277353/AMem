@@ -40,7 +40,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the first automated C++ test and covers the initial `MemService`/Agent adapter slice. Provider, IPC, full socket lifecycle, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the current no-device C++ test. It covers the native `MemService` adapters, raw write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ### MCP Server
 
@@ -125,7 +125,7 @@ Do not implement a second version of the wire protocol in AI or IPC code.
 - selected process name
 - module and symbol caches
 
-GUI, in-app Agent, and IPC all share this object. `processRevision` changes when the target changes, but the current Agent run and approval flow do not capture it. Any process-bound write added or modified here must account for target changes between model generation, user approval, and execution.
+GUI, in-app Agent, and IPC all share this object. Each in-app Agent run captures the connection generation and a target snapshot; approval, execution dequeue, and result collection validate it. Migrated `MemService` operations also consume the snapshot at their actual service/send boundary. Legacy process-bound executors still need that final migration; `runId` alone is never a target identifier.
 
 `EventBus` and events in `gui/Events.h` decouple GUI windows. Do not use the event bus as a substitute for target revision validation.
 
@@ -147,9 +147,7 @@ If a new operation depends on multiple commands sharing global server state, use
 
 Validate every untrusted count, string length, and byte size before allocating or receiving variable-length data.
 
-`WSAETIMEDOUT` is not a recoverable framing boundary. The current `DrainPending()` only removes bytes available at that instant; a late response can still arrive after the next command starts. Treat partial send/receive or timeout as a poisoned connection and rebuild it with a new generation.
-
-`ConnectMultiPort()`/`DisconnectMultiPort()` currently do not share a lifecycle lock with active requests. Do not add direct `Connect()`/`Close()` calls. Connection replacement needs an exclusive gate; commands need a shared connection lease, and process handles must be generation-bound.
+`DeviceSession` gives commands a shared request lease and connect/disconnect/reconnect an exclusive lifecycle lease. `WSAETIMEDOUT`, EOF, and partial I/O poison the connection, advance its generation, close the failed client, and reject reuse until explicit reconnect. The old pending-data drain recovery path has been removed. Do not add direct `Connect()`/`Close()` calls or bypass the lifecycle gate; process handles and target snapshots remain generation-bound.
 
 ## In-App AI Chat (`gui/ai/`)
 
@@ -163,6 +161,7 @@ ChatWindow
   -> provider / HttpClient
   -> UIMessageQueue
   -> AgentRunner
+  -> AgentTaskExecutor
   -> ToolExecutor
   -> ToolDefinitions
   -> socket commands
@@ -171,9 +170,10 @@ ChatWindow
 - `ChatWindow` owns UI state, sessions, approvals, active run ids, and queue consumption.
 - `AgentController` owns provider dispatch and run state/trace.
 - `AgentRunner` owns the model -> tool -> model state machine, budgets, and approval gating. It must remain free of ImGui calls.
-- `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, and result normalization.
-- `ToolDefinitions.cpp` currently has 39 executable names. Seven legacy aliases are hidden from providers, leaving 32 advertised definitions.
-- The first native slice (`mem/`, `AgentMemTools`) owns status/process/open/read validation and structured results. Do not bypass it when extending those operations.
+- `AgentTaskExecutor` owns a bounded serial queue and one joinable worker. It fixes the absolute deadline at enqueue, propagates cancellation, calls `ToolExecutor` synchronously, and joins during shutdown.
+- `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, synchronous executor call, and result normalization.
+- `ToolDefinitions.cpp` currently has 39 executable names. Eight legacy aliases are hidden from providers, leaving 31 advertised definitions.
+- The native slice (`mem/`, `AgentMemTools`) owns status/process/open/read/raw-write validation and structured results. Do not bypass it when extending those operations.
 - `ChatSession::getMessagesForRequest()` is the required provider boundary; it cleans and pairs tool calls/results.
 
 ### Tool Safety
@@ -191,20 +191,18 @@ Provider and tool threads must never access ImGui or run state directly. In-app 
 Current runtime ownership is imperfect:
 
 - `HttpClient::postAsync()` creates detached HTTP workers.
-- `ChatWindow::startToolExecution()` creates a tracked detached outer worker.
-- `ToolExecutor::runExecutorAsync()` creates an untracked detached inner executor.
-- A ReadOnly timeout ends the outer wait but may leave the inner executor running.
-- Stop cancels model orchestration and discards late UI results; it does not cancel an already-running tool.
-- HTTP/Tool shutdown waits are bounded best-effort operations, not proof that all workers exited.
+- In-app tools run only on the joinable `AgentTaskExecutor` worker; do not reintroduce outer or inner detached tool threads.
+- Stop cancels model orchestration and signals queued/active tool contexts. It cannot retract a sent write, and the current run-id filter still drops its late final result from the session/trace.
+- `AgentTaskExecutor::shutdown()` cancels queued/active work and joins the worker before device disconnect. `HttpClient::shutdown()` remains a bounded best-effort wait, not proof that every HTTP worker exited.
 - Claude/DeepSeek record stream terminal state but do not validate it; OpenAI does not record it. HTTP 2xx with a truncated stream can currently be committed as success.
 
-Do not add new detached threads. Prefer joinable task ownership and include completion callbacks in lifecycle accounting. See `docs/agent_project_issues.md` before touching cancellation or teardown.
+Do not add new detached threads. Extend the owned task model and keep completion callbacks in lifecycle accounting. See `docs/agent_project_issues.md` before touching cancellation or teardown.
 
 ### Target Binding
 
-runId prevents stale messages from contaminating a new run; it does not bind a tool to a PID. The current approval dialog shows arguments but not PID/handle/revision. A model can generate an address for process A and execute it against process B if another front end switches the target before approval.
+`AgentRunContext` captures the connection generation and `{pid, handle, processRevision}`. The approval dialog shows expected generation, PID, and revision; approval, dequeue, and result collection revalidate them. `process_open` uses `Selection` policy and explicitly advances the run context only when its returned snapshot is still current.
 
-New process-bound operations should carry and validate `{pid, handle, processRevision}`. `open_process` must explicitly update the run context.
+This closes the boundary only for operations migrated to `MemService`, including raw `memory_write`. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late write receipts still need independent audit visibility.
 
 ### Limits
 
@@ -270,7 +268,7 @@ External assistant -> FastMCP tool -> IpcClient -> GUI IPC -> socket command
 
 Keep `mcp/amem_mcp/constants.py` synchronized with C++ scan flags, value types, and memory region enums.
 
-The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 32 advertised definitions and 39 executable names (7 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; in-app `read_disassembly`/`resolve_symbol` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
+The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 31 advertised definitions and 39 executable names (8 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; in-app `read_disassembly`/`resolve_symbol` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
 
 Address parsing currently differs:
 

@@ -1,7 +1,7 @@
 # AMem AI Agent 架构文档
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-10
+最后更新：2026-07-11
 
 本文描述当前工作区中的内置 AI Chat、IPC/MCP 桥接和它们共享的设备协议层。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
@@ -41,7 +41,8 @@ MCP (Python) -> IPC :28100 -----+
 | 工具循环 | `AgentRunner` | step/call 预算、审批状态机、失败后的跳过、工具审计消息 |
 | Provider | `AIProvider`, `ClaudeProvider`, `OpenAIProvider`, `DeepSeekProvider` | provider 请求/响应适配和流式 tool call 拼装 |
 | HTTP | `HttpClient` | cpp-httplib + OpenSSL、代理、SSE、协作式取消 |
-| 工具注册 | `ToolExecutor`, `ToolDefinitions.cpp` | schema 校验、安全分类、执行、超时、广告/隐藏兼容名称 |
+| 工具调度 | `AgentTaskExecutor` | 有界串行队列、绝对 deadline、run cancellation 和 joinable worker 生命周期 |
+| 工具注册 | `ToolExecutor`, `ToolDefinitions.cpp` | schema 校验、安全分类、同步执行、结果规范化、广告/隐藏兼容名称 |
 | 原生内存服务 | `mem/`, `AgentMemTools` | 强类型结果、地址/分页校验、target/generation 校验和 Agent JSON adapter |
 | 会话 | `ChatSession`, `SessionManager` | 历史清洗、token/条数裁剪、会话文件和索引 |
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
@@ -126,7 +127,8 @@ User send
              -> ReadOnly: execute
              -> Write: approval or auto-approve
              -> ChatWindow::startToolExecution()
-             -> ToolExecutor::execute()
+             -> AgentTaskExecutor::enqueue()
+             -> owned worker -> ToolExecutor::execute()
              -> UIMessageQueue(ToolResult)
              -> AgentRunner::completeToolExecution()
              -> follow-up model request
@@ -166,14 +168,13 @@ HTTP 2xx 不等于 provider stream 完整：
 
 ## 5. 实际线程与生命周期模型
 
-当前实现不只有“主线程 + 一个 HTTP worker + 一个工具 worker”。实际线程如下：
+内置工具执行已经收敛到一个受管 worker；HTTP 和 IPC client handler 的生命周期仍未闭环：
 
 | 线程/任务 | 创建位置 | 所有权现状 | 主要行为 |
 |-----------|----------|------------|----------|
 | ImGui 主线程 | `main.cpp` | 主循环拥有 | UI、run 状态、会话、队列消费 |
 | HTTP worker | `HttpClient::postAsync()` | detached，`inFlight_` 计数 | HTTPS、SSE、provider 完成回调 |
-| 工具外层 worker | `ChatWindow::startToolExecution()` | detached，`inFlightWorkers_` 计数 | 等待 `ToolExecutor::execute()`，投递 `ToolResult` |
-| 工具内层 executor | `runExecutorAsync()` | detached，未登记 | 真正执行 socket/tool 函数 |
+| Agent 工具 worker | `AgentTaskExecutor` 构造 | 单个 joinable `std::thread` | 串行取队列、同步调用 `ToolExecutor`、投递 completion callback |
 | IPC accept thread | `IpcServer::Start()` | `serverThread_`，可 join | accept 客户端 |
 | IPC client handler | `IpcServer::ServerThread()` | 每连接 detached，未登记 | HTTP 解析、handler、发送响应 |
 
@@ -192,10 +193,11 @@ HTTP 2xx 不等于 provider stream 完整：
 
 | 操作 | 当前效果 | 不保证 |
 |------|----------|--------|
-| Stop/`cancelRequest()` | 设置 HTTP token、清 active id、结束当前编排 | 不取消已开始的工具，不回滚写操作 |
+| Stop/`cancelRequest()` | 设置 HTTP token，调用 `AgentTaskExecutor::cancelRun()`，清 active id 并结束当前编排 | 撤回已发送写操作、让迟到回执进入当前会话/trace |
 | HTTP cancellation token | content receiver 在数据块边界中止 | 阻塞 read 立刻结束、worker 已 join |
-| 只读工具 timeout | 外层等待者返回 timeout | 内层 executor 已退出 |
-| 写工具 timeout | 外层继续 `future.get()` 等真实结果 | 用户 Stop 能终止它 |
+| 排队任务取消/deadline | worker 在执行前返回 `cancelled_before_start`/`timed_out_before_start` | 已开始操作被抢占 |
+| 活动工具取消/deadline | 同一 `OperationContext` 传到 service 和 socket I/O；worker 始终受管 | legacy executor 立即响应、已发送设备命令被撤回 |
+| deadline 后完成 | 只读结果归一为 `timed_out`；写结果保留 `completed_after_deadline` 或底层不确定状态 | Stop 后 UI 一定展示最终回执 |
 | runId 过滤 | 迟到结果不污染新 UI run | 迟到操作没有设备副作用 |
 | `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
 | `DeviceSession` poison | 推进 generation、拒绝新请求并等待显式重连 | 自动恢复 driver/process/scan/breakpoint 状态 |
@@ -206,21 +208,22 @@ HTTP 2xx 不等于 provider stream 完整：
 `main.cpp` 当前依次调用：
 
 1. `IpcServer::Stop()`
-2. `DisconnectMultiPort()`
-3. `HttpClient::shutdown()`
-4. `ToolExecutor::shutdown()`
+2. `HttpClient::shutdown()`
+3. `AgentTaskExecutor::shutdown()`
+4. `DisconnectMultiPort()`
 5. ImGui/renderer teardown
 
-三个 shutdown 都不是完整排空保证：
+工具路径已有明确的排空保证：`AgentTaskExecutor::shutdown()` 停止接收新任务，标记 active/queued task 取消，向未开始任务交付取消结果，并 join 唯一 worker。返回后不会再有 Agent 工具访问 socket，因此设备断开排在它之后。
+
+进程级 teardown 仍不是完整排空保证：
 
 - IPC Stop 不等待 client handler。
 - HTTP 在完成回调前减少 `inFlight_`。
-- ToolExecutor 只统计外层工具 worker，不统计只读超时后继续运行的内层 executor。
-- HTTP/工具等待上限为 3 秒。
+- HTTP 等待上限为 3 秒，且 worker 仍是 detached。
 
-因此这里应称为 **best-effort teardown**。修复前，不要在文档或新代码注释中声称 detached worker 一定不会越过单例析构。
+因此只可把 **Agent 工具 shutdown** 称为已 join；整个应用退出仍受 HTTP/IPC detached task 限制，不能宣称所有后台任务已排空。
 
-连接按钮和自动重连还有另一条生命周期：`ConnectMultiPort()`/`DisconnectMultiPort()` 没有与端口请求共享统一的 connection gate，可在 Agent/IPC send/recv 期间直接 `Close()`/替换 socket。`WindowsSocketClient::sock_` 和 `connected_` 也不是受同一 mutex 保护的并发状态。
+连接按钮、自动重连和退出现在都通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease。连接替换会等待活动请求释放，失败连接会 poison 并推进 generation。该锁序已有无设备测试，真实三端口并发和迟到字节仍需 fake transport/loopback 压力验证。
 
 ## 6. Agent 状态机
 
@@ -248,20 +251,20 @@ Idle
 
 `ToolExecutor::execute()` 的顺序：
 
-1. 在注册表中查工具。
-2. 解析 arguments JSON。
-3. 用注册 schema 校验。
-4. 启动 executor。
-5. 解析返回 JSON，识别顶层 `error` 或 `success=false`。
-6. 生成 `ToolResult`。
+1. `ChatWindow` 捕获 run 的 `OperationContext` 并提交到 `AgentTaskExecutor`；入队时固定绝对 deadline。
+2. 唯一 worker 在执行前拒绝已取消或队列中已超时的任务。
+3. `ToolExecutor` 在注册表中查工具，解析 arguments JSON 并按 schema 校验。
+4. 在同一 worker 上同步调用 executor，把同一 deadline/cancellation 传入 service/socket。
+5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
+6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
 
-当前注册表有 **39 个可执行名称**。其中 7 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 32 个定义。首批迁移如下（H=hidden）：
+当前注册表有 **39 个可执行名称**。其中 8 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 31 个定义。当前目录如下（H=hidden）：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
 | 状态/驱动 | `status` R, `get_status` H, `get_server_version` H, `get_architecture` H, `init_driver` W |
 | 内存读 | `memory_read` R, `read_memory` H, `read_value` R, `read_disassembly` R |
-| 内存写 | `memory_write` W, `write_bytes` W, `write_value` W |
+| 内存写 | `memory_write` W, `write_bytes` H, `write_value` W |
 | 扫描 | `scan_set_range` W, `scan_value` W, `scan_next` W, `scan_fuzzy` W, `scan_hex` W, `get_scan_count` R, `get_scan_results` R, `clear_scan` W |
 | 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `get_module_list` R, `list_modules` R, `get_module_base` R, `resolve_offset_chain` R |
 | 断点 | `set_breakpoint` W, `remove_breakpoint` W, `read_breakpoint_info` R, `suspend_breakpoint` W, `resume_breakpoint` W |
@@ -286,7 +289,7 @@ Idle
 - 当前 scan/symbol epoch
 - endpoint/provider 数据去向
 
-四个已迁移工具在 service 边界消费 `OperationContext`。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
+五个已迁移工具（`status`、`process_list`、`process_open`、`memory_read`、`memory_write`）在 service 边界消费 `OperationContext`。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -320,7 +323,7 @@ GUI、内置 Agent、IPC/MCP 可在两步之间插入。新增复合工具时应
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
-Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`DeviceSession` 现在为普通请求提供 shared lease，为 connect/disconnect/reconnect 提供 exclusive lifecycle gate；任意 I/O 错误、EOF 或 partial failure 都会 poison session、推进 generation、关闭失败 client 并拒绝新请求。旧 `DrainPending()` 恢复路径已删除。
+Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`DeviceSession` 现在为普通请求提供 shared lease，为 connect/disconnect/reconnect 提供 exclusive lifecycle gate；任意 I/O 错误、EOF 或 partial failure 都会 poison session、推进 generation、关闭失败 client 并拒绝新请求。旧的待处理字节清理恢复路径已删除。
 
 进程切换保持 connection -> process -> port 锁顺序，同线程嵌套命令复用已有 request lease。首批 `MemService` 操作在执行前后拒绝跨 generation 结果，应用退出也会在静态析构前显式断开。
 
@@ -404,7 +407,7 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent | 32 个广告定义 / 39 个可执行名称 | 7 个旧名称仅作隐藏兼容 |
+| 内置 Agent | 31 个广告定义 / 39 个可执行名称 | 8 个旧名称仅作隐藏兼容 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
@@ -428,18 +431,18 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 6. 地址跨前端传递时使用 `0x` 前缀。
 7. 工具、IPC、provider 和持久化入口都要在分配前验证不可信长度。
 8. provider streaming 成功必须有合法终止事件，partial content 不进入工具执行。
-9. socket timeout 后不得假定 `DrainPending()` 已恢复协议同步。
+9. socket timeout、EOF 或 partial I/O 必须 poison 当前 `DeviceSession` generation，旧连接在显式重连前不得复用。
 
 ### 尚未满足、不能假定成立的目标
 
-1. shutdown 返回时所有后台任务均已退出。
-2. Stop 会取消已开始的工具。
-3. runId 能保证目标进程没有改变。
+1. 应用 shutdown 返回时 HTTP/IPC 后台任务均已退出。
+2. Stop 能撤回已发送操作，或保证其迟到回执进入独立审计。
+3. 所有 legacy process-bound executor 都在实际 send 边界消费 run snapshot。
 4. 端口锁能让复合业务操作成为事务。
 5. loopback IPC 等同于已鉴权。
 6. 所有 AI 持久化文件都严格原子且损坏时不覆盖。
 7. ReadOnly 一定没有共享状态变化。
-8. connect/disconnect 不会与在途 send/recv 并发。
+8. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 9. provider `maxContextTokens` 会自动限制实际请求。
 10. 内置 Agent、IPC 和 MCP 暴露相同能力。
 
@@ -477,7 +480,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前已有一个无设备 CTest：`native_agent_mem_service`，覆盖首批 service/adapter、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 覆盖地址/分页、service/adapter、raw write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

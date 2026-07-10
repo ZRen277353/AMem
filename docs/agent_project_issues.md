@@ -1,6 +1,6 @@
 # Agent 业务代码审计与问题清单
 
-审计日期：2026-07-10
+审计日期：2026-07-11
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 审计范围：`gui/ai/`、`ipc/IpcServer.*`、`mcp/amem_mcp/`、`socket/` 中被 Agent/IPC 调用的命令层、`gui/AppContext.*`、`main.cpp`。
 
@@ -19,11 +19,11 @@
 |----|--------|------|------|
 | A-01 | P0 | 未修复 | IPC 无鉴权且允许任意 CORS，回环监听不是完整安全边界 |
 | A-02 | P0 | 部分修复 | run/审批/结果已绑定目标；未迁移工具尚未在 socket send 边界消费快照 |
-| A-03 | P0 | 未修复 | 工具执行存在未登记的第二层 detached 线程 |
+| A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
 | A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
 | A-06 | P1 | 未修复 | IPC client handler 不排空，响应也未处理 partial send |
-| A-07 | P1 | 未修复 | Stop 只停止编排，不停止已经开始的工具 |
+| A-07 | P1 | 部分修复 | Stop 已传递 task cancellation；已发送写入的最终回执仍不可见 |
 | A-08 | P1 | 未修复 | 复合工具和进程切换不是事务，可被其他前端插入 |
 | A-09 | P1 | 未修复 | HTTP、模型内容、工具输出和会话载入缺少总量上限 |
 | A-10 | P1 | 待安全决策 | “OpenAI” provider 默认指向第三方兼容网关 |
@@ -38,7 +38,7 @@
 | A-19 | P0 | 部分修复 | I/O 失败会 poison 并拒绝复用；仍缺 fake transport 迟到响应测试 |
 | A-20 | P0 | 部分修复 | 请求/lifecycle lease 已落地；仍缺真实 client 并发压力测试 |
 | A-21 | P2 | 未修复 | provider context 能力未参与 token 裁剪和输出预留 |
-| A-22 | P2 | 部分修复 | 已有首批 MemService CTest，其余 Agent/provider/IPC/MCP 核心路径仍缺回归测试 |
+| A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接和工具 worker；provider/IPC/MCP 等路径仍缺回归测试 |
 
 ## 当前未解决问题
 
@@ -69,37 +69,18 @@
 - `AgentRunContext` 在 `resetForNewRun()` 时保存 connection generation 和 target snapshot，并绑定当前 cancellation token。
 - `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
 - 审批框显示预期 connection generation、PID 和 process revision。
-- `status`、`process_list`、`process_open`、`memory_read` 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- `status`、`process_list`、`process_open`、`memory_read`、`memory_write` 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
 - 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-首批迁移工具已阻断该路径。但 memory write、scan、breakpoint、symbol 和 Lua 等旧 executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+首批迁移工具和 raw memory write 已阻断该路径。但 typed write、scan、breakpoint、symbol 和 Lua 等旧 executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
-- 按风险优先迁移 memory write、breakpoint、scan 和 Lua，使实际 service/socket send 使用传入的 `OperationContext`。
+- 按风险优先迁移 typed write、breakpoint、scan 和 Lua，使实际 service/socket send 使用传入的 `OperationContext`。
 - 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
 - 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
-
-### A-03：工具执行存在未登记的第二层 detached 线程
-
-**证据**
-
-- `ChatWindow::startToolExecution()` 启动第一层 detached worker，并用 `ToolExecutor::beginToolWorker()`/`endToolWorker()` 计数。
-- `ToolExecutor::execute()` 又通过 `runExecutorAsync()` 启动第二层 detached executor。
-- 只读工具超时后，第一层 worker 返回并减少计数，但第二层 executor 仍可能在 socket I/O 或等待端口锁。
-- `ToolExecutor::shutdown()` 只等待第一层计数，且最多等待 3 秒。
-
-**影响**
-
-shutdown 可能误判工具已排空；未登记 executor 仍会访问 socket、`AppContext` 或其他静态对象，存在退出期悬空访问窗口。`SocketIoTimeout::ScopedTimeout` 只给单次 I/O 设置期限，不提供线程所有权、join 或真正取消。
-
-**建议**
-
-- 去掉双层 detach，改为可 join 的任务队列/`jthread`，一个工具只对应一个受管任务。
-- 将任务句柄、取消状态和最终结果纳入生命周期管理。
-- 若保留超时语义，超时后仍应跟踪 executor 直到退出；shutdown 不应把“等待 3 秒”描述为已排空。
 
 ### A-04：配置/索引损坏可导致启动异常或覆盖原文件
 
@@ -160,21 +141,21 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 - 为响应体设上限或分页，避免一次构建和发送超大 JSON。
 - 在服务端支持 request id/cancellation 前，不要对 timeout 后仍可能运行的方法自动重试；至少把旧请求状态暴露给调用方。
 
-### A-07：Stop 只停止编排，不停止已开始的工具
+### A-07：Stop 后已发送操作的最终状态仍不可见
 
 **证据**
 
-`ChatWindow::cancelRequest()` 设置 HTTP cancellation token、清空 active run id 并把 UI 恢复到 Idle。工具 executor 没有接收该 token；迟到的 `ToolResult` 仅因 runId 不匹配而被丢弃。
+`ChatWindow::cancelRequest()` 现在同时设置 run token 并调用 `AgentTaskExecutor::cancelRun()`。排队任务会成为 `cancelled_before_start`，迁移到 `MemService` 的 active 操作可观察 cancellation；worker 始终保持受管并在 shutdown join。UI 仍会立即清空 active tool run id，因此已经发送的写操作即使随后返回 `completed_after_cancel_request` 或 `completion_unknown`，其 `ToolResult` 仍会被 run-id gate 丢弃。
 
 **影响**
 
-已批准的写操作仍可能完成，但会话 history/trace 不再记录最终成功或失败。用户可以立即开始新 run，旧工具仍可能占用端口或在之后生效。
+线程和端口生命周期不再失管，但用户仍可能把“Stop”理解为操作已取消；已批准且发送的写操作可能完成，而当前会话/trace 不记录其最终状态。未迁移 legacy executor 也可能只在 socket deadline 处响应取消。
 
 **建议**
 
-- 区分“停止生成”“请求取消工具”和“工具不可取消但仍在收尾”。
-- 对已经发出的写命令，UI 在拿到确定结果前保持可见的 pending 状态，禁止把它当作已取消。
-- 即使原 run 已结束，也应把晚到结果写入独立审计日志。
+- UI 区分“停止生成”“排队任务已取消”“已请求取消”和“操作仍在收尾”。
+- 对已经发出的写命令，在拿到确定结果前保持可见 pending 状态。
+- 即使原 run 已结束，也把晚到结果写入独立审计日志。
 - 只在协议能安全中断且不会留下半包时，才把 cancellation 传入 socket 层。
 
 ### A-08：复合操作和共享设备状态不是事务
@@ -329,7 +310,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 当前静态提取结果：
 
-- 内置 Agent：39 个可执行名称，其中 7 个隐藏兼容 alias，向 provider 广告 32 个定义。
+- 内置 Agent：39 个可执行名称，其中 8 个隐藏兼容 alias，向 provider 广告 31 个定义。
 - IPC：29 个方法。
 - MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
 - 内置 Agent 独有 `read_disassembly`、`resolve_symbol` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
@@ -338,7 +319,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-首批 `status`、`process_list`、`process_open`、`memory_read` 已统一经 `MemService` 返回结构化错误和 meta，但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`process_list`、`process_open`、`memory_read`、`memory_write` 已统一经 `MemService` 返回结构化错误和 meta，但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 
@@ -367,7 +348,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 **证据**
 
 - `WindowsSocketClient::Send()`/`Receive()` 的任意 I/O 错误、EOF 或 partial failure 都会先 `MarkPoisoned()` 再关闭当前 client。
-- 首次 poison 推进 connection generation，`DeviceSession::AcquireRequest()` 随后拒绝新请求；`DrainPending()` 已删除。
+- 首次 poison 推进 connection generation，`DeviceSession::AcquireRequest()` 随后拒绝新请求；旧的待处理字节清理恢复路径已删除。
 - Debug/Release 的无设备测试验证 poison 使在途 lease 过期且拒绝后续 lease。
 
 **影响**
@@ -405,7 +386,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - provider 声明 `maxContextTokens`：OpenAI 128k、Claude 200k、DeepSeek 64k。
 - 除声明外没有代码读取 `getCapabilities()`。
 - `AiSettings` 允许 `tokenLimit` 到 1,000,000；`AiSettings.h` 注释仍写 200,000。
-- `ChatSession::estimateTokenCount()` 仅用消息 UTF-8 字节数/4，未计当前 32 个广告工具 schema、provider JSON 开销或输出 token 预留。
+- `ChatSession::estimateTokenCount()` 仅用消息 UTF-8 字节数/4，未计当前 31 个广告工具 schema、provider JSON 开销或输出 token 预留。
 
 **影响**
 
@@ -420,12 +401,12 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service`，覆盖首批地址、分页、结果契约、target/generation、取消/期限、连接 lease/poison、审批失效、同批 target 推进、非目标工具和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service`，覆盖地址、分页、target/generation、raw write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
 - config/index 损坏与错误字段类型。
-- ToolExecutor 完整 schema、错误提取、预算上限和自动审批分支。
+- ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
 - IPC HTTP parser、partial send、auth 和 capability。
 - fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
 - C++/IPC/MCP capability 和常量对齐。
@@ -438,6 +419,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 | 项目 | 当前实现 |
 |------|----------|
+| 工具路径两层 detached worker | `AgentTaskExecutor` 独占 joinable worker；`ToolExecutor` 同步执行，shutdown 测试证明 active/queued task 排空后 join |
 | executor 返回顶层 `{"error": ...}` 却标成功 | `ToolExecutor::extractToolError()` 会转为 `success=false`，`AgentRunner` 保留 details |
 | Claude 结构化错误丢失 | `ChatWindow::pollMessages()` 能统一处理 `CompletionResponse.error` |
 | 多个 socket 可变长度响应缺少边界 | 进程、模块、符号、冻结、断点和扫描结果的主要读取点已增加 count/name 上限 |
@@ -451,19 +433,19 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 ## 不应误认为“已闭环”的缓解
 
 - `runId` 过滤只防止迟到消息污染当前 UI，不会停止网络或工具副作用。
-- `SocketIoTimeout` 限制 I/O 等待时间，不提供任务 join、事务回滚或写操作取消。
-- 3 秒 `shutdown()` 等待是 best effort，不是“所有 detached worker 已退出”的证明。
+- `SocketIoTimeout` 现在消费 task absolute deadline，但不提供事务回滚或撤回已经发送的写命令。
+- `AgentTaskExecutor::shutdown()` 会 join；`HttpClient` 的 3 秒 bounded wait 仍不是 HTTP worker 已全部退出的证明。
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
 - IPC 绑定 loopback 可缩小暴露面，但在无鉴权且允许 CORS 时不是完整安全边界。
 - `installTempFile()` 已用于 `ApiKeyStore`、`AiSettings`、`SessionManager`，但 `ChatSession` 仍有独立且较弱的替换路径。
-- `DrainPending()` 只清理调用瞬间已到达的数据，不能证明 timeout 后的无帧 socket 已重新同步。
+- `DeviceSession` 已删除待处理字节清理恢复路径并 poison 失败连接，但尚缺 fake transport 对迟到字节/partial I/O 的完整证明。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
 ## 建议修复顺序
 
-1. 关闭 IPC 的浏览器暴露并加入认证；同时让审批绑定 `{pid, handle, revision}`。
-2. timeout 后停止复用 poisoned socket，并为 connect/disconnect/请求建立 generation 和生命周期互斥。
-3. 统一重构 HTTP、工具和 IPC handler 为可管理、可 join 的任务生命周期。
+1. 关闭 IPC 的浏览器暴露并加入认证；把剩余 target mutation 工具迁入 snapshot-bound service。
+2. 为已落地的 poison/lifecycle gate 增加 fake transport 与真实设备压力证明。
+3. 将 HTTP 和 IPC handler 也改为可管理、可 join 的任务生命周期（工具 worker 已完成）。
 4. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。
 5. 校验 provider 流式终止事件，并建立无需设备的 parser/config/state-machine 回归测试。
 6. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。
