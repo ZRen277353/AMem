@@ -40,7 +40,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the current no-device C++ test. It covers the native `MemService` adapters, raw write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the current no-device C++ test. Its 14 groups cover address and scalar codecs, native `MemService` adapters, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ### MCP Server
 
@@ -172,8 +172,8 @@ ChatWindow
 - `AgentRunner` owns the model -> tool -> model state machine, budgets, and approval gating. It must remain free of ImGui calls.
 - `AgentTaskExecutor` owns a bounded serial queue and one joinable worker. It fixes the absolute deadline at enqueue, propagates cancellation, calls `ToolExecutor` synchronously, and joins during shutdown.
 - `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, synchronous executor call, and result normalization.
-- `ToolDefinitions.cpp` currently has 39 executable names. Eight legacy aliases are hidden from providers, leaving 31 advertised definitions.
-- The native slice (`mem/`, `AgentMemTools`) owns status/process/open/read/raw-write validation and structured results. Do not bypass it when extending those operations.
+- `ToolDefinitions.cpp` currently has 41 executable names. Ten legacy aliases are hidden from providers, leaving 31 advertised definitions.
+- The native slice (`mem/`, `AgentMemTools`) owns status/process/open/raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
 - `ChatSession::getMessagesForRequest()` is the required provider boundary; it cleans and pairs tool calls/results.
 
 ### Tool Safety
@@ -202,7 +202,7 @@ Do not add new detached threads. Extend the owned task model and keep completion
 
 `AgentRunContext` captures the connection generation and `{pid, handle, processRevision}`. The approval dialog shows expected generation, PID, and revision; approval, dequeue, and result collection revalidate them. `process_open` uses `Selection` policy and explicitly advances the run context only when its returned snapshot is still current.
 
-This closes the boundary only for operations migrated to `MemService`, including raw `memory_write`. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late write receipts still need independent audit visibility.
+This closes the boundary only for operations migrated to `MemService`, including raw and typed memory read/write. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late write receipts still need independent audit visibility.
 
 ### Limits
 
@@ -268,12 +268,12 @@ External assistant -> FastMCP tool -> IpcClient -> GUI IPC -> socket command
 
 Keep `mcp/amem_mcp/constants.py` synchronized with C++ scan flags, value types, and memory region enums.
 
-The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 31 advertised definitions and 39 executable names (8 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; in-app `read_disassembly`/`resolve_symbol` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
+The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 31 advertised definitions and 41 executable names (10 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; in-app `read_disassembly`/`resolve_symbol` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
 
 Address parsing currently differs:
 
-- In-app Agent interprets an unprefixed address string as hexadecimal.
-- IPC/MCP interprets it as decimal; hexadecimal requires `0x`.
+- Canonical in-app memory tools (`memory_read`, `memory_write`, `memory_read_value`, `memory_write_value`) reject unprefixed addresses; hidden and unmigrated legacy tools still interpret many unprefixed strings as hexadecimal.
+- IPC/MCP interprets an unprefixed string as decimal; hexadecimal requires `0x`.
 
 Until the parsers are unified, require `0x` for every address string in schemas, prompts, examples, and tests.
 

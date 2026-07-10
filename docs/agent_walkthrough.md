@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 39 个可执行名称，其中 8 个为隐藏兼容 alias，provider 实际收到 31 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 41 个可执行名称，其中 10 个为隐藏兼容 alias，provider 实际收到 31 个定义。
 
 ### 1.2 加载 provider 配置
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-五个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+七个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-`memory_write` 已和 read/open 一样在 service send 边界消费 context。typed write、scan、breakpoint、symbol 和 Lua 等未迁移 executor 目前只有 Controller 出队和结果回收保护，因此仍需优先迁移。
+raw/typed memory read/write 都已在 service send 边界消费 context。`memory_read_value`/`memory_write_value` 使用统一 `ValueCodec`；旧 `read_value`/`write_value` 仅作为 hidden alias。module、scan、breakpoint、symbol 和 Lua 等未迁移 executor 目前只有 Controller 出队和结果回收保护，因此仍需优先迁移。
 
 ### 5.3 受管工具队列
 
@@ -440,9 +440,9 @@ MCP client
 |------|------------|---------|
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
-| 地址字符串 `"1234"` | 规范 `memory_read` 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
+| 地址字符串 `"1234"` | 规范 raw/typed memory 工具拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 31 个广告定义 / 39 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | 31 个广告定义 / 41 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
@@ -531,7 +531,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` CTest 已覆盖原生 service/adapter、raw write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 14 个测试组已覆盖地址/scalar codec、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
