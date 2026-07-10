@@ -98,7 +98,7 @@ SessionManager::init("ai_sessions", "ai_session.json")
 
 endpoint 校验目前只要求 `https://`。它不会验证域名归属。特别是 OpenAI provider 的默认值是第三方 `https://ai.ikik.net/v1`，发送前要把 endpoint 当作显式信任决策。
 
-`CompletionRequest` 带 run id，但不带 PID、handle 或 `processRevision`。模型请求和后续工具审批没有绑定目标进程。
+`CompletionRequest` 仍只带 run id，不直接序列化 PID/handle/revision；同一 `AgentController` 的 `AgentRunContext` 在首轮请求前捕获 connection generation 和 target snapshot。后续审批、工具出队和结果回收都使用该 context，run id 只负责异步消息隔离。
 
 provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 32 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
 
@@ -220,25 +220,29 @@ ChatWindow::processToolCalls()
 
 - tool name
 - pretty-printed arguments
+- expected connection generation
+- expected PID 和 process revision
 - Approve/Deny
 
-它不展示或冻结：
+`AgentController` 按 `ToolTargetPolicy` 处理目标：
 
-- 当前 PID/进程名
-- process handle/revision
-- scan/symbol session
+- `None`：只要求 connection generation 不变。
+- `Bound`：要求 PID、handle、revision 和 generation 全部不变。
+- `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-因此存在典型 TOCTOU：
+四个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
-模型基于进程 A 生成 write_value(0x...)
+模型请求切到进程 B
   -> 等待用户审批
-  -> GUI 或 MCP 切换到进程 B
+  -> 校验审批时的旧 target A
   -> 用户批准
-  -> executor 使用当前进程 B
+  -> send 前再次校验 A
+  -> open B 返回新 snapshot
+  -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-新增 process-bound 工具时，必须先解决或显式处理这个目标绑定问题，不能假设审批 arguments 已经包含完整执行上下文。
+`memory_write`、scan、breakpoint、symbol 和 Lua 等未迁移 executor 目前只有 Controller 出队和结果回收保护；它们还没有在 actual send 边界消费 context，因此有副作用工具仍需优先迁移。
 
 ### 5.3 两层工具线程
 
@@ -247,7 +251,7 @@ ChatWindow::processToolCalls()
 ```text
 outer detached worker
   -> beginToolWorker() has already incremented tracked count
-  -> ToolExecutor::execute()
+  -> ToolExecutor::execute(call, runOperationContext)
        -> parse JSON
        -> schema validation
        -> runExecutorAsync()
@@ -277,12 +281,14 @@ outer wait_for expires
 executor 调 `client_singleton.h` 中的命令。现代命令应使用 `SocketCommand::execute*`：
 
 ```text
-connection check
+acquire shared DeviceSession request lease
   -> EnsureOpenHandle (when required)
   -> acquire per-port mutex
-  -> DrainPending
+  -> verify lease generation is current
   -> send/receive one command
 ```
+
+connect/disconnect/reconnect 持有 exclusive lifecycle lease；I/O 错误、EOF 或 partial failure 会 poison session、推进 generation 并拒绝新请求，不再尝试 `DrainPending()` 恢复。
 
 锁只覆盖单命令。以下序列不是事务：
 
@@ -355,18 +361,18 @@ UI/模型收到 timeout 只表示等待者不再等待。内层 executor 是否�
 
 不要立即把同一端口可用性视为已恢复；旧 executor 可能仍占锁或处理响应。
 
-更具体地说，`WindowsSocketClient` 遇 `WSAETIMEDOUT` 后保留连接。下一请求调用的 `DrainPending()` 只清除当时已经到达的字节：
+`WindowsSocketClient` 现在把 timeout、EOF 和其他 I/O 失败视为协议可能失步：
 
 ```text
 old recv times out
-  -> next request acquires lock
-  -> DrainPending sees 0 bytes
-  -> next command is sent
-  -> old response arrives
-  -> next request reads old response
+  -> mark DeviceSession poisoned
+  -> advance connection generation
+  -> close the failed client
+  -> reject subsequent request leases
+  -> explicit reconnect under lifecycle exclusive lock
 ```
 
-partial send/receive 更无法通过 drain 恢复。timeout 后应把连接视为 poisoned，关闭并以新 generation 重连。
+这会阻止旧响应被下一请求消费，但不会自动恢复 driver、process、scan 或 breakpoint 状态。若 UI 已收到只读工具 timeout，内层 executor 仍可能暂时存在；是否需要重连应结合 `status.connection_poisoned` 和当前 generation 判断。
 
 ### 7.3 应用退出
 
@@ -374,6 +380,7 @@ partial send/receive 更无法通过 drain 恢复。timeout 后应把连接视�
 
 ```text
 IpcServer::Stop()
+  -> DisconnectMultiPort()
   -> HttpClient::shutdown()
   -> ToolExecutor::shutdown()
   -> ImGui teardown
@@ -388,7 +395,7 @@ IpcServer::Stop()
 
 因此 shutdown 是 best effort。若调试退出崩溃、静态析构异常或偶发 socket 访问，必须同时检查三类 detached task。
 
-此外，GUI 的 connect/disconnect/auto-reconnect 不通过统一 connection lifecycle lock。它可以在 Agent/IPC 正在 send/recv 时直接 `Close()`/替换 client；`sock_`/`connected_` 也是普通字段。排查连接按钮触发的随机失败时，要同时检查跨线程 Close 和旧 process handle 跨 connection generation 复用。
+GUI 的 connect/disconnect/auto-reconnect 现在通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease，因此关闭会等待在途请求释放。该不变量已有无设备锁测试，但真实三端口 client 的并发压力与迟到字节仍缺 fake transport/loopback 覆盖。
 
 ## 8. 会话和配置的真实数据流
 
@@ -442,7 +449,7 @@ MCP client
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
 | 地址字符串 `"1234"` | 规范 `memory_read` 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
-| 生命周期 | UI runId/cancel token | Python HTTP timeout + detached IPC handler |
+| 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
 | 工具集合 | 32 个广告定义 / 39 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
@@ -517,7 +524,7 @@ IPC 监听 loopback，但当前：
 |------|----------|
 | 一直 `WaitingModel` | endpoint/API key、HTTP timeout、worker 是否仍在、队列 run id |
 | 工具 timeout 后后续也卡 | 内层 executor 是否仍占端口锁、socket 是否读乱 |
-| timeout 后结果完全不相关 | 旧响应是否在 `DrainPending()` 后迟到，连接是否应重建 |
+| timeout 后结果完全不相关 | session 是否已 poisoned、是否错误复用了旧 generation |
 | 点 Stop 后仍写入 | 已开始工具不会被 `cancelRequest()` 取消 |
 | 写到了意外进程 | 审批期间 `processRevision` 是否变化 |
 | scan/symbol 结果串台 | 两个前端是否交错执行复合命令 |
@@ -554,7 +561,7 @@ Send
 
 Tool
   AgentRunner budget/safety
-  -> optional approval (currently no PID/revision binding)
+  -> optional approval bound to generation/PID/revision
   -> outer tracked detached worker
   -> inner untracked detached executor
   -> socket command
@@ -569,8 +576,8 @@ Exit
   != proof that all detached work has ended
 
 Socket timeout
-  -> connection may be protocol-poisoned
-  -> DrainPending is not a synchronization proof
+  -> poison session + advance generation
+  -> reject reuse until explicit reconnect
 
 Provider 2xx
   -> require a provider terminal event

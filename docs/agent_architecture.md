@@ -85,7 +85,7 @@ enum class ToolSafety { ReadOnly, Write };
 
 `CompletionRequest` 携带 `runId`、消息、工具、model 和回调。`ProviderError` 把错误分为 `Network`、`Authentication`、`RateLimit`、`InvalidResponse`、`Cancelled`、`Timeout`、`Unknown`。
 
-当前请求结构不携带 PID、handle 或 `processRevision`。因此 runId 只标识编排轮次，不标识设备目标。这是已知缺口，不应把 runId 当作目标一致性保护。
+`CompletionRequest` 本身不携带设备目标；目标一致性由同一 `AgentController` 持有的 `AgentRunContext` 负责。run 创建时捕获 connection generation 和 target snapshot，后续模型请求、审批与工具批次沿用该 context。`runId` 仍只负责异步消息隔离，不能替代 snapshot 校验。
 
 ### 3.3 Run 和 trace
 
@@ -97,6 +97,7 @@ enum class ToolSafety { ReadOnly, Write };
 - 最多 128 条 `AgentTraceEvent`
 - 待审批工具
 - `AgentApprovalDecision`
+- `AgentRunContext`：run id、`OperationContext`、connection generation、可选 target snapshot 和 cancellation token
 
 `AgentRunner` 是不依赖 ImGui 的状态机。UI 只消费它返回的 `Outcome`：
 
@@ -196,8 +197,8 @@ HTTP 2xx 不等于 provider stream 完整：
 | 只读工具 timeout | 外层等待者返回 timeout | 内层 executor 已退出 |
 | 写工具 timeout | 外层继续 `future.get()` 等真实结果 | 用户 Stop 能终止它 |
 | runId 过滤 | 迟到结果不污染新 UI run | 迟到操作没有设备副作用 |
-| `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限 | 事务取消、任务所有权、连接状态自动恢复 |
-| `DrainPending()` | 丢弃调用瞬间已经可读的旧字节 | timeout 后迟到响应不会污染下一请求 |
+| `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
+| `DeviceSession` poison | 推进 generation、拒绝新请求并等待显式重连 | 自动恢复 driver/process/scan/breakpoint 状态 |
 | MCP HTTP timeout | Python 停止等待，部分读方法会重试 | 旧 IPC handler/设备请求已取消 |
 
 ### 5.3 退出顺序与边界
@@ -205,9 +206,10 @@ HTTP 2xx 不等于 provider stream 完整：
 `main.cpp` 当前依次调用：
 
 1. `IpcServer::Stop()`
-2. `HttpClient::shutdown()`
-3. `ToolExecutor::shutdown()`
-4. ImGui/renderer teardown
+2. `DisconnectMultiPort()`
+3. `HttpClient::shutdown()`
+4. `ToolExecutor::shutdown()`
+5. ImGui/renderer teardown
 
 三个 shutdown 都不是完整排空保证：
 
@@ -270,15 +272,21 @@ Idle
 
 ### 7.2 审批边界
 
-`ToolSafety::Write` 且 `autoApproveWrites=false` 时，`AgentRunner` 产生 `NeedsConfirmation`。审批框展示工具名和 arguments。
+`ToolSafety::Write` 且 `autoApproveWrites=false` 时，`AgentRunner` 产生 `NeedsConfirmation`。审批框展示工具名、arguments、预期 connection generation、PID 和 process revision。
 
-当前审批不包含：
+`ToolRegistration::targetPolicy` 进一步区分：
 
-- PID/进程名/process revision
+- `None`：只绑定 connection generation，例如 `status`、`process_list`。
+- `Bound`：执行前后绑定完整 target snapshot。
+- `Selection`：审批时绑定旧 selection，成功结果携带并显式推进新 snapshot。
+
+当前审批仍不包含：
+
+- 进程名和持久化 effect 审计
 - 当前 scan/symbol epoch
 - endpoint/provider 数据去向
 
-扩展危险工具时，不能只依赖工具名分类；还需要目标绑定和资源域元数据。
+四个已迁移工具在 service 边界消费 `OperationContext`。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -292,7 +300,7 @@ Idle
 - selected process name
 - module/symbol cache
 
-`selectProcess()` 会清理旧进程相关服务、打开新 handle、设置当前 PID、失效缓存并推进 revision。首批 `MemService` 操作在执行前后校验 target snapshot，但当前 Agent run/审批仍没有从模型产出时捕获该 revision。
+`selectProcess()` 会清理旧进程相关服务、打开新 handle、设置当前 PID、失效缓存并推进 revision。`AgentRunContext` 在首轮模型请求前捕获该 snapshot；审批、出队和结果回收均复核。`process_open` 是特殊的 `Selection` 工具：send 前校验旧 snapshot，成功后只在返回 target 与当前状态一致时推进 run。
 
 ### 8.2 端口锁只保证单命令
 
@@ -312,18 +320,11 @@ GUI、内置 Agent、IPC/MCP 可在两步之间插入。新增复合工具时应
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
-Android 协议在共享 TCP 字节流上没有 request id/帧 generation。当前 `Send()`/`Receive()` 遇 `WSAETIMEDOUT` 后保留连接，下一请求只做一次非阻塞 `DrainPending()`。
+Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`DeviceSession` 现在为普通请求提供 shared lease，为 connect/disconnect/reconnect 提供 exclusive lifecycle gate；任意 I/O 错误、EOF 或 partial failure 都会 poison session、推进 generation、关闭失败 client 并拒绝新请求。旧 `DrainPending()` 恢复路径已删除。
 
-socket manager 已增加单调 connection generation，首批 `MemService` 操作会在执行前后拒绝跨 generation 结果；但 connect/disconnect 仍没有 lifecycle gate，timeout 也尚未 poison 连接。generation 校验是检测边界，不是并发关闭问题的修复。
+进程切换保持 connection -> process -> port 锁顺序，同线程嵌套命令复用已有 request lease。首批 `MemService` 操作在执行前后拒绝跨 generation 结果，应用退出也会在静态析构前显式断开。
 
-这个策略不能覆盖“旧响应在 drain 后才到”的情况，也不能修复 partial send/receive。可靠边界应是：
-
-1. timeout 后把连接标为 poisoned。
-2. 在 lifecycle exclusive lock 下关闭/重连。
-3. 生成新的 connection generation。
-4. 使 process handle、Agent target snapshot 和在途命令都绑定 generation。
-
-仅把 `connected_` 改成 atomic 不足以解决 socket handle 被并发关闭和旧状态跨连接复用。
+当前自动测试验证 lease 互斥、嵌套复用、poison 和 generation 失效；尚未用可注入 transport 证明真实 partial send、迟到响应和三端口重连，因此连接问题仍按“部分修复”跟踪。
 
 ## 9. 持久化与数据边界
 
@@ -476,15 +477,15 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前已有一个无设备 CTest：`native_agent_mem_service`，覆盖首批 service/adapter、target/generation 和隐藏 alias。以下路径仍缺测试：
+当前已有一个无设备 CTest：`native_agent_mem_service`，覆盖首批 service/adapter、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪
 - config/index 损坏恢复
-- AgentRunner 预算/审批/失败顺序
+- AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - IPC HTTP/auth/sendAll/capability
-- fake socket timeout、迟到响应和 connection generation
+- fake transport partial I/O、迟到响应和三端口 reconnect
 - C++/IPC/MCP 名称、常量和 feature gate 对齐
 
 真实 Android 设备测试保留给协议兼容、驱动和硬件断点 smoke test。

@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，首个原生服务切片已落地
+状态：实施中，原生服务、连接生命周期和 run target 绑定已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,15 +10,18 @@
 
 ## 0. 当前进度
 
-2026-07-10 已完成第一个纵向切片：
+2026-07-10 已完成前两个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
-- 现有 socket manager 开始维护单调 `connectionGeneration`；`AppContext` 可生成一致目标快照。
+- `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
+- `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
 - `status`、`process_list`、`process_open`、`memory_read` 已通过薄 Agent adapter 调用 `MemService`。
+- `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
+- 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - 旧名称仍可执行但不再向 provider 广告。当前注册表有 39 个可执行名称，其中 7 个隐藏 alias，模型收到 32 个定义。
-- 新增 `NativeAgentMemTests` CTest，覆盖地址、分页、generation、目标变化、取消/期限、结果格式和隐藏 alias。
+- `NativeAgentMemTests` CTest 覆盖地址、分页、generation、目标变化、取消/期限、连接 lease/poison、审批失效、同批 target 推进、晚到结果拒绝、结果格式和隐藏 alias。
 
-尚未完成：connection lifecycle lease、timeout 后 poison/reconnect、run/审批全生命周期 target 绑定、joinable executor、其余 20 个规范工具、GUI 迁移和 MCP/IPC 删除。因此 A-02、A-03、A-19、A-20 等问题仍不能视为关闭。
+尚未完成：joinable executor、其余 20 个规范工具的 service 迁移、GUI 迁移和 MCP/IPC 删除。未迁移工具目前只有 Controller 的出队/结果保护，尚未在实际 send 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 只能视为部分修复，A-03 仍未修复。
 
 ## 1. 结论
 
@@ -106,8 +109,7 @@ struct TargetSnapshot {
 
 struct AgentRunContext {
     std::string runId;
-    TargetSnapshot target;
-    std::shared_ptr<CancellationState> cancellation;
+    OperationContext operation;
 };
 ```
 
@@ -420,7 +422,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 退出条件：上述能力可通过 fake service 测试；超时后的连接不会被复用。
 
-### Phase 2：迁移 Agent 工具和执行生命周期
+### Phase 2：迁移 Agent 工具和执行生命周期（部分完成）
 
 变更：
 
@@ -534,7 +536,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - capability/feature gate 和结果契约来自单一 registry，Lua 等不可用功能不会继续向模型广告。
 - 无设备测试进入 CTest/CI，真实设备 smoke checklist 有可重复记录。
 
-## 14. 第一个实现切片（已落地）
+## 14. 已落地的实现切片
 
 第一批代码保持窄范围、可回滚：
 
@@ -543,4 +545,11 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 3. 给这四个工具加入 target/generation、结果契约和单元测试。
 4. 旧工具仍可运行，但不在这一批删除 MCP、IPC 或 GUI 直连。
 
-该切片已通过应用构建和无设备 CTest。它只验证了 service 边界和 Agent adapter；下一批应实现受管 `DeviceSession` 与 run-level target context，再扩展写入、扫描和断点等高风险能力。
+第二批补充了：
+
+1. 受管 `DeviceSession`、request/lifecycle lease、poison 和 generation 失效。
+2. `ToolTargetPolicy::{None, Bound, Selection}` 与 context-aware executor overload。
+3. run 创建时捕获 target，审批/出队/结果三阶段校验，以及 `process_open` 后显式推进快照。
+4. 目标切换、重连、审批后执行前切换、同批 open/read、非目标工具和晚到结果测试。
+
+两个切片均已通过 Debug/Release 应用构建和无设备 CTest。下一批应先用同一 context 契约迁移 memory write、module、scan 和 breakpoint，再以 joinable `AgentTaskExecutor` 替换两层 detached 执行。

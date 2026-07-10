@@ -18,7 +18,7 @@
 | ID | 优先级 | 状态 | 问题 |
 |----|--------|------|------|
 | A-01 | P0 | 未修复 | IPC 无鉴权且允许任意 CORS，回环监听不是完整安全边界 |
-| A-02 | P0 | 未修复 | Agent run 和审批没有绑定目标进程 revision |
+| A-02 | P0 | 部分修复 | run/审批/结果已绑定目标；未迁移工具尚未在 socket send 边界消费快照 |
 | A-03 | P0 | 未修复 | 工具执行存在未登记的第二层 detached 线程 |
 | A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
@@ -35,8 +35,8 @@
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
 | A-17 | P2 | 未修复 | 内置 Agent、IPC 与 MCP 的能力面和结果契约未统一 |
 | A-18 | P1 | 未修复 | 三类 provider 都会把缺少终止事件的截断 SSE 当成功 |
-| A-19 | P0 | 未修复 | socket I/O 超时后复用连接，迟到响应可污染下一请求 |
-| A-20 | P0 | 未修复 | connect/disconnect 可与在途请求并发关闭或替换 socket |
+| A-19 | P0 | 部分修复 | I/O 失败会 poison 并拒绝复用；仍缺 fake transport 迟到响应测试 |
+| A-20 | P0 | 部分修复 | 请求/lifecycle lease 已落地；仍缺真实 client 并发压力测试 |
 | A-21 | P2 | 未修复 | provider context 能力未参与 token 裁剪和输出预留 |
 | A-22 | P2 | 部分修复 | 已有首批 MemService CTest，其余 Agent/provider/IPC/MCP 核心路径仍缺回归测试 |
 
@@ -62,25 +62,25 @@
 3. 校验 `Origin`/`Host`，但不要把它们当作 token 的替代品。
 4. 对写内存、进程切换、断点和 Lua 增加 capability 或 GUI 审批策略。
 
-### A-02：Agent run 和审批未绑定目标进程
+### A-02：Agent 目标绑定尚未覆盖所有实际 send 边界
 
 **证据**
 
-- `AppContext` 已维护 `selectedPid`、`processHandle` 和 `processRevision`。
-- `AgentRun`、`CompletionRequest`、`ToolCall`、`AgentRunner` 均未保存目标快照。
-- `ChatWindow::drawToolConfirmationModal()` 只展示工具名和参数，不展示 PID、handle 或 revision。
-- executor 最终通过共享 `AppContext`/socket 当前状态执行；GUI、内置 Agent 和 MCP 都能在 run 期间切换进程。
+- `AgentRunContext` 在 `resetForNewRun()` 时保存 connection generation 和 target snapshot，并绑定当前 cancellation token。
+- `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
+- 审批框显示预期 connection generation、PID 和 process revision。
+- `status`、`process_list`、`process_open`、`memory_read` 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-模型针对进程 A 生成的地址，在等待审批期间若目标切到进程 B，用户批准后可能把写操作施加到 B。runId 只能隔离迟到的 UI 消息，不能校验设备目标。
+首批迁移工具已阻断该路径。但 memory write、scan、breakpoint、symbol 和 Lua 等旧 executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
-- 在 run 创建时保存 `{pid, handle, processRevision}`。
-- 所有 process-bound 工具在执行前比较 revision；不一致时拒绝执行并要求模型重新获取上下文。
-- 审批框明确显示 PID、进程名和 revision；批准动作绑定该快照。
-- `open_process` 是显式改变目标的工具，应更新 run context，而不是绕过校验。
+- 按风险优先迁移 memory write、breakpoint、scan 和 Lua，使实际 service/socket send 使用传入的 `OperationContext`。
+- 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
+- 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
 
 ### A-03：工具执行存在未登记的第二层 detached 线程
 
@@ -366,39 +366,37 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 **证据**
 
-- `WindowsSocketClient::Send()`/`Receive()` 遇 `WSAETIMEDOUT` 时返回 false，但只在 reset/aborted 时 `Close()`。
-- 下一次命令在持有端口锁后调用一次 `DrainPending()`，只读取当时 `FIONREAD` 已可见的数据。
-- 协议没有 request id 或帧边界，多个命令共享同一字节流。
+- `WindowsSocketClient::Send()`/`Receive()` 的任意 I/O 错误、EOF 或 partial failure 都会先 `MarkPoisoned()` 再关闭当前 client。
+- 首次 poison 推进 connection generation，`DeviceSession::AcquireRequest()` 随后拒绝新请求；`DrainPending()` 已删除。
+- Debug/Release 的无设备测试验证 poison 使在途 lease 过期且拒绝后续 lease。
 
 **影响**
 
-旧响应若在 `DrainPending()` 之后、新命令发送之后才到，会被新请求当作自己的响应。超时若发生在部分 send/receive 之后，服务端和客户端对消息边界的理解已不同，瞬时 drain 无法证明重新同步。后续 read/write/scan 可能连续返回错误，甚至把错误字节解释为 count/handle/result。
+旧连接现在不会继续承载下一请求，原串包路径已被结构性阻断。剩余风险是缺少可注入 socket transport，尚未自动验证真实 partial send、迟到响应、三端口中单端口失败和重连后的协议恢复。
 
 **建议**
 
-- 任意可能发生 partial send/receive 的 timeout 后，把该连接标记为 poisoned 并关闭，不再复用。
-- 在受管连接层重连并重新建立当前进程/driver 状态；失败时向所有前端暴露“连接需要恢复”。
-- 长期给协议增加长度、request id 或 session generation，不能靠“清空当前可读字节”恢复无帧字节流。
+- 增加 fake transport/loopback fixture，证明 timeout 后旧字节不能进入新 generation。
+- 明确重连后的 driver/process/scan/breakpoint 恢复策略，目前只保证旧本地 target 被清空。
+- 长期给协议增加长度、request id 或 session generation。
 
 ### A-20：连接关闭/重连与在途请求没有互斥
 
 **证据**
 
-- `ConnectMultiPort()`/`DisconnectMultiPort()` 直接 `Connect()`/`Close()` 三个 client，没有获取端口请求锁或全局 connection lifecycle lock。
-- detached Agent executor 和 IPC handler 可同时持有/等待端口锁。
-- `WindowsSocketClient::sock_` 和 `connected_` 是普通字段；`IsConnected()`、`Send()`、`Receive()`、`Close()` 可跨线程并发访问。
+- `SocketCommand::execute*()`、open/close handle 都持有 shared request lease；connect/disconnect 持有 exclusive lifecycle lease 后才替换或关闭三个 client。
+- 同线程嵌套命令复用同一个 shared lease，进程切换保持 connection -> process -> port 锁顺序。
+- 应用退出在静态析构前显式 `DisconnectMultiPort()`；无设备测试验证 lifecycle 必须等待 request lease 释放。
 
 **影响**
 
-用户点击断开、自动重连或退出时，可能在另一个线程的 send/recv 中关闭同一 socket，产生 C++ 数据竞争和未定义行为。即使没有崩溃，也会让请求使用旧连接 generation、旧 process handle 或新 socket 上的旧状态。
+已知命令入口现在受 lifecycle gate 保护。仍需对真实三个 `WindowsSocketClient` 做并发 connect/disconnect/poison 压力测试，并继续收窄公开 `GetClient()`，防止后续代码绕过 lease。
 
 **建议**
 
-- 为整个三端口连接建立共享/独占 lifecycle gate：请求持 shared lease，connect/disconnect/reconnect 持 exclusive lease。
-- `Close()` 前取消并排空使用者；连接对象状态由同一 mutex 保护，而不是只把 bool 改为 atomic。
-- 每次连接生成 generation，命令和 `AppContext` handle 绑定 generation；跨 generation 立即失败。
-
-当前部分缓解：socket manager 已生成单调 generation，首批 `MemService` 操作在调用前后校验它。由于请求没有 shared lease、关闭没有 exclusive gate，generation 只能拒绝已观察到的陈旧结果，不能阻止并发 `Close()` 数据竞争。
+- 增加真实/fake client 压力测试以及锁顺序断言。
+- 将 `GetClient()` 和端口 mutex 收窄到协议层，业务调用只能经过 session-aware command/service。
+- 为退出、自动重连和 poison 后手动重连记录可重复 smoke 结果。
 
 ### A-21：provider context 能力没有参与请求预算
 
@@ -422,14 +420,14 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service`，覆盖首批地址、分页、结果契约、target/generation、取消/期限和隐藏 alias。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service`，覆盖首批地址、分页、结果契约、target/generation、取消/期限、连接 lease/poison、审批失效、同批 target 推进、非目标工具和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
 - config/index 损坏与错误字段类型。
-- ToolExecutor 完整 schema、错误提取、预算/审批状态机（当前只覆盖隐藏 alias 注册语义）。
+- ToolExecutor 完整 schema、错误提取、预算上限和自动审批分支。
 - IPC HTTP parser、partial send、auth 和 capability。
-- 假 socket 上的 timeout、迟到响应、重连 generation。
+- fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
 - C++/IPC/MCP capability 和常量对齐。
 
 建议先建立不依赖 Android 设备的单元/契约测试，再保留少量真实设备 smoke test。否则当前文档中的安全不变量无法在后续重构中自动守住。
