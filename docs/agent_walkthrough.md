@@ -1,156 +1,578 @@
-# AMem AI Agent 解读文档(代码走读与设计原理)
+# AMem AI Agent 代码走读
 
-适用分支：`AIChat`　|　最后更新：2026-06-21
+适用分支：`NativeAgent`（基线来自 `AIChat`）
+最后更新：2026-07-10
 
-本文是 [`agent_architecture.md`](./agent_architecture.md) 的配套**解读**:架构文档讲「有哪些部件、各自是什么」,本文讲「**一次对话到底怎么跑起来的、为什么这么设计、改的时候要小心什么**」。建议先读架构文档第 2、4、5 节,再读本文。
+本文按实际调用顺序解释内置 AI Chat 如何启动、请求模型、审批并执行工具、回喂结果、取消和退出。组件清单见 [`agent_architecture.md`](./agent_architecture.md)，当前问题编号见 [`agent_project_issues.md`](./agent_project_issues.md)，目标重构步骤见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-所有代码定位形如 `文件:行号`,以当前分支为准(行号可能随后续提交漂移,以函数名为准更稳)。
+代码定位以函数名为主。行号会随提交变化，不应作为维护文档的稳定锚点。
 
----
+## 1. 启动阶段：第一条消息之前发生什么
 
-## 1. 一次对话回合的完整生命周期
+入口是 `ChatWindow::ChatWindow()`。
 
-下面跟踪「用户发一条消息 → 模型调用一个**写类**工具 → 用户批准 → 工具执行 → 结果回喂模型 → 模型给出最终文本」的全过程。这是理解整个子系统最快的路径。
+### 1.1 注册组件
 
-### 阶段 A — 发起请求(主线程)
+构造函数调用幂等初始化：
 
-1. 用户在 `ChatWindow` 输入并发送。`ChatWindow` 把用户消息写入 `ChatSession`,调用 `agentController_.resetForNewRun()` 生成新的 `run id`,清空 `streamingContent_`。
-2. `ChatWindow::dispatchAgentRequest()`(`gui/ai/ChatWindow.cpp:1671`)取 `session_.getMessagesForRequest()` 作为消息序列,构造 `AgentController::ModelRequest`,刷新 `cancelToken_`,调用 `agentController_.dispatchModelRequest(request, cancelToken_)`。
-3. `AgentController::dispatchModelRequest()`(`gui/ai/AgentController.cpp:89`):
-   - 查 `ProviderRegistry` 拿到当前 provider;`validateProviderConfig()` 校验 API key / `https://` 端点 / model 非空;
-   - 组 `CompletionRequest`:`messages` 来自上一步,`tools = ToolExecutor::getInstance().getToolDefinitions()`,`runId = run_.id`;
-   - 调 `provider->sendCompletion(completion, cancelToken)`,`markWaitingModel()`(状态 → `WaitingModel`)。
-4. 派发成功后,`dispatchAgentRequest` 在 `gui/ai/ChatWindow.cpp:1696` 设 `activeDispatchRunId_ = agentController_.runId()`,`state_ = WaitingResponse`。**这一步是后续过滤陈旧响应的关键**。
+- `ProviderRegistry::initBuiltinProviders()`
+- `ToolExecutor::initBuiltinTools()`
 
-### 阶段 B — 后台 HTTP 与流式(worker 线程)
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 39 个可执行名称，其中 7 个为隐藏兼容 alias，provider 实际收到 32 个定义。
 
-5. provider 的 `sendCompletion`(如 `ClaudeProvider.cpp`)在调用线程把 `ChatMessage[]` 转成各家 JSON 请求体,然后交给 `HttpClient::postAsync`(`gui/ai/HttpClient.cpp:224`),后者 **detach 一个 worker 线程** 跑 HTTPS。
-6. worker 收到 SSE 数据块 → `SSEParser` 按行解析 → provider 的解析回调累积文本 / 组装 tool_call:
-   - 每段增量文本 → `onToken` → `UIMessageQueue::push({Token, runId, 文本})`;
-   - 流结束 → 组装出 `CompletionResponse`(可能含 `toolCalls`)→ `UIMessageQueue::push({Completion, runId, response})`;
-   - 出错 / 取消 → `Completion` 带 `error` 或 `Error`。
+### 1.2 加载 provider 配置
 
-> worker 线程**全程不碰 ImGui**,只 push 到队列。
+启动顺序：
 
-### 阶段 C — 主线程消费(`pollMessages`)
-
-7. 每帧 `ChatWindow::pollMessages()`(`gui/ai/ChatWindow.cpp:1149`)`tryPop` 队列。先做 **runId 过滤**(`:1152`):工具结果比对 `activeToolRunId_`,其余比对 `activeDispatchRunId_`,不匹配直接丢弃(防止上一轮被取消后迟到的响应污染当前轮)。
-8. `Token`:追加到 `streamingContent_`。
-9. `Completion`(`:1165`):
-   - 若 `resp.error`(`category != None` 即真)→ `displayErrorForCategory()`(取消会显示「Request cancelled」,鉴权失败会顺手打开设置面板等);
-   - 否则提交 assistant 消息,经 `validateAndNormalizeToolCalls()` 规整工具调用;
-   - **有 tool_call** → `processToolCalls(calls)` 进入工具循环(保留 `requestStartMs_`,因为这仍是同一个「AI 回合」);
-   - **无 tool_call** → `finishCompleted()`,`state_ = Idle`,回合结束。
-
-### 阶段 D — 工具循环(主线程编排 + 工具线程执行)
-
-10. `processToolCalls`(`:1592`)→ `agentController_.beginToolCalls(calls, makeAgentConfig())` → `AgentRunner::beginToolCalls`(`gui/ai/AgentRunner.cpp:41`):`stepCount++`(超 `maxAgentSteps` 直接 `Stopped`),按 `maxToolCallsPerTurn` 截断,然后 `runUntilBlocked()`。
-11. `runUntilBlocked`(`AgentRunner.cpp:218`)从当前下标扫工具:
-    - 遇**写类**且未 `autoApproveWrites` → `awaitingConfirmation_=true`,产出 `NeedsConfirmation` + `pendingToolCall`;
-    - 读类 / 已批准 → 产出 `NeedsExecution` + `toolCallToExecute`。
-12. `ChatWindow::handleAgentOutcome`(`:1615`)按 outcome 分派:
-    - `NeedsConfirmation` → `state_ = ToolConfirmation`,UI 弹审批框;
-    - 用户**批准** → `approvePendingTool` → `resumeApproved` → `NeedsExecution`;
-    - 用户**拒绝** → `denyPendingTool` → `resumeDenied`:本批剩余工具全部标记跳过,产出 `ReadyForFollowUp`。
-13. `NeedsExecution` → `ChatWindow::startToolExecution()`(`:1597`)设 `activeToolRunId_`,**detach 一个工具线程**跑 `ToolExecutor::getInstance().execute(call)`,完成后 `UIMessageQueue::push({ToolResult, runId, result, durationMs})`。
-14. `ToolExecutor::execute`(`gui/ai/ToolExecutor.cpp:322`):查表 → 解析参数 → **schema 校验** → `runExecutorAsync`(`:276`,又一层 detach + `wait_for(timeout)`)。executor 内部调 `client_singleton` 设备命令(经端口互斥锁串行化)。读类超时即报错;写类等待真实结果。
-15. `ToolResult` 回到 `pollMessages`(`:1266`)→ `completeToolExecution`(`AgentRunner.cpp:141`):校验结果与当前待执行工具匹配(`sameToolCall`,防乱序),写入审计消息;成功且还有下个工具 → 继续 `runUntilBlocked`;失败 → 跳过本批剩余;本批结束 → `ReadyForFollowUp`。
-
-### 阶段 E — 回喂模型 / 收尾
-
-16. `ReadyForFollowUp` → `sendFollowUpAfterTools()`(`:1657`)→ 再次 `dispatchAgentRequest(session_.getMessagesForRequest(), …)`。注意此时历史里已经有 assistant(tool_use)+ 若干 tool(tool_result)消息,**回到阶段 A 第 2 步**,开始新一轮 model 调用。
-17. 如此 model→tool→model 往返,直到:模型返回**纯文本**(阶段 C 第 9 步「无 tool_call」)→ `finishCompleted()`,或触达 `maxAgentSteps` → `Stopped` 收尾。run 状态回 `Idle`,UI 可发下一条。
-
----
-
-## 2. 关键设计决策与原理
-
-### 2.1 为什么用 `UIMessageQueue` 而不是回调直接改 UI
-ImGui 是即时模式、单线程渲染;在 worker 线程触碰 ImGui 状态会数据竞争甚至崩溃。把后台结果统一塞进一个加锁队列、由主线程每帧消费,是最简单且无锁竞争的边界。**推论:任何新的后台产物(新消息类型)都要走 `UIMessageType` + `pollMessages`,不要新开回调直通 UI。**
-
-### 2.2 为什么 `AgentRunner` 不含任何 ImGui
-`AgentRunner` 是纯状态机(`beginToolCalls`/`resumeApproved`/`resumeDenied`/`completeToolExecution` 返回 `Outcome`)。把「循环逻辑」与「呈现 / 审批 UI」解耦,使循环可单测、可推理,也让 `ChatWindow` 专注 UI。`AgentController` 居中:负责 provider 查找、请求构造、run 状态与 trace 累积。
-
-### 2.3 `runId` 过滤:陈旧响应隔离
-取消一个请求只是 `cancelToken_->store(true)`——但 worker 可能已经在路上,迟到的 `Completion` 不该污染新回合。`dispatchAgentRequest` 成功后记录 `activeDispatchRunId_`,`pollMessages` 只认当前 id(`ChatWindow.cpp:1152`)。删除会话 / 清空历史 / 发新消息都会刷新 run,旧响应自然被丢。
-
-### 2.4 `getMessagesForRequest()`:把配对正确性收敛到一处(最重要的不变量)
-Anthropic / OpenAI 都要求:assistant 的每个 `tool_use` 必须有紧随其后、id 匹配的 `tool_result`,反之亦然,否则**硬 400**。provider 端是按「位置相邻」拼装的,看似脆弱;但所有请求都先过 `ChatSession::getMessagesForRequest()`(`gui/ai/ChatSession.cpp:301`),它在那里集中保证:
-
-- 跳过运行时 `System` 通知(取消 / 错误提示不发给模型,只有配置的系统提示发);
-- 剔除空 / 重复 id 的 tool_call;
-- 仅当一组 tool_call 的**全部**结果齐备时,才连续输出 `assistant + tool_results`;不完整组降级为纯文本;
-- 丢弃没有前驱 tool_use 的孤儿 tool_result。
-
-**因此 provider 收到的恒是干净配对**——这是为什么「provider 按位置拼装」是安全的。改历史截断 / 消息持久化逻辑时,务必保持这条:破坏它就会在某些会话上触发 400。
-
-### 2.5 审批门与 `autoApproveWrites`
-模型可能「幻觉」出危险写操作(改内存、设断点、跑 Lua)。每个工具静态分 `ReadOnly`/`Write`;写类默认弹审批(`AgentRunner` 的 `NeedsConfirmation`)。`autoApproveWrites`(YOLO)默认关。**新增任何会改变设备 / 进程 / 扫描状态的工具,必须注册为 `Write`**,否则绕过这道唯一的安全网。
-
-### 2.6 预算:防失控
-`maxAgentSteps`(model↔tool 往返)与 `maxToolCallsPerTurn`(单轮工具数)双重 clamp 到 [1,64]。模型若陷入「调工具→看结果→再调」的循环,步数上限会终止它并给出 `StepLimitReached` 提示。
-
-### 2.7 工具执行:读 / 写超时语义不同
-`ToolExecutor::execute`(`ToolExecutor.cpp:389`)对**只读**工具超时即返回错误(反正可重试、无副作用);对**写 / 有状态**工具则**等待真实结果**——否则会出现「报了超时,但设备其实已经写入」的歧义目标态,后续推理会基于错误前提。
-
-### 2.8 取消与退出排空
-取消是协作式的(`cancelToken`),`HttpClient` 在每个数据块检查并中止。进程退出时 detached worker 不能 join,故 `HttpClient::shutdown()`(`main.cpp` 拆除阶段调用)取消全部在途请求并**有界等待**收尾,避免 worker 在 `HttpClient`/`UIMessageQueue` 单例析构后访问已释放内存。
-
-### 2.9 密钥加密与原子写
-- API Key 用 **DPAPI** 加密(`ApiKeyStore`),按 Windows 用户隔离,从不内置 / 不进仓库;解密失败**保留密文**仅提示重输,避免瞬时故障导致永久丢 key。
-- 三处配置 / 会话写盘统一走 `utils/AtomicFileWrite.h::installTempFile`:写 `.tmp`→rename;失败先把原文件挪 `.bak` 再装新文件、失败回滚,**绝不让唯一副本消失**。
-
----
-
-## 3. 如何扩展
-
-### 3.1 新增一个工具(让 Agent 能调用一个新设备能力)
-1. **协议层**:在 `socket/*Commands.cpp` 实现命令,并在 `socket/client_singleton.h` 声明(用 `SocketCommand::execute*` 模板,勿手写 send/recv)。
-2. **Agent 工具**:在 `gui/ai/ToolDefinitions.cpp` 写一个 `execXxx(argsJson)` executor(解析 / 校验 / 调命令 / 返回 JSON 字符串,异常用 try-catch 转 `makeError`),并在 `initBuiltinTools()` 里 `registerTool(name, desc, schema, safety, exec)`——**正确选 `ToolSafety`**。
-3.(可选)**外部 MCP 也要用**:在 `ipc/IpcServer.cpp::RegisterBuiltinMethods()` 加方法,再在 `mcp/amem_mcp/tools/` 包装;注意与 `ToolDefinitions.cpp` 的参数校验保持一致。
-4. 若涉及扫描 flag / 数据类型 / 内存区枚举,同步 `mcp/amem_mcp/constants.py`。
-
-### 3.2 新增一个 Provider
-实现 `AIProvider`(`getName`/`getDefaultBaseUrl`/`getCapabilities`/`configure`/`sendCompletion`),在 `ProviderRegistry::initBuiltinProviders()`(`gui/ai/ProviderRegistry.cpp`)注册。`sendCompletion` 必须:在后台经 `HttpClient::postAsync` 跑 I/O,token/完成经 `UIMessageQueue` 回投,并正确做 `tool_use`/`tool_result` 的请求拼装与响应解析。
-
-### 3.3 调整系统提示 / 预算
-- 默认系统提示在 `gui/ai/DefaultSystemPrompt.h`(首次运行写入 `ai_settings.json`);
-- 预算 / 超时在设置面板或直接改 `ai_settings.json`(`maxAgentSteps` / `maxToolCallsPerTurn` / `executionTimeout` / `tokenLimit`,均会被 clamp)。
-
----
-
-## 4. 常见陷阱
-
-| 陷阱 | 后果 | 正确做法 |
-|------|------|----------|
-| 在 worker / 工具线程里碰 ImGui 或 run 状态 | 数据竞争 / 崩溃 | 只经 `UIMessageQueue` 回投主线程 |
-| 手写 socket send/recv 不加端口锁 | 并发响应串包 | 用 `SocketCommand::execute*` |
-| 把写 / 有状态工具标成 `ReadOnly` | 绕过审批门,模型可无确认地改设备 | 状态变更类一律 `Write` |
-| 绕过 `getMessagesForRequest` 直接把历史发给 provider | `tool_use`/`tool_result` 失配 → API 400 | 始终经 `getMessagesForRequest` |
-| 派发后忘了设 `activeDispatchRunId_` | 响应被 runId 过滤丢弃,回合卡死 | 见 `ChatWindow.cpp:1696` |
-| 新增持久化用 remove-then-rename | 锁定 / 失败时丢唯一副本 | 用 `installTempFile` |
-
----
-
-## 5. 调试与可观测性
-
-- **执行轨迹**:`AgentRun.trace`(`AgentTraceEvent` 列表,≤128)记录每一步(派发 / 工具开始 / 成功 / 失败 / 跳过 / 审批 / 完成 / 错误),UI 有对应面板。排查「Agent 为什么停了」先看 trace 末尾(`StepLimitReached` / `ProviderError` / `Stopped`)。
-- **日志**:`Gui::log(...)` 贯穿编排与 IPC,LogWindow 可见。
-- **运行态**:`AgentRunState`(`agentRunStateLabel()` 给出可读名)。卡在 `WaitingModel` 多半是网络 / provider 错误;卡在 `WaitingApproval` 是在等用户点审批。
-- **provider 错误分类**:`ProviderError.category`(`Network`/`Authentication`/`RateLimit`/`Timeout`/`InvalidResponse`/`Cancelled`/`Unknown`)决定 UI 文案与是否打开设置面板。
-- **已知遗留项**:见 [`agent_project_issues.md`](./agent_project_issues.md) 与 [`scan_protocol_issues.md`](./scan_protocol_issues.md)。
-
----
-
-## 6. 一页速查
-
+```text
+legacy ai_config.dat rename
+  -> ApiKeyStore::loadFromFile("ai_config.json")
+  -> seedDefaultsIfEmpty()
+  -> saveToFile("ai_config.json")
+  -> configure live providers
 ```
-发送 → dispatchAgentRequest → provider.sendCompletion → HttpClient.postAsync(worker)
-   worker: SSE → UIMessageQueue(Token/Completion) → 主线程 pollMessages
-       Completion 有 tool_call → AgentRunner(预算/审批) → startToolExecution(工具线程)
-           → ToolExecutor.execute → client_singleton 设备命令
-           → UIMessageQueue(ToolResult) → completeToolExecution
-               → ReadyForFollowUp → sendFollowUpAfterTools(回到 dispatch)
-       Completion 纯文本 → finishCompleted → Idle
-不变量:UI 线程隔离 · socket 串行 · getMessagesForRequest 配对 · 写类必审批 · runId 过滤
+
+API key 在文件中是 DPAPI 密文，endpoint/model 是明文。
+
+这里有一个重要失败路径：`loadFromFile()` 的返回值当前没有被检查。若文件存在但 JSON 损坏，内存配置已清空，随后 save 可覆盖原文件。合法 JSON 中字段类型错误还可能从 `json::value()` 抛出。排查“升级后 key 消失”或“打开 AI Chat 就异常”时，先检查这一段，见 A-04。
+
+设置 UI 还有相反方向的问题：已保存 provider key 无法通过清空输入框删除。key 为空时 Save 会跳过该 provider，`ApiKeyStore::removeConfig()` 没有 UI 入口。实现“Forget provider”时需要显式删除并清零明文 edit buffer。
+
+### 1.3 加载全局设置
+
+`AiSettings::loadOrDefault("ai_settings.json")` 读取：
+
+- active provider
+- system prompt
+- proxy
+- tool timeout
+- agent step/call budget
+- token limit
+- auto-approve writes
+
+然后构造函数把 snapshot 应用到：
+
+- `ToolExecutor`
+- `HttpClient`
+- `ChatSession`
+- `ChatWindow` 的预算和代理编辑字段
+
+`loadOrDefault()` 当前把“不存在”和“损坏”都当成加载失败，并会写默认文件。不要把它当成无损恢复机制。
+
+### 1.4 初始化会话
+
+```text
+SessionManager::init("ai_sessions", "ai_session.json")
+  -> load index
+  -> optional legacy migration
+  -> choose/create active id
+  -> ChatSession::load(active session file)
+```
+
+注意顺序：全局 prompt/token 已先写进 `session_`，随后 `ChatSession::load()` 又从会话文件读取同名字段。因此已有会话值会覆盖全局值。切换会话也一样；新会话只清消息，会继承之前留在 `session_` 的值。见 A-12。
+
+## 2. 用户发送消息
+
+### 2.1 建立新 run
+
+发送动作在主线程完成：
+
+1. 把 user message 加入 `ChatSession`，并自动持久化。
+2. `AgentController::resetForNewRun()` 生成新的 run id。
+3. 清空流式内容和旧 active id。
+4. 调用 `ChatSession::getMessagesForRequest()`。
+5. 进入 `ChatWindow::dispatchAgentRequest()`。
+
+`getMessagesForRequest()` 是 provider 协议正确性的关键边界。它只输出完整匹配的 assistant tool calls 和 tool results，过滤孤儿/重复 id 和运行时 system notice。
+
+### 2.2 构造 provider 请求
+
+`AgentController::dispatchModelRequest()`：
+
+1. 从 `ProviderRegistry` 找当前 provider。
+2. 校验 API key、model 和 endpoint。
+3. 取 `ToolExecutor::getToolDefinitions()`。
+4. 构造 `CompletionRequest`。
+5. 调 `provider->sendCompletion()`。
+6. 把 run 标为 `WaitingModel`。
+
+endpoint 校验目前只要求 `https://`。它不会验证域名归属。特别是 OpenAI provider 的默认值是第三方 `https://ai.ikik.net/v1`，发送前要把 endpoint 当作显式信任决策。
+
+`CompletionRequest` 带 run id，但不带 PID、handle 或 `processRevision`。模型请求和后续工具审批没有绑定目标进程。
+
+provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 32 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
+
+## 3. HTTP 和 SSE 后台路径
+
+### 3.1 Provider 适配
+
+各 provider 在调用线程把通用结构转成各家 JSON：
+
+- system message 的位置
+- assistant tool calls
+- tool result role/block
+- model 和 stream 参数
+
+之后调用 `HttpClient::postAsync()`。
+
+### 3.2 HTTP worker
+
+`postAsync()`：
+
+1. 注册 request id/cancellation token，增加 `inFlight_`。
+2. 复制 timeout/proxy 配置。
+3. 创建 detached worker。
+4. cpp-httplib 发 HTTPS POST。
+5. `content_receiver` 累积原始响应，并把数据喂给 `SSEParser`。
+6. provider callback 拼接 content/tool calls。
+7. 完成时通过请求 callback 向 `UIMessageQueue` 投递。
+
+后台线程不直接调用 ImGui，这是正确边界。
+
+当前没有以下总量限制：
+
+- 单 SSE 行/事件
+- HTTP 累计响应
+- assistant content
+- tool argument fragments
+
+局部 tool call 数量和 arguments 上限是在结果进入 `ChatWindow` 后才校验，不能替代网络层上限。
+
+### 3.3 HTTP 完成计数的时序
+
+每条结束路径当前是：
+
+```text
+removeFromActive()
+  -> inFlight_--
+  -> completeSafely()
+  -> provider callback
+  -> UIMessageQueue::push()
+```
+
+所以 `HttpClient::shutdown()` 观察到 `inFlight_ == 0` 时，最后一个完成回调可能仍在运行。这是 A-05 的具体来源。
+
+另一个完成条件问题在 provider 层：
+
+- Claude 收到 `message_stop` 会设置 `completed`，但完成回调不检查。
+- DeepSeek 收到 `finish_reason` 会设置 `finished`，但完成回调不检查。
+- OpenAI 不记录 stream terminal；公共 parser 还会过滤 `[DONE]`。
+
+因此 HTTP 2xx 正常关闭但 SSE 被截断时，三类 provider 都可能提交部分文本/tool arguments。partial 内容可以展示，但在看到合法 terminal 前不应进入工具执行。
+
+## 4. 主线程消费模型结果
+
+`ChatWindow::pollMessages()` 每帧 `tryPop()`。
+
+### 4.1 runId 过滤
+
+- `Token`/`Completion`/`Error` 对比 `activeDispatchRunId_`。
+- `ToolResult` 对比 `activeToolRunId_`。
+- id 为空或不匹配的迟到消息直接丢弃。
+
+这能防止旧响应写进新会话，但不会取消旧网络请求或工具副作用。
+
+### 4.2 流式文本
+
+`Token` 追加到 `streamingContent_`。取消时，已收到的部分内容会作为 assistant message 保存，再追加 `[cancelled]` system notice。
+
+`streamingContent_` 当前没有硬字节上限。
+
+### 4.3 完成响应
+
+`Completion` 分为：
+
+- `ProviderError`：交给 `displayErrorForCategory()`。
+- 纯文本：保存 assistant message，run 完成。
+- 带 tool calls：先由 `validateAndNormalizeToolCalls()` 校验，再进入 `processToolCalls()`。
+
+当前入口限制：
+
+- 最多 64 个 tool calls
+- id 最多 256 字节
+- name 最多 64 字节
+- 单个 arguments 最多 512 KiB
+
+这些是有用的最后防线，但 provider/HTTP 仍应更早拒绝超大输入。
+
+## 5. 工具审批和执行
+
+### 5.1 AgentRunner 开始一批工具
+
+```text
+ChatWindow::processToolCalls()
+  -> AgentController::beginToolCalls()
+  -> AgentRunner::beginToolCalls()
+  -> AgentRunner::runUntilBlocked()
+```
+
+`beginToolCalls()` 增加 step，应用 `maxAgentSteps` 和 `maxToolCallsPerTurn`。
+
+`runUntilBlocked()` 查 `ToolExecutor::getToolSafety(name)`：
+
+- `ReadOnly`：返回 `NeedsExecution`。
+- `Write` + auto approve：记录 trace 后返回 `NeedsExecution`。
+- `Write` + 默认策略：返回 `NeedsConfirmation`。
+
+### 5.2 审批框
+
+`ChatWindow::drawToolConfirmationModal()` 展示：
+
+- tool name
+- pretty-printed arguments
+- Approve/Deny
+
+它不展示或冻结：
+
+- 当前 PID/进程名
+- process handle/revision
+- scan/symbol session
+
+因此存在典型 TOCTOU：
+
+```text
+模型基于进程 A 生成 write_value(0x...)
+  -> 等待用户审批
+  -> GUI 或 MCP 切换到进程 B
+  -> 用户批准
+  -> executor 使用当前进程 B
+```
+
+新增 process-bound 工具时，必须先解决或显式处理这个目标绑定问题，不能假设审批 arguments 已经包含完整执行上下文。
+
+### 5.3 两层工具线程
+
+批准或只读工具进入 `ChatWindow::startToolExecution()`：
+
+```text
+outer detached worker
+  -> beginToolWorker() has already incremented tracked count
+  -> ToolExecutor::execute()
+       -> parse JSON
+       -> schema validation
+       -> runExecutorAsync()
+            -> inner detached executor
+            -> SocketIoTimeout::ScopedTimeout
+            -> actual tool/socket command
+       -> wait_for(timeout)
+  -> UIMessageQueue(ToolResult)
+  -> endToolWorker()
+```
+
+外层 worker 被生命周期计数覆盖，内层 executor 没有登记。
+
+只读超时路径：
+
+```text
+outer wait_for expires
+  -> return ToolResult(timeout)
+  -> outer posts result and decrements tracked count
+  -> inner executor may still be running
+```
+
+写类超时路径会继续 `future.get()`，所以外层保持登记直到真实结果返回。这个区别避免“报告超时但写操作稍后成功”的错误推理，却也意味着 Stop 无法结束正在执行的写工具。
+
+### 5.4 socket 层
+
+executor 调 `client_singleton.h` 中的命令。现代命令应使用 `SocketCommand::execute*`：
+
+```text
+connection check
+  -> EnsureOpenHandle (when required)
+  -> acquire per-port mutex
+  -> DrainPending
+  -> send/receive one command
+```
+
+锁只覆盖单命令。以下序列不是事务：
+
+- `ScanSetRange` -> scan command
+- `SymbolInit` -> `SymbolGetList`
+- `AppContext::selectProcess()` 的多步清理/open/set PID
+
+另一个 GUI/Agent/MCP caller 可在两条命令之间插入。
+
+### 5.5 工具结果
+
+executor 返回 JSON 字符串。`ToolExecutor::extractToolError()` 会识别：
+
+- 顶层非空 `error`
+- `success: false`
+
+`AgentRunner::completeToolExecution()` 校验结果是否匹配当前 pending call，然后：
+
+- 成功：写 tool audit，继续下一工具。
+- 失败：写失败 audit，本批剩余工具标 skipped。
+- 批次结束：`ReadyForFollowUp`。
+
+`AgentRunner::makeToolMessage()` 会把 arguments 和 result/details 完整写入会话。敏感 card、Lua 和内存数据因此会明文落盘并可能在下一次模型请求中发送到 provider。
+
+## 6. 回喂模型
+
+`ChatWindow::sendFollowUpAfterTools()` 再次调用：
+
+```text
+session_.getMessagesForRequest()
+  -> dispatchAgentRequest()
+  -> provider
+```
+
+历史此时包含：
+
+```text
+assistant(tool calls)
+tool(result for call 1)
+tool(result for call 2)
+...
+```
+
+循环直到：
+
+- 模型返回纯文本。
+- provider 失败。
+- 用户停止。
+- 达到 agent step limit。
+
+## 7. Stop、超时和退出不是同一件事
+
+### 7.1 用户 Stop
+
+`ChatWindow::cancelRequest()`：
+
+1. 设置 HTTP token。
+2. 清 active dispatch/tool run id。
+3. 保存部分流式内容。
+4. 记录 cancelled notice/trace。
+5. 把 UI 和 run 恢复到 Idle。
+
+它不会给 `ToolExecutor` 或 socket executor 发送取消。迟到工具结果会被 runId 过滤，但操作本身仍可能完成。
+
+排查“点 Stop 后设备还是变化”时，这是当前预期实现限制，不是 runId 过滤失效。
+
+### 7.2 只读工具 timeout
+
+UI/模型收到 timeout 只表示等待者不再等待。内层 executor 是否退出要看 socket timeout、锁等待和具体命令。
+
+不要立即把同一端口可用性视为已恢复；旧 executor 可能仍占锁或处理响应。
+
+更具体地说，`WindowsSocketClient` 遇 `WSAETIMEDOUT` 后保留连接。下一请求调用的 `DrainPending()` 只清除当时已经到达的字节：
+
+```text
+old recv times out
+  -> next request acquires lock
+  -> DrainPending sees 0 bytes
+  -> next command is sent
+  -> old response arrives
+  -> next request reads old response
+```
+
+partial send/receive 更无法通过 drain 恢复。timeout 后应把连接视为 poisoned，关闭并以新 generation 重连。
+
+### 7.3 应用退出
+
+主退出顺序：
+
+```text
+IpcServer::Stop()
+  -> HttpClient::shutdown()
+  -> ToolExecutor::shutdown()
+  -> ImGui teardown
+```
+
+当前边界：
+
+- IPC 只 join accept thread，不 join client handler。
+- HTTP 最后 callback 不在 `inFlight_` 计数内。
+- ToolExecutor 不统计内层 executor。
+- HTTP/工具只等待 3 秒。
+
+因此 shutdown 是 best effort。若调试退出崩溃、静态析构异常或偶发 socket 访问，必须同时检查三类 detached task。
+
+此外，GUI 的 connect/disconnect/auto-reconnect 不通过统一 connection lifecycle lock。它可以在 Agent/IPC 正在 send/recv 时直接 `Close()`/替换 client；`sock_`/`connected_` 也是普通字段。排查连接按钮触发的随机失败时，要同时检查跨线程 Close 和旧 process handle 跨 connection generation 复用。
+
+## 8. 会话和配置的真实数据流
+
+### 8.1 每次消息持久化
+
+`ChatSession::addMessage()`：
+
+1. 加消息。
+2. 超过 1000 条时按完整对话组裁剪。
+3. 根据估算 token 数裁剪旧组。
+4. 释放锁后调用 `save()`。
+
+最新用户回合即使超 token limit 也会保留。单条巨大消息不会被该策略删除。
+
+`estimateTokenCount()` 是 UTF-8 字节数/4 的启发式值，未使用 provider 声明的 64k/128k/200k context，也未计工具定义和输出预算。它适合 UI 粗略提示，不适合作为 provider 请求一定有效的证明。
+
+### 8.2 请求历史和磁盘历史不同
+
+磁盘可包含 runtime system notice、不完整工具组和全部审计；`getMessagesForRequest()` 会在发送前生成清洗副本。不要为了“简化 provider”而直接读取 `getMessages()`。
+
+### 8.3 加载边界
+
+`ChatSession::loadUnlocked()` 先完整解析 JSON，再按 `arr.size()` reserve，最后才裁剪到 1000 条。外部编辑或异常大文件可在裁剪前消耗大量内存。
+
+配置管理器的字段类型校验和损坏恢复也不一致。实现修复时应统一为：
+
+```text
+read -> parse temporary -> validate all fields -> commit memory
+                               |
+                               +-- failure: preserve original and report
+```
+
+## 9. 外部 MCP/IPC 路径
+
+外部调用不进入内置 Agent 循环：
+
+```text
+MCP client
+  -> Python FastMCP tool
+  -> IpcClient.call()
+  -> HTTP POST 127.0.0.1:28100
+  -> IpcServer::DispatchRequest()
+  -> registered C++ handler
+  -> client_singleton command
+```
+
+### 9.1 与内置 Agent 的差异
+
+| 维度 | 内置 Agent | MCP/IPC |
+|------|------------|---------|
+| 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
+| 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
+| 地址字符串 `"1234"` | 规范 `memory_read` 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
+| 生命周期 | UI runId/cancel token | Python HTTP timeout + detached IPC handler |
+| 工具集合 | 32 个广告定义 / 39 个可执行名称 | 独立 MCP tool 集合 |
+
+跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
+
+静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `read_disassembly`/`resolve_symbol` 也没有同名 IPC 方法。无 LuaJIT 时三层还会以“返回 unavailable / 未注册 / 仍展示工具”三种方式表现。不要再用“暴露全部 C++ 能力”描述 MCP。
+
+### 9.2 IPC 安全
+
+IPC 监听 loopback，但当前：
+
+- 无认证。
+- 允许 `Access-Control-Allow-Origin: *`。
+- 接受浏览器 OPTIONS。
+- 暴露写内存、进程、断点和 Lua。
+
+因此 loopback 不是充分安全边界。新增 IPC 方法前，先处理 A-01，而不是只增加参数校验。
+
+### 9.3 IPC 响应
+
+请求解析已有 1 MiB 上限。响应当前构造完整 JSON 后只调用一次 `send()`；Winsock 允许 short write。MCP 偶发收到截断 JSON 时，应检查服务端发送循环，而不只在 Python 端重试。
+
+`IpcClient` 对部分读方法默认重试两次。Python timeout 不会取消旧 C++ handler，因此重试可能同时留下三条请求。没有 server request id/cancellation 前，自动重试必须同时评估资源放大和共享 symbol/target 状态，而不只看“是否写目标内存”。
+
+## 10. 扩展时的检查步骤
+
+### 10.1 新增工具
+
+1. 在协议层实现命令，使用 `SocketCommand::execute*`。
+2. 标出资源域：process、scan、symbol、breakpoint、driver 或全局。
+3. 判断是否需要 PID/revision、scan epoch 或 symbol epoch。
+4. 设计 schema 和输入上限，地址强制 `0x`。
+5. 设计输出上限/分页，避免把完整大列表塞给模型。
+6. 选择 `ToolSafety`，并同步 `DefaultSystemPrompt.h`。
+7. 在 `ToolDefinitions.cpp` 注册。
+8. 如需 MCP，同步 IPC、Python wrapper、constants 和错误契约。
+9. 若包含多个设备命令，增加事务锁/revision 或服务端复合命令。
+10. 测试 Stop、目标切换、超时和退出。
+11. 更新 capability matrix，验证 feature gate 下工具可见性一致。
+
+### 10.2 新增 provider
+
+1. 实现通用消息到 provider JSON 的双向转换。
+2. 保持 tool use/result 配对。
+3. 所有回调只通过 `UIMessageQueue`。
+4. 给原始响应、SSE event、content 和 tool args 设置上限。
+5. 缺失合法 stream terminal 时返回 partial `InvalidResponse`，禁止工具执行。
+6. 把 provider/model context、工具 schema 和输出预留纳入预算。
+7. 校验取消与非 2xx 错误只完成一次。
+8. endpoint 默认值明确域名归属和数据去向。
+9. 验证 shutdown 时最后 callback 已被计数。
+
+### 10.3 修改会话/设置
+
+1. 先决定字段是 global 还是 per-session。
+2. 读取失败不覆盖原文件。
+3. 合法 JSON 的错误类型也必须被捕获并报告。
+4. 敏感字段在序列化前 redaction。
+5. 使用经过 Windows 目标已存在场景验证的原子替换。
+
+### 10.4 修改 IPC/MCP
+
+1. 先确认鉴权/capability。
+2. 保持 C++ 与 Python 参数、错误和上限一致。
+3. 使用 `sendAll()` 和响应上限。
+4. handler 必须可停止和 join。
+5. 明确重试是否安全；有共享状态副作用的方法不应自动重试。
+6. timeout 不等于服务端取消；没有 request id/cancellation 时避免盲目重试。
+
+## 11. 排障速查
+
+| 现象 | 首先检查 |
+|------|----------|
+| 一直 `WaitingModel` | endpoint/API key、HTTP timeout、worker 是否仍在、队列 run id |
+| 工具 timeout 后后续也卡 | 内层 executor 是否仍占端口锁、socket 是否读乱 |
+| timeout 后结果完全不相关 | 旧响应是否在 `DrainPending()` 后迟到，连接是否应重建 |
+| 点 Stop 后仍写入 | 已开始工具不会被 `cancelRequest()` 取消 |
+| 写到了意外进程 | 审批期间 `processRevision` 是否变化 |
+| scan/symbol 结果串台 | 两个前端是否交错执行复合命令 |
+| 正常 2xx 却得到半截回答 | provider 是否看见 `message_stop`/`finish_reason` |
+| provider 报 context 太长 | 本地估算是否忽略工具 schema、输出预留和 provider 上限 |
+| 切会话后 prompt 变了 | 会话文件中的 `systemPrompt`/`tokenLimit` |
+| API key 配置消失 | `ai_config.json` 是否损坏后被启动流程覆盖 |
+| 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
+| MCP 返回无效 JSON | IPC 单次 `send()` 是否 short write、响应是否过大 |
+| MCP 与内置地址不同 | 无前缀字符串的 hex/decimal 差异，统一改成 `0x...` |
+| 退出偶发崩溃 | HTTP callback、内层 tool executor、IPC handler 三类 detached task |
+
+## 12. 建议的自动测试起点
+
+当前已有 `native_agent_mem_service` CTest 覆盖首批原生 service/adapter。其余测试优先从无设备依赖的边界开始：
+
+1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
+2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
+3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
+4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
+5. 自动提取并比较内置/IPC/MCP capability、常量和 feature gate。
+
+## 13. 一页调用链
+
+```text
+Startup
+  config/settings -> live providers/tool/http
+  session index -> active session -> load (currently can override global prompt/token)
+
+Send
+  user message -> getMessagesForRequest
+  -> AgentController -> provider -> HttpClient(detached)
+  -> UIMessageQueue -> pollMessages
+
+Tool
+  AgentRunner budget/safety
+  -> optional approval (currently no PID/revision binding)
+  -> outer tracked detached worker
+  -> inner untracked detached executor
+  -> socket command
+  -> ToolResult -> follow-up model request
+
+Stop
+  cancel HTTP orchestration + discard late UI result
+  != cancel already-running tool
+
+Exit
+  IPC Stop + HTTP/Tool best-effort waits
+  != proof that all detached work has ended
+
+Socket timeout
+  -> connection may be protocol-poisoned
+  -> DrainPending is not a synchronization proof
+
+Provider 2xx
+  -> require a provider terminal event
+  -> otherwise partial error, never tool execution
 ```

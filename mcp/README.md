@@ -1,6 +1,6 @@
 # AMem MCP Server
 
-AMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务，通过 HTTP 代理模式桥接 AMem GUI 内嵌的 IPC Server，将 GUI 的全部 C++ 能力暴露为 MCP 工具，供 AI 助手（Claude Code / Claude Desktop / Codex CLI / Cursor / VS Code Copilot / Continue 等）直接调用。
+AMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务，通过 HTTP 代理模式桥接 AMem GUI 内嵌的 IPC Server，将选定的内存调试能力暴露为 MCP 工具，供 AI 助手（Claude Code / Claude Desktop / Codex CLI / Cursor / VS Code Copilot / Continue 等）调用。
 
 ## 架构
 
@@ -11,6 +11,10 @@ AI 助手  ←── stdio ──→  amem-mcp (Python)  ←── HTTP JSON ─
 ```
 
 MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 AMem GUI 的 IPC Server（默认监听 `127.0.0.1:28100`）。
+
+当前静态能力面不是一一对应：内置 AI Agent 有 32 个广告定义/39 个可执行名称（7 个隐藏 alias），IPC 有 29 个方法，MCP 有 30 个工具。MCP 的 typed read/write 是 Python wrapper；IPC `read_batch` 尚未暴露为 MCP 工具，内置 Agent 的 `read_disassembly`/`resolve_symbol` 也没有同名 IPC 方法。构建时没有 LuaJIT，MCP 仍会显示 `execute_lua`，但 GUI IPC 不会注册该方法。
+
+> 安全提示：IPC 当前仅绑定回环地址，但没有认证 token，并允许浏览器 CORS；MCP 写操作也不经过内置 AI Chat 的审批框。只在可信本机环境运行，不要把 28100 端口代理或转发到外部网络，也不要让不可信网页/本地进程访问正在运行的 GUI。
 
 ## 环境要求
 
@@ -171,6 +175,10 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 
 默认 30 秒超时，扫描类操作 60 秒。仅支持本地回环地址。
 
+所有地址字符串都应显式使用 `0x` 前缀。当前 IPC/MCP 会把无前缀字符串按十进制解析，而内置 Agent 按十六进制解析。
+
+部分只读方法遇到 timeout/网络错误会默认重试两次。Python timeout 不会取消 GUI 中已经开始的 C++ handler，因此旧、新请求可能重叠；不要把客户端 timeout 理解为设备操作已停止。
+
 ---
 
 ## 工具列表
@@ -199,8 +207,8 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 | 工具 | 参数 | 说明 |
 |------|------|------|
 | `read_memory(address, size=256)` | size 最大 65536 | 读取内存并返回 hex dump |
-| `read_value(address, data_type="dword")` | byte/word/dword/qword/float/double | 读取单个值 |
-| `write_value(address, value, data_type="dword")` | — | 写入单个值 |
+| `read_value(address, data_type="dword")` | byte/word/dword/qword/float/double/xor | 读取单个值 |
+| `write_value(address, value, data_type="dword")` | byte/word/dword/qword/float/double/xor | 写入单个值 |
 | `write_bytes(address, hex_string)` | 如 `"90 90 90"` | 写入原始字节 |
 
 ### 内存扫描
@@ -208,15 +216,15 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 | 工具 | 参数 | 说明 |
 |------|------|------|
 | `scan_set_range(memory_type="all")` | 见下表 | 设置扫描的内存区域 |
-| `scan_value(value, data_type, scan_type="exact")` | `exact/unknown/greater/less/between` | 首次扫描 |
-| `scan_next(value, data_type, scan_type="exact")` | `exact/increased/decreased/changed/unchanged/increased_by/decreased_by/greater/less` | 再次扫描 |
+| `scan_value(value, data_type, scan_type="exact", value2="")` | `exact/greater/less/between` | 首次扫描；between 需要 value2，未知初值请用 `scan_fuzzy(..., "unknown")` |
+| `scan_next(value, data_type, scan_type="exact", value2="")` | `exact/increased/decreased/changed/unchanged/increased_by/decreased_by/greater/less/between` | 再次扫描；between 需要 value2 |
 | `scan_fuzzy(data_type, scan_type="unknown")` | `unknown/increased/decreased/changed/unchanged` | 模糊扫描 |
 | `scan_hex(hex_pattern)` | 如 `"48 65 6C 6C 6F"` | 十六进制模式扫描 |
 | `get_scan_count()` | — | 获取当前扫描结果总数 |
 | `get_scan_results(offset=0, count=20)` | count 最大 1000 | 分页获取扫描结果 |
 | `clear_scan()` | — | 清除所有扫描结果 |
 
-**内存类型** (`scan_set_range` 参数)：`all` / `anonymous` / `c_alloc` / `c_heap` / `c_data` / `c_bss` / `java_heap` / `java` / `stack` / `code_app` / `code_system` / `video` / `ashmem` / `bad`
+**内存类型** (`scan_set_range` 参数)：`all` / `anonymous` / `c_alloc` / `c_heap` / `c_data` / `c_bss` / `java_heap` / `java` / `stack` / `code_app` / `code_system` / `video` / `ashmem` / `bad` / `other`
 
 ### 硬件断点
 
@@ -241,7 +249,7 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 
 | 工具 | 说明 |
 |------|------|
-| `execute_lua(code)` | 在 GUI 内执行 Lua，可使用 mem/process/scan/bp 等全部 API |
+| `execute_lua(code, timeout_seconds=30)` | 在 GUI 内执行 Lua，可使用 mem/process/scan/bp 等全部 API；timeout 最大 300 秒 |
 
 ### 符号
 
@@ -268,12 +276,13 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 2. list_processes()                      # 查看进程列表
 3. open_process(pid=12345)               # 打开目标进程
 4. list_modules()                        # 查看模块列表
-5. scan_value("100", "dword", "exact")   # 首次扫描值 100
-6. scan_next("95", "dword", "exact")     # 值变化后再次扫描
-7. get_scan_results()                    # 查看结果
-8. write_value("0x7f1234", "999")        # 修改内存值
-9. set_breakpoint("0x7f1234", 2, 4)      # 设置写入断点 (2=写)
-10. read_breakpoint_info("0x7f1234")     # 查看谁修改了这个地址
+5. scan_set_range("all")                 # 明确扫描区域
+6. scan_value("100", "dword", "exact")   # 首次扫描值 100
+7. scan_next("95", "dword", "exact")     # 值变化后再次扫描
+8. get_scan_results()                    # 查看结果
+9. write_value("0x7f1234", "999")        # 修改内存值
+10. set_breakpoint("0x7f1234", 2, 4)     # 设置写入断点 (2=写)
+11. read_breakpoint_info("0x7f1234")     # 查看谁修改了这个地址
 ```
 
 ---
@@ -316,3 +325,11 @@ mcp/
 ## 开发
 
 添加新工具：在 `amem_mcp/tools/` 下新建或编辑模块，实现 `register(mcp, ipc)` 函数，并在 `tools/__init__.py` 的 `register_all` 里注册。所有扫描/类型常量都在 `amem_mcp/constants.py`，复用已有 helper 可避免重复的编码逻辑。
+
+同时更新或校验：
+
+1. `ipc/IpcServer.cpp` 中的方法、参数和 feature gate。
+2. 内置 `gui/ai/ToolDefinitions.cpp` 是否也需要该能力。
+3. 地址、scan flag、错误结构、分页和输出上限是否一致。
+4. timeout 后旧 handler 继续运行时，重试是否仍安全。
+5. 文档中的 MCP 30 / IPC 29 / Agent 32 advertised（39 executable）能力矩阵；后续应改为自动生成/测试。

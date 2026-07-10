@@ -8,6 +8,8 @@ AMem is a Windows desktop application for remote Android memory debugging, simil
 
 On top of the GUI it ships two AI integration paths: an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that can drive the debugger via tool calls, and an **MCP server** (`mcp/`) that exposes the same capabilities to external AI assistants (Claude Code / Desktop, Codex, Cursor, etc.).
 
+The `NativeAgent` branch is migrating these paths to one native `MemService`, removing Python MCP, and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents continue to describe the current code until each phase lands.
+
 Language: C++17 (app) + Python 3.10+ (MCP server). Platform: Windows 10/11 x64 only.
 
 ## Build Commands
@@ -21,11 +23,14 @@ cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE \
 
 # Build
 cmake --build build
+
+# Run native no-device tests
+ctest --test-dir build --output-on-failure
 ```
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-There is no automated C++ test suite. To exercise the device protocol end-to-end, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` is the first automated C++ test and covers the initial `MemService`/Agent adapter slice. Provider, IPC, full socket lifecycle, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ### MCP server (Python)
 
@@ -105,22 +110,32 @@ MCP ▶ IPC ───┘        (the protocol layer)
 The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatWindow`'s constructor (idempotent `initBuiltin*` calls).
 
 - **Providers**: `AIProvider` is the abstract interface (`sendCompletion` runs async on a background thread). Built-ins `ClaudeProvider`, `OpenAIProvider`, `DeepSeekProvider` are registered in `ProviderRegistry`. `HttpClient` wraps cpp-httplib (HTTPS via OpenSSL).
-- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `ToolExecutor` (thread-safe tool registry + validated execution). The ~10 built-in tools are defined in `ToolDefinitions.cpp` and each wraps a `client_singleton.h` command.
-- **Tool safety**: every tool is classified `ToolSafety::ReadOnly` or `Write`. Write/stateful tools require explicit user approval in the UI unless `autoApproveWrites` is set (`AgentRunner::Config`). Much of the recent hardening (see git log) is input validation on tool/IPC arguments.
-- **Threading model**: providers do HTTP on background threads and post results back to the ImGui main thread via `UIMessageQueue` (message kinds: `Token`, `Completion`, `Error`, `ToolResult`), consumed in `ChatWindow::pollMessages()`. Never touch ImGui state from a provider thread.
-- **Persistence** (all relative to the working dir, i.e. next to the exe):
+- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `ToolExecutor` (thread-safe tool registry + validated execution). The registry currently has **39 executable names**, with 7 hidden aliases and 32 definitions advertised to providers. The first `status`/process/open/read slice goes through `mem/` + `AgentMemTools`; remaining tools still wrap `client_singleton.h` directly.
+- **Tool safety**: every tool is classified `ToolSafety::ReadOnly` or `Write`. Write tools require explicit user approval in the UI unless `autoApproveWrites` is set (`AgentRunner::Config`). `symbol_init` and `symbol_list` are currently ReadOnly but mutate the server's active symbol-table state; keep their registration, default prompt, docs, and retry semantics aligned when the policy is resolved.
+- **Threading model**: providers post results to the ImGui main thread via `UIMessageQueue` (message kinds: `Token`, `Completion`, `Error`, `ToolResult`), consumed in `ChatWindow::pollMessages()`. Never touch ImGui/run state from a worker. Current ownership is not fully closed: HTTP workers are detached, tool execution has a tracked outer detached worker plus an untracked inner detached executor, and bounded shutdown waits are only best effort. Do not add more detached work.
+- **Streaming completion**: HTTP 2xx is insufficient. Claude/DeepSeek set terminal state but never validate it, and OpenAI does not track it, so a truncated SSE stream can currently be committed as success. New provider work must require a legal terminal before tool execution.
+- **Target binding**: run ids isolate stale UI messages but do not bind a tool to a PID. The current run/approval flow does not capture `AppContext::processRevision`; process-bound writes need `{pid, handle, revision}` validation before execution.
+- **Context budget**: `ProviderCapabilities::maxContextTokens` is currently unused. The byte-count heuristic omits tool schemas and output reserve; `tokenLimit` is not a guarantee that a request fits the active model.
+- **Persistence** (all relative to the process working directory; this is only next to the exe when launched from there):
   - `ai_config.json` — provider configs; **API keys are encrypted with Windows DPAPI** (`ApiKeyStore`, base64 over the encrypted blob). Keys are per-Windows-user and never bundled.
   - `ai_settings.json` — non-secret, hand-editable settings (`AiSettings`): system prompt, proxy, etc. `DefaultSystemPrompt.h` seeds an AMem-specific prompt on first run.
-  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — chat history (`SessionManager` + `ChatSession`; max 1000 messages, token-limit truncation).
+  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — **plaintext** chat/tool history (`SessionManager` + `ChatSession`; max 1000 messages after load/truncation). It can contain cards, Lua, addresses, memory data, and complete tool arguments/results.
   - Legacy migrations run once on startup: `ai_config.dat`→`ai_config.json`, `ai_session.json`→`ai_sessions/`.
+- **Provider trust**: `OpenAIProvider` currently defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS alone does not establish that the recipient is the provider the user intended.
 
 ### IPC server (`ipc/IpcServer.cpp`)
 
-A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:28100 only**, started from `main.cpp`. It accepts `POST /` with body `{ "method": "...", "params": {...} }` and returns `{ "success": bool, "result"/"error": ... }`. Methods are registered in `RegisterBuiltinMethods()` and call the same socket commands as the GUI. The file is heavy on input validation (size caps, scan-flag validation, address parsing) because its inputs come from an external process. This is the bridge the MCP server talks to — it is **not** a general-purpose web server.
+A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:28100 only**, started from `main.cpp`. It accepts `POST /` with body `{ "method": "...", "params": {...} }` and returns `{ "success": bool, "result"/"error": ... }`. Methods are registered in `RegisterBuiltinMethods()` and call the same socket commands as the GUI.
+
+Loopback is not authentication. The current server has no token, allows `Access-Control-Allow-Origin: *`, accepts browser preflight, bypasses the in-app write approval path, detaches each client handler, and sends each response with one `send()` call. Do not add privileged methods without addressing authentication/capabilities, browser access, handler drainage, and partial sends.
 
 ### MCP server (`mcp/`)
 
 A standalone Python package (`amem_mcp`, FastMCP-based) that proxies MCP tool calls over stdio to the IPC server via HTTP. It does **not** talk to the Android device directly — every tool delegates to the GUI's IPC server (so the GUI must be running and connected). Layout: `tools/` split by domain (status/process/memory/scan/breakpoint_/lua/symbols), `ipc_client.py` (HTTP client), `constants.py` (scan-flag/data-type/memory-type tables that mirror the C++ enums), `configs/` (ready-to-use snippets per IDE). See `mcp/README.md` for the full tool list and IDE setup. This repo's own `.mcp.json` wires the server for Claude Code via `python -m amem_mcp`.
+
+The MCP path does not pass through `AgentRunner` approval. Address parsing also differs today: an unprefixed address string is hexadecimal in the in-app Agent and decimal in IPC/MCP. Require explicit `0x` strings until the parsers are unified.
+
+The surfaces overlap but are not identical: the in-app registry has 32 advertised definitions / 39 executable names, IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
 
 ### Lua scripting (`lua/`, gated by `HAVE_LUAJIT`)
 
@@ -134,17 +149,26 @@ A standalone Python package (`amem_mcp`, FastMCP-based) that proxies MCP tool ca
 
 - **Singletons everywhere (Meyer's)**: `WinSocketClientMgr`, `SocketRequestManager`, `LuaEngine`, `IpcServer`, `AppContext`, `EventBus`, and most AI components (`ProviderRegistry`, `ToolExecutor`, `ApiKeyStore`, `AiSettings`, `SessionManager`, `UIMessageQueue`) use `static` local in `GetInstance()`/`Get()`.
 - **Socket thread safety**: never issue a raw send/receive pair without holding the port mutex — use the `SocketCommand::execute*` templates (or the `SocketRequestManager` lock directly). Responses from concurrent callers will interleave otherwise.
+- **Single-command locking is not a transaction**: `ScanSetRange`→scan, `SymbolInit`→`SymbolGetList`, and process switching are multi-command shared-state sequences. Add a higher-level transaction/revision/epoch when correctness spans more than one request.
+- **Timeout poisons unframed connections**: one-shot `DrainPending()` cannot catch a response that arrives after the next command starts, and cannot repair partial I/O. Close/reconnect with a new generation after timeout.
+- **Connection lifecycle**: `ConnectMultiPort`/`DisconnectMultiPort` currently race active requests and access non-atomic client state. Connection replacement needs an exclusive lifecycle gate; commands need a shared lease.
 - **UI thread isolation for AI**: background provider/HTTP threads communicate with ImGui exclusively through `UIMessageQueue`. ImGui calls happen only on the main thread.
+- **Process target consistency**: process-bound Agent operations must validate `AppContext::processRevision`; runId is not a target identifier.
+- **Address format**: use `0x` for address strings across AI, IPC, MCP, docs, and tests.
+- **Resource bounds**: validate untrusted sizes before allocation and cap raw HTTP/SSE data, tool outputs, and persisted session input, not just tool arguments.
+- **Sensitive data**: DPAPI protects provider API keys only. Redact secrets before putting tool arguments/results into session history.
 - **Scan flags are bitmasks** (defined in `MemoryTypes.h`): exactly one data-type bit (`BYTE_`/`WORD_`/`DWORD_`/`QWORD_`/`FLOAT_`/`DOUBLE_`/`XOR_`) OR-ed with one scan-mode bit (`_ACCURATE_VAL`, `_LARGER_THAN_VAL`, `_LESS_THAN_VAL`, `_BETWEEN_VAL`, `_UNKNOW_VAL`, `_ADD_UNKNOW_VAL`, `_SUB_UNKNOW_VAL`, `_CHANGED_VAL`, `_UNCHANGED_VAL`, …). The IPC and AI layers validate that combinations are well-formed; keep `mcp/amem_mcp/constants.py` in sync with the C++ enums when adding values.
 - **Conditional compilation**: `HAVE_AI_CHAT` / `HAVE_CAPSTONE` / `HAVE_KEYSTONE` / `HAVE_LUAJIT` gate optional features; all source that touches them is `#ifdef`-guarded so the app builds with any subset present.
 - **ImGui docking**: uses the docking branch; windows use `ImGuiWindowFlags_NoDocking` selectively.
 
 ## Branches
 
-- `WinGui` — main branch (PR target)
-- `AIChat` — current development branch (AI chat + MCP/IPC work)
+- `dev` — remote default/main integration branch
+- `NativeAgent` — independent native in-app Agent branch; not currently intended to merge into `dev`
+- `AIChat` — AI chat + MCP/IPC baseline branch
+- `WinGui` — earlier Windows GUI branch
 - `docking` — earlier development branch
 
 ## Note for maintainers
 
-`AGENTS.md` (guidance for Codex) historically mirrored this file's content. If you make substantive architecture changes, update both so the two stay consistent.
+`AGENTS.md` (guidance for Codex) historically mirrored this file's content. If you make substantive architecture changes, update both plus the relevant `docs/agent_*.md` files. The detailed current risk register is `docs/agent_project_issues.md`.

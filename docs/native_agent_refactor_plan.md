@@ -1,0 +1,546 @@
+# NativeAgent 原生内存工具重构方案
+
+状态：实施中，首个原生服务切片已落地
+适用分支：`NativeAgent`
+分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
+基线提交：`0bf354f`
+最后更新：2026-07-10
+
+本文给出从当前 AI Chat + HTTP IPC + Python MCP 结构迁移到“内置原生内存工具 Agent”的实施方案。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
+
+## 0. 当前进度
+
+2026-07-10 已完成第一个纵向切片：
+
+- 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
+- 现有 socket manager 开始维护单调 `connectionGeneration`；`AppContext` 可生成一致目标快照。
+- `status`、`process_list`、`process_open`、`memory_read` 已通过薄 Agent adapter 调用 `MemService`。
+- 旧名称仍可执行但不再向 provider 广告。当前注册表有 39 个可执行名称，其中 7 个隐藏 alias，模型收到 32 个定义。
+- 新增 `NativeAgentMemTests` CTest，覆盖地址、分页、generation、目标变化、取消/期限、结果格式和隐藏 alias。
+
+尚未完成：connection lifecycle lease、timeout 后 poison/reconnect、run/审批全生命周期 target 绑定、joinable executor、其余 20 个规范工具、GUI 迁移和 MCP/IPC 删除。因此 A-02、A-03、A-19、A-20 等问题仍不能视为关闭。
+
+## 1. 结论
+
+目标不是把 Python MCP 翻译成 C++，而是删除这层重复代理，并在应用内部建立唯一的原生内存业务层：
+
+```text
+ImGui Agent -----> Agent 编排/审批 ------+
+                                       |
+GUI windows ---------------------------+--> MemService
+                                       |      -> DeviceSession
+可选 Named Pipe IPC -------------------+      -> socket protocol
+                                              -> Android server/device
+```
+
+核心决定如下：
+
+1. `MemService` 成为进程、模块、内存、扫描、断点和符号能力的唯一业务入口；Agent、GUI 和可选 IPC 不再直接调用 `client_singleton.h`。
+2. Python MCP 包最终删除，不把其 wrapper、常量表或重试逻辑复制到 C++。
+3. Agent 只暴露一组稳定的规范工具名；兼容别名先隐藏、再迁移、最后删除。
+4. 工具调用绑定 `{pid, processHandle, processRevision, connectionGeneration}`，审批后目标发生变化时必须拒绝执行。
+5. detached 工具线程改成一个受管、可 join 的任务队列。取消具有明确状态，不再把“UI 不接收晚到结果”描述为操作已停止。
+6. 若仍需要外部自动化，HTTP IPC 替换为默认关闭的 Windows Named Pipe；如果没有外部调用方，则直接删除 IPC，不保留第二套公开接口。
+
+## 2. 目标与非目标
+
+### 2.1 目标
+
+- AMem 安装后即可使用内置 Agent 的内存调试工具，不依赖 Python、FastMCP 或额外进程。
+- 同一业务操作只有一套参数校验、目标校验、错误语义、取消语义和结果格式。
+- 模型看到的工具更少、更稳定，避免别名和前置状态工具增加选择成本。
+- 目标切换、断线重连、超时、取消和应用退出都有可证明的生命周期边界。
+- 核心逻辑可在没有 Android 设备时通过 fake service/transport 自动测试。
+- 保留 GUI 现有能力，迁移期间允许旧入口与新服务短期并存，但必须有删除期限。
+
+### 2.2 非目标
+
+- 本轮不修改 Android 服务端二进制协议。
+- 不重做聊天界面或 provider 产品形态。
+- 不用一个带 `action` 参数的超大工具替代全部内存工具。
+- 不让 Agent 直接持有 socket、原始进程句柄或全局单例的可变引用。
+- 不承诺已发往设备的写命令可以回滚或硬取消。
+
+## 3. 目标组件与职责
+
+### 3.1 `MemService`
+
+`MemService` 是原生业务门面，负责：
+
+- 统一解析地址、数值类型、扫描类型、内存范围和分页参数。
+- 获取并验证目标快照。
+- 将多个底层命令组织为一个业务操作，保护扫描集、符号表等共享状态。
+- 把底层 `bool`/整数返回值转换为结构化结果和稳定错误码。
+- 应用统一的大小、数量、耗时和输出截断限制。
+- 记录操作 effect、duration、目标 revision 和 connection generation。
+
+它不负责：
+
+- JSON Schema 或 provider-specific tool 格式。
+- ImGui 弹窗、聊天消息和文案。
+- Named Pipe framing。
+- 直接保存会话。
+
+### 3.2 `DeviceSession`
+
+`DeviceSession` 取代当前“全局三个 client + 分散状态检查”的连接生命周期管理：
+
+- 一个 session 管理 main/debug/error 三个端口和单调递增的 `connectionGeneration`。
+- 普通请求持有共享 connection lease；connect/disconnect/reconnect 持有独占 lifecycle gate。
+- 每个端口仍可单独串行 request/response，但连接对象状态由 session 内同一同步边界保护。
+- 任意可能发生 partial send/receive 的超时将对应连接标记为 poisoned；旧连接不再通过 `DrainPending()` 复用。
+- 重连生成新 generation，并使旧 process handle、扫描状态、断点跟踪和符号缓存失效。
+- 长扫描的取消通过 debug 端口发送 stop；若协议不能确认停止，则结果标为 `cancel_requested` 或 `completion_unknown`，而不是 `cancelled`。
+
+### 3.3 `AgentRunContext`
+
+每次 run 在第一轮模型请求前捕获：
+
+```cpp
+struct TargetSnapshot {
+    int pid = 0;
+    int processHandle = 0;
+    uint64_t processRevision = 0;
+    uint64_t connectionGeneration = 0;
+};
+
+struct AgentRunContext {
+    std::string runId;
+    TargetSnapshot target;
+    std::shared_ptr<CancellationState> cancellation;
+};
+```
+
+规则：
+
+- 非进程绑定工具可以不带 target。
+- 进程绑定工具在审批前、出队执行前和返回结果前都校验 snapshot。
+- `process_open` 成功后产生新 snapshot，并显式更新当前 run；不能悄悄沿用旧 snapshot。
+- target 改变时，待审批和队列中尚未开始的旧工具全部失败为 `target_changed`。
+- 晚到结果可以进入审计记录，但不得作为当前目标上的成功结果回喂模型。
+
+### 3.4 `AgentTaskExecutor`
+
+用一个拥有 joinable `std::thread` 的队列替代当前两层 detached 执行：
+
+```text
+AgentRunner -> enqueue ToolTask -> owned worker -> MemService -> ToolOutcome
+                    |                                  |
+                    +---------- cancellation ----------+
+```
+
+- 队列拥有 worker，应用退出时先停止接收、请求取消、排空或标记未完成任务，然后 join。
+- executor 本身执行工具，不再为 timeout 创建第二层 detached packaged task。
+- deadline 通过 `OperationContext` 传到 service 和 socket I/O。
+- 写命令发送前可取消；发送后只能报告 `write_sent`、`completion_unknown` 或已确认结果。
+- UI 只消费带 `runId` 和 target snapshot 的 outcome，不接触 worker 生命周期。
+
+### 3.5 `AgentToolCatalog`
+
+工具目录只负责模型接口：
+
+- 规范名称和描述。
+- JSON Schema。
+- effect、安全等级、feature gate、幂等性和资源域元数据。
+- JSON 参数到强类型 request 的转换。
+- `MemResult<T>` 到统一 tool result 的转换。
+
+工具实现中不再出现 socket command、`AppContext::Get()` 或重复的十六进制编码逻辑。
+
+## 4. `MemService` 契约草案
+
+C++17 没有 `std::expected`，可使用项目内轻量结果类型；不要用空数组、0 或 JSON 字符串同时表达成功与失败。
+
+```cpp
+enum class MemErrorCode {
+    InvalidArgument,
+    NotConnected,
+    NoTarget,
+    TargetChanged,
+    ConnectionChanged,
+    ConnectionPoisoned,
+    Timeout,
+    CancelRequested,
+    CompletionUnknown,
+    ProtocolError,
+    Unsupported,
+    PermissionDenied,
+    InternalError,
+};
+
+struct MemError {
+    MemErrorCode code;
+    std::string message;
+    bool retryable = false;
+};
+
+template <typename T>
+struct MemResult {
+    std::optional<T> value;
+    std::optional<MemError> error;
+    uint64_t durationMs = 0;
+};
+
+struct Unit {};
+
+struct OperationContext {
+    uint64_t connectionGeneration = 0;
+    std::optional<TargetSnapshot> target;
+    CancellationToken cancellation;
+    std::chrono::steady_clock::time_point deadline;
+};
+
+struct OpenProcessResult {
+    TargetSnapshot target;
+    std::string name;
+};
+```
+
+建议的业务 API 按域分组：
+
+```cpp
+class IMemService {
+public:
+    virtual ~IMemService() = default;
+
+    virtual MemResult<Status> status(const OperationContext&) = 0;
+    virtual MemResult<std::vector<ProcessInfo>> listProcesses(
+        const OperationContext&, const ListRequest&) = 0;
+    virtual MemResult<OpenProcessResult> openProcess(
+        const OperationContext&, const OpenProcessRequest&) = 0;
+
+    virtual MemResult<Page<ModuleInfo>> listModules(
+        const OperationContext&, const ModuleListRequest&) = 0;
+    virtual MemResult<ResolvedAddress> resolveModule(
+        const OperationContext&, const ModuleResolveRequest&) = 0;
+    virtual MemResult<ResolvedAddress> resolvePointer(
+        const OperationContext&, const PointerResolveRequest&) = 0;
+
+    virtual MemResult<MemoryBlock> readMemory(
+        const OperationContext&, const MemoryReadRequest&) = 0;
+    virtual MemResult<ScalarValue> readValue(
+        const OperationContext&, const ValueReadRequest&) = 0;
+    virtual MemResult<WriteReceipt> writeMemory(
+        const OperationContext&, const MemoryWriteRequest&) = 0;
+    virtual MemResult<WriteReceipt> writeValue(
+        const OperationContext&, const ValueWriteRequest&) = 0;
+
+    virtual MemResult<ScanSummary> startScan(
+        const OperationContext&, const ScanStartRequest&) = 0;
+    virtual MemResult<ScanSummary> refineScan(
+        const OperationContext&, const ScanRefineRequest&) = 0;
+    virtual MemResult<Page<ScanResult>> scanResults(
+        const OperationContext&, const PageRequest&) = 0;
+    virtual MemResult<Unit> clearScan(const OperationContext&) = 0;
+
+    // breakpoint, symbol, disassembly and optional Lua methods follow
+    // the same context/result contract.
+};
+```
+
+接口约束：
+
+- JSON 中的地址统一为带 `0x` 前缀的字符串，避免进制歧义和 JSON number 的 53-bit 精度问题。
+- `MemResult` 必须恰好包含 value 或 error 之一；实现时通过工厂函数维护该不变量。
+- 非进程工具仍校验 `OperationContext::connectionGeneration`；target 存在时，两处 generation 必须一致。
+- `MemoryBlock` 内部保存 bytes；十六进制、ASCII、typed value 等展示形式由边界 adapter 生成。
+- 列表统一返回 `items`、`total`、`nextCursor` 和 `truncated`。
+- `ScanStartRequest` 一次包含范围、数据类型、模式和值/字节模式；不再依赖先调用 `scan_set_range`。
+- symbol 初始化是 `listSymbols`/`resolveSymbol` 的服务内部细节，不作为 Agent 工具。
+- service 的通用上限是安全边界；Agent/IPC 可以设置更小的调用预算，但不能绕过通用上限。
+
+## 5. 规范工具集合
+
+目标目录包含 24 个工具。迁移期旧名称可以作为“仅执行、不向模型广告”的 alias，避免旧会话突然失效；完成会话和默认 prompt 迁移后删除。
+
+| 规范工具 | 替代当前名称 | 说明 |
+|---|---|---|
+| `status` | `get_status`, `get_server_version`, `get_architecture` | 一次返回连接、版本、架构、目标和 feature availability |
+| `driver_initialize` | `init_driver` | 特权初始化，始终审批 |
+| `process_list` | `get_process_list`, `list_processes` | 支持 filter/cursor/limit |
+| `process_open` | `open_process` | 返回新的 target snapshot，始终审批 |
+| `module_list` | `get_module_list`, `list_modules` | 统一分页和过滤 |
+| `module_resolve` | `get_module_base` | 返回 base、size 和规范模块名 |
+| `pointer_resolve` | `resolve_offset_chain` | 一次完成模块基址和指针链解析 |
+| `memory_read` | `memory_read`, `read_memory` | 唯一 raw bytes 读取入口 |
+| `memory_read_value` | `read_value` | typed scalar 读取 |
+| `memory_write` | `memory_write`, `write_bytes` | 唯一 raw bytes 写入入口 |
+| `memory_write_value` | `write_value` | typed scalar 写入 |
+| `scan_start` | `scan_set_range` + `scan_value`/`scan_fuzzy`/`scan_hex` | 一次提交完整 scan request |
+| `scan_refine` | `scan_next` | 过滤当前 scan session |
+| `scan_results` | `get_scan_count`, `get_scan_results` | 结果页包含 total |
+| `scan_clear` | `clear_scan` | 清理当前 scan session |
+| `disassemble` | `read_disassembly` | 返回 bytes、encoding 和可用时的 ARM64 文本 |
+| `breakpoint_set` | `set_breakpoint` | 目标状态变更，始终审批 |
+| `breakpoint_remove` | `remove_breakpoint` | 目标状态变更，始终审批 |
+| `breakpoint_hits` | `read_breakpoint_info` | 读取命中和寄存器信息 |
+| `breakpoint_suspend` | `suspend_breakpoint` | 目标状态变更，始终审批 |
+| `breakpoint_resume` | `resume_breakpoint` | 目标状态变更，始终审批 |
+| `symbol_resolve` | `resolve_symbol`, `symbol_find` | service 内部处理初始化和 module base |
+| `symbol_list` | `symbol_init`, `symbol_list` | 不暴露共享 active table 前置步骤 |
+| `lua_execute` | `execute_lua` | 仅 `HAVE_LUAJIT` 时注册，始终审批，可配置关闭 |
+
+不建议新增 `memory(action=...)` 或 `mem_tool(operation=...)`。这种大工具虽然名称少，但 schema 更复杂、审批更模糊、错误更难定位，也会让 provider 更难稳定选择参数。简洁化应来自去别名、合并前置状态和统一返回值，而不是把不同 effect 塞进同一个 action 分支。
+
+## 6. Effect、审批与审计
+
+将当前二元 `ReadOnly`/`Write` 扩展为：
+
+| Effect | 示例 | 默认策略 |
+|---|---|---|
+| `Observe` | status、list、read、disassemble | 无审批，仍校验 target |
+| `SessionMutation` | scan start/refine/clear、symbol cache 初始化 | 默认无需逐次审批，但记录审计并可由设置提升为需审批 |
+| `TargetSelection` | process open/switch | 始终审批 |
+| `TargetMutation` | memory write、breakpoint、freeze、driver init | 始终审批并绑定 target snapshot |
+| `HostExecution` | Lua | 始终审批，可在构建或设置中彻底禁用 |
+
+每个 tool descriptor 还应声明：
+
+- `targetRequired`
+- `idempotency`：safe / conditional / unsafe
+- `resourceDomain`：connection / process / scan / symbol / breakpoint / lua
+- `cancellation`：before-send / cooperative / unsupported-after-send
+- `featureGate`
+- 输入和输出预算
+
+审批记录至少保存 tool 名、规范化参数摘要、effect、runId、target snapshot、决定和时间。内存写入数据可以按安全设置做摘要或脱敏，但不能只记录“用户已同意”而缺少目标。
+
+## 7. IPC 取舍与新协议
+
+### 7.1 默认决定
+
+`NativeAgent` 不再自动启动 `127.0.0.1:28100` HTTP 服务。构建选项建议为：
+
+```cmake
+option(ENABLE_NATIVE_IPC "Enable local Named Pipe automation" OFF)
+```
+
+- 没有明确外部调用方时：删除 IPC，架构停在 GUI/Agent -> `MemService`。
+- 仍需外部脚本或 IDE 自动化时：实现 Named Pipe，但它只是 `MemService` 的受限 adapter，不拥有业务逻辑。
+
+### 7.2 Named Pipe 设计
+
+- 名称：`\\.\pipe\AMem.NativeAgent.v1`。
+- 使用当前交互用户 SID 的 DACL，并允许 SYSTEM；拒绝其他用户和远程 pipe client。
+- 服务默认关闭，由 GUI 设置显式开启；状态必须可见。
+- 使用显式小端编码的 header，不直接发送 C++ struct 内存：magic、protocol version、message type、request id、payload length。
+- payload 使用 UTF-8 JSON；保留 request/response 结构化契约，设置请求和响应总量上限。
+- 首条消息完成版本和 capability handshake；不支持的版本立即关闭。
+- 支持 request id、deadline 和 cancel 消息；取消状态与 `AgentTaskExecutor` 使用相同语义。
+- 默认只开放 `Observe`。`TargetSelection`、`TargetMutation` 和 `HostExecution` 请求进入同一个 GUI approval broker，并绑定 target snapshot。
+- 连接断开、目标切换或 generation 变化时，旧的外部审批和 capability 立即失效。
+
+Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险操作审批。不要用“本机进程”作为默认允许任意写内存的理由。
+
+## 8. 并发、事务和取消
+
+### 8.1 资源域
+
+端口 mutex 只保护一条底层 request/response，不能保护复合业务操作。`MemService` 需要按资源域增加业务锁或串行队列：
+
+- `process`：open/close/target cleanup 与所有 target-bound 操作互斥。
+- `scan`：set range + start、refine、results、clear 作为同一 scan session。
+- `symbol`：init + list/find 作为同一 module symbol session。
+- `breakpoint`：远端状态和本地 tracked set 同步更新。
+- `connection`：请求 lease 与 reconnect/disconnect 互斥。
+
+锁顺序必须固定为 connection -> process -> domain -> port，禁止 adapter 自己组合锁。
+
+### 8.2 取消状态
+
+统一 outcome：
+
+- `cancelled_before_start`
+- `cancelled_before_send`
+- `cancel_requested`
+- `completed_after_cancel_request`
+- `completion_unknown`
+- `completed`
+
+用户按 Stop 后立即停止新的 model/tool 调度，并请求取消活动操作。只有 service/协议确认没有副作用时才显示 `cancelled`。写入已经发送、但响应超时时必须显示“完成状态未知”，同时 poison 连接并要求重新连接/重新选择目标。
+
+## 9. 文件级变更地图
+
+建议新增：
+
+| 路径 | 职责 |
+|---|---|
+| `mem/MemTypes.h` | 强类型 request/result、地址和值类型、分页 |
+| `mem/MemResult.h` | 稳定错误码和 `MemResult<T>` |
+| `mem/IMemService.h` | 供 Agent/GUI/IPC 和 fake 使用的接口 |
+| `mem/MemService.h/.cpp` | 业务操作、校验、事务和结果转换 |
+| `socket/DeviceSession.h/.cpp` | connection lease、generation、poison/reconnect |
+| `gui/ai/AgentRunContext.h` | run 与 target snapshot |
+| `gui/ai/AgentToolCatalog.h/.cpp` | 规范工具目录和 JSON adapter |
+| `gui/ai/AgentTaskExecutor.h/.cpp` | joinable worker、队列和取消 |
+| `ipc/NamedPipeServer.h/.cpp` | 可选 transport adapter |
+| `ipc/IpcProtocol.h/.cpp` | framing、handshake、request/response DTO |
+| `tests/` | fake service、契约、状态机和协议测试 |
+
+建议逐步修改：
+
+- `gui/AppContext.*`：由 `MemService`/target store 管理一致快照，移除前端直接编排 cleanup command。
+- `gui/ai/AgentRun.*`、`AgentRunner.*`、`AgentController.*`：携带 run context 和结构化 tool outcome。
+- `gui/ai/ToolDefinitions.cpp`：迁移后拆为 catalog/schema 与很薄的 service adapter；最终删除重复 executor。
+- `gui/ai/ToolExecutor.*`、`ChatWindow.cpp`：移除 detached worker 和 timeout 内层线程。
+- `gui/ai/DefaultSystemPrompt.h`：只描述规范工具，不列 alias 或前置状态调用。
+- `socket/client_singleton.*`、`socket/*Commands.cpp`：先作为 `MemService` 的 legacy backend；消费者迁完后收窄为内部协议层。
+- `gui/*Window.cpp`：按域迁移到 `IMemService`，不再直接读取原始 handle。
+- `main.cpp`、`CMakeLists.txt`：注入 service/session，移除 HTTP IPC 自动启动，增加可选 Named Pipe 和测试 target。
+- `README.md`、`AGENTS.md`、`CLAUDE.md`、`scripts/README.md`：完成每阶段后更新事实描述。
+
+最终删除或移动：
+
+- 删除 `.mcp.json`。
+- 删除 `mcp/amem_mcp/`、`mcp/configs/`、`mcp/server.py`、`mcp/pyproject.toml`、`mcp/requirements.txt`、`mcp/README.md` 和 `mcp/.gitignore`。
+- `mcp/reference/` 不参与 Python MCP。若仍用于协议排障，移动到 `tools/protocol_reference/` 并改写说明；若没有维护者和测试用途，再单独删除。
+- 新 IPC 上线后删除 `ipc/IpcServer.*`；若不保留外部自动化，则整个 `ipc/` 可删除。
+- 删除 README、IDE 配置和脚本中对端口 28100、FastMCP、`python -m amem_mcp` 的引用。
+
+## 10. 分阶段迁移
+
+### Phase 0：冻结契约并建立测试支点（进行中）
+
+变更：
+
+- 保存迁移前 36/29/30 能力矩阵作为基线；迁移中的可执行/广告名称分开统计。
+- 为地址解析、typed value 编解码、scan 参数映射和 tool schema 建立无设备测试。
+- 引入 `IMemService` fake，覆盖 AgentRunner 的审批、target changed、取消和错误回喂。
+- 为现有 socket command 建立可注入的 fake transport 或最小协议 fixture。
+
+退出条件：测试可在 CI/CTest 独立运行；尚不改变用户可见工具行为。
+
+### Phase 1：引入 `DeviceSession` 与 `MemService`（部分完成）
+
+变更：
+
+- 先包装 status、process list/open、module list、memory read/write。
+- 保持旧函数存在，但只允许 `MemService` 新代码调用；增加直接调用清单防止继续扩散。
+- 建立 generation、target snapshot、统一错误和 poison 连接规则。
+
+退出条件：上述能力可通过 fake service 测试；超时后的连接不会被复用。
+
+### Phase 2：迁移 Agent 工具和执行生命周期
+
+变更：
+
+- 加入 `AgentRunContext`、effect metadata 和 target-bound approval。
+- 使用 joinable `AgentTaskExecutor`，删除工具路径两层 detached。
+- 先注册规范工具，同时将 alias 设为 hidden compatibility entry。
+- 扫描、符号和断点复合操作迁入 service 事务边界。
+
+退出条件：Agent 工具实现中没有 raw socket command 或 `AppContext::Get()`；Stop 和 teardown 测试通过。
+
+### Phase 3：迁移 GUI 与共享状态
+
+变更：
+
+- Process、Scan、Memory Viewer、Breakpoint、Modules 和 Lua 窗口逐个改用 service。
+- 将 module/symbol/scan 状态放到明确的 session owner，不由多个前端共同修改裸全局字段。
+- 清理 `SetCurrentPid()`、`EnsureOpenHandle()` 等隐式全局行为。
+
+退出条件：除 `MemService`/协议实现外，仓库没有前端直接包含 `client_singleton.h` 的业务调用。
+
+### Phase 4：替换或删除 IPC
+
+变更：
+
+- 先关闭 HTTP server 的默认启动。
+- 有外部调用需求时实现 Named Pipe、ACL、framing、handshake、cancel 和 approval broker。
+- 没有需求时直接移除 IPC source 和 CMake wiring。
+
+退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
+
+### Phase 5：删除 Python MCP
+
+变更：
+
+- 按第 9 节清单删除 Python 包、配置和文档。
+- 将仍有价值的协议参考工具移出 `mcp/`。
+- 更新项目总览、构建依赖和开发说明。
+
+退出条件：构建、运行、测试和文档不要求 Python/FastMCP；`rg` 不再找到过期启动命令或 MCP 配置。
+
+### Phase 6：删除兼容别名
+
+变更：
+
+- 迁移默认 prompt 和保存会话中的历史 tool name。
+- 对无法迁移的旧 tool call/result 作为历史文本保留，不重新执行。
+- 删除 hidden aliases 和旧 JSON adapter。
+
+退出条件：模型只看到并只能新调用第 5 节的规范集合；能力矩阵由单一 catalog 生成。
+
+### Phase 7：完成 Agent 基础设施加固
+
+变更：
+
+- 修复截断 SSE 成功、provider context 预算、配置损坏覆盖、会话明文策略和设置所有权。
+- 将 HTTP provider worker 也改为受管生命周期。
+- 为响应、历史和工具输出建立端到端预算。
+
+退出条件：[`agent_project_issues.md`](./agent_project_issues.md) 中 A-04、A-05、A-09 至 A-12、A-15、A-18、A-21 均有回归测试和关闭证据。
+
+## 11. 测试策略
+
+### 11.1 无设备自动测试
+
+- 地址：只接受显式 `0x`、溢出、空值、负数、JSON number 精度边界。
+- typed value：整数范围、浮点、endianness、HEX 奇数长度和非法字符。
+- schema：必填字段、额外字段、oneOf scan mode、分页和大小上限。
+- target：审批期间切进程、断线重连、handle 相同但 revision/generation 不同。
+- executor：排队取消、运行中取消、timeout、shutdown join、晚到结果。
+- service：scan/symbol 复合操作不被其他 caller 插入，错误不会留下半更新本地状态。
+- connection：partial send/receive、timeout poison、重连 generation、并发 disconnect。
+- provider：完整/截断/重复终止/malformed SSE。
+- persistence：损坏 JSON、字段类型错误、临时文件替换失败、旧会话迁移。
+- IPC（若保留）：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
+
+### 11.2 真实设备 smoke test
+
+每个 release 至少验证：
+
+1. 连接、列进程、打开目标、列模块。
+2. 有界 read 和经人工确认的 write/read-back。
+3. start/refine/results/clear scan 完整周期及中途 Stop。
+4. breakpoint set/hit/read/suspend/resume/remove。
+5. 操作中切换目标、断开和退出，不崩溃且不把结果归给新目标。
+6. 若启用 Named Pipe，验证只读、审批写、取消和客户端异常退出。
+
+## 12. 问题覆盖关系
+
+| 阶段 | 主要覆盖问题 |
+|---|---|
+| Phase 0 | A-14、A-17、A-22 |
+| Phase 1 | A-08、A-19、A-20 |
+| Phase 2 | A-02、A-03、A-07、A-13、A-16、A-17 |
+| Phase 3 | A-08、A-20 |
+| Phase 4 | A-01、A-06、A-17 |
+| Phase 5-6 | A-13、A-14、A-17 |
+| Phase 7 | A-04、A-05、A-09、A-10、A-11、A-12、A-15、A-18、A-21 |
+
+## 13. 验收标准
+
+重构完成必须同时满足：
+
+- Python MCP、FastMCP 配置和 HTTP 28100 server 已不存在。
+- Agent 在无 Python 环境中可以完成进程、模块、内存、扫描、断点和符号工作流。
+- GUI、Agent 和可选 IPC 的设备业务调用都经过 `IMemService`。
+- Agent 广告的工具只有规范名称，没有当前重复 alias 和 symbol/scan 前置状态工具。
+- 每个进程绑定操作和审批都验证 revision + connection generation。
+- 工具和 provider 后台线程由 owner join；退出不依赖固定 3 秒 best-effort wait。
+- timeout/partial I/O 后旧连接不会继续承载新请求。
+- Stop 的 UI、审计和 tool result 能区分“未开始”“已请求取消”“完成未知”。
+- capability/feature gate 和结果契约来自单一 registry，Lua 等不可用功能不会继续向模型广告。
+- 无设备测试进入 CTest/CI，真实设备 smoke checklist 有可重复记录。
+
+## 14. 第一个实现切片（已落地）
+
+第一批代码保持窄范围、可回滚：
+
+1. 新增 `MemResult`、`TargetSnapshot`、`IMemService` 和 fake。
+2. 只迁移 `status`、`process_list`、`process_open`、`memory_read` 四个规范工具。
+3. 给这四个工具加入 target/generation、结果契约和单元测试。
+4. 旧工具仍可运行，但不在这一批删除 MCP、IPC 或 GUI 直连。
+
+该切片已通过应用构建和无设备 CTest。它只验证了 service 边界和 Agent adapter；下一批应实现受管 `DeviceSession` 与 run-level target context，再扩展写入、扫描和断点等高风险能力。
