@@ -5,13 +5,16 @@
 #include "../gui/ai/ToolExecutor.h"
 #include "../mem/Address.h"
 #include "../mem/MemService.h"
+#include "../mem/ValueCodec.h"
 #include "../socket/DeviceSession.h"
 #include "../third_party/nlohmann/json.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -73,6 +76,9 @@ public:
     int writeDelayMs = 0;
     Mem::CancellationToken cancelDuringWrite;
     int writeCalls = 0;
+    int readCalls = 0;
+    uint64_t lastReadAddress = 0;
+    uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
     std::vector<unsigned char> lastWriteBytes;
 
@@ -134,13 +140,18 @@ public:
         return true;
     }
 
-    bool readMemory(uint64_t,
-                    uint32_t,
+    bool readMemory(uint64_t address,
+                    uint32_t size,
                     std::vector<unsigned char>& output) override {
+        ++readCalls;
+        lastReadAddress = address;
+        lastReadSize = size;
         if (!readMemorySucceeds) {
             return false;
         }
-        output = memory;
+        const size_t resultSize = (std::min)(
+            static_cast<size_t>(size), memory.size());
+        output.assign(memory.begin(), memory.begin() + resultSize);
         if (changeTargetAfterRead) {
             target.processRevision += 2;
         }
@@ -198,6 +209,62 @@ void testAddressContract() {
 
     const auto overflow = Mem::parseAddress("0x10000000000000000");
     expect(!overflow.ok(), "uint64 address overflow must fail");
+}
+
+void testScalarValueCodec() {
+    const auto intAlias = Mem::parseScalarType(" int32 ");
+    expect(intAlias.ok() && intAlias.value() == Mem::ScalarType::Dword,
+           "int32 should normalize to dword");
+    expect(!Mem::parseScalarType("vector128").ok(),
+           "unsupported scalar types must fail");
+
+    const auto dword =
+        Mem::encodeScalarValue(Mem::ScalarType::Dword, "0x12345678");
+    expect(dword.ok() &&
+               dword.value() ==
+                   std::vector<unsigned char>({0x78, 0x56, 0x34, 0x12}),
+           "dword encoding should be little endian");
+
+    const auto negative =
+        Mem::encodeScalarValue(Mem::ScalarType::Word, "-1");
+    expect(negative.ok() &&
+               negative.value() ==
+                   std::vector<unsigned char>({0xFF, 0xFF}),
+           "negative integer encoding should preserve two's complement bits");
+    expect(!Mem::encodeScalarValue(Mem::ScalarType::Byte, "256").ok(),
+           "integer overflow must be rejected");
+    expect(!Mem::encodeScalarValue(Mem::ScalarType::Byte, "-129").ok(),
+           "negative integer underflow must be rejected");
+
+    const auto qword = Mem::encodeScalarValue(
+        Mem::ScalarType::Qword, "18446744073709551615");
+    expect(qword.ok() && qword.value().size() == 8 &&
+               qword.value().front() == 0xFF &&
+               qword.value().back() == 0xFF,
+           "qword strings should preserve the full uint64 range");
+
+    const auto encodedFloat =
+        Mem::encodeScalarValue(Mem::ScalarType::Float, "1.5");
+    expect(encodedFloat.ok() &&
+               encodedFloat.value() ==
+                   std::vector<unsigned char>({0x00, 0x00, 0xC0, 0x3F}),
+           "float encoding should preserve IEEE-754 bytes");
+    expect(!Mem::encodeScalarValue(Mem::ScalarType::Double, "nan").ok(),
+           "non-finite write values must be rejected");
+
+    const auto decoded =
+        Mem::decodeScalarValue(Mem::ScalarType::Dword, dword.value());
+    expect(decoded.ok() && decoded.value().integerValue == 0x12345678 &&
+               Mem::formatScalarValue(decoded.value()) == "305419896",
+           "integer decoding should expose exact decimal bits");
+    const auto decodedFloat =
+        Mem::decodeScalarValue(Mem::ScalarType::Float, encodedFloat.value());
+    expect(decodedFloat.ok() && decodedFloat.value().floatingPoint &&
+               std::fabs(decodedFloat.value().floatingValue - 1.5) < 0.0001,
+           "float decoding should preserve the scalar value");
+    expect(!Mem::decodeScalarValue(
+                Mem::ScalarType::Qword, {0x01, 0x02}).ok(),
+           "decode must reject a byte-count/type mismatch");
 }
 
 void testStatusAndConnectionGeneration() {
@@ -425,6 +492,72 @@ void testMemoryWriteCompletionContract() {
     expect(!overflow.ok() &&
                overflow.error().code == Mem::ErrorCode::InvalidArgument,
            "overflowing memory write range must fail validation");
+}
+
+void testTypedMemoryService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    const Mem::OperationContext targetContext = service.captureContext(true);
+
+    backend.memory = {0x78, 0x56, 0x34, 0x12};
+    Mem::ValueReadRequest readRequest;
+    readRequest.address = 0x3000;
+    readRequest.type = Mem::ScalarType::Dword;
+    const auto read = service.readValue(targetContext, readRequest);
+    expect(read.ok() && read.value().bytes == backend.memory &&
+               backend.lastReadAddress == 0x3000 &&
+               backend.lastReadSize == 4,
+           "typed read should request the exact scalar byte count");
+
+    backend.memory = {0x01, 0x02};
+    const auto partial = service.readValue(
+        service.captureContext(true), readRequest);
+    expect(!partial.ok() &&
+               partial.error().code == Mem::ErrorCode::ProtocolError,
+           "typed read must reject a short raw response");
+
+    backend.memory = {0x78, 0x56, 0x34, 0x12};
+    backend.changeTargetAfterRead = true;
+    const auto changed = service.readValue(
+        service.captureContext(true), readRequest);
+    expect(!changed.ok() &&
+               changed.error().code == Mem::ErrorCode::TargetChanged,
+           "typed read must retain raw read target validation");
+    backend.changeTargetAfterRead = false;
+
+    const auto encoded =
+        Mem::encodeScalarValue(Mem::ScalarType::Word, "0xBEEF");
+    expect(encoded.ok(), "typed write fixture should encode");
+    Mem::ValueWriteRequest writeRequest;
+    writeRequest.address = 0x4000;
+    writeRequest.type = Mem::ScalarType::Word;
+    writeRequest.bytes = encoded.value();
+    const auto written = service.writeValue(
+        service.captureContext(true), writeRequest);
+    expect(written.ok() && written.value().writtenBytes == 2 &&
+               backend.lastWriteAddress == 0x4000 &&
+               backend.lastWriteBytes ==
+                   std::vector<unsigned char>({0xEF, 0xBE}),
+           "typed write should delegate exact encoded bytes to raw write");
+
+    const int callsAfterWrite = backend.writeCalls;
+    writeRequest.bytes = {0xEF};
+    const auto wrongSize = service.writeValue(
+        service.captureContext(true), writeRequest);
+    expect(!wrongSize.ok() &&
+               wrongSize.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.writeCalls == callsAfterWrite,
+           "typed write must reject a type/byte-count mismatch before send");
+
+    writeRequest.bytes = encoded.value();
+    backend.writeRequestStarted = true;
+    backend.writeResponseReceived = false;
+    const auto unknown = service.writeValue(
+        service.captureContext(true), writeRequest);
+    expect(!unknown.ok() &&
+               unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
+               !unknown.error().retryable,
+           "typed write must preserve raw completion_unknown semantics");
 }
 
 void testHiddenToolRegistration() {
@@ -783,6 +916,37 @@ void testAgentAdapter() {
     expect(legacyRead.at("success").get<bool>(),
            "hidden legacy memory alias should accept integer addresses");
 
+    const json strictValueAddress = json::parse(
+        tools.memoryReadValue(
+            R"({"address":"1000","data_type":"dword"})",
+            false,
+            targetContext));
+    expect(!strictValueAddress.at("success").get<bool>() &&
+               strictValueAddress.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical memory_read_value should require a 0x address");
+
+    backend.memory = {0x78, 0x56, 0x34, 0x12};
+    const json typedRead = json::parse(
+        tools.memoryReadValue(
+            R"({"address":"0x1000","data_type":"int32"})",
+            false,
+            targetContext));
+    expect(typedRead.at("success").get<bool>() &&
+               typedRead.at("data_type") == "dword" &&
+               typedRead.at("value").get<uint64_t>() == 0x12345678 &&
+               typedRead.at("value_text") == "305419896" &&
+               typedRead.at("value_hex") == "0x12345678",
+           "typed read adapter should expose normalized exact values");
+
+    const json legacyTypedRead = json::parse(
+        tools.memoryReadValue(
+            R"({"address":4096,"data_type":"dword"})",
+            true,
+            targetContext));
+    expect(legacyTypedRead.at("success").get<bool>(),
+           "hidden read_value alias should accept integer addresses");
+
     const json strictWriteAddress = json::parse(
         tools.memoryWrite(
             R"({"address":"2000","data_hex":"90 90"})",
@@ -811,6 +975,38 @@ void testAgentAdapter() {
     expect(legacyWrite.at("success").get<bool>() &&
                legacyWrite.at("written_bytes") == 4,
            "hidden write_bytes alias should retain legacy argument forms");
+
+    const json strictTypedWriteAddress = json::parse(
+        tools.memoryWriteValue(
+            R"({"address":"2000","value":-1,"data_type":"word"})",
+            false,
+            targetContext));
+    expect(!strictTypedWriteAddress.at("success").get<bool>() &&
+               strictTypedWriteAddress.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical memory_write_value should require a 0x address");
+
+    const json typedWrite = json::parse(
+        tools.memoryWriteValue(
+            R"({"address":"0x2000","value":-1,"data_type":"int16"})",
+            false,
+            targetContext));
+    expect(typedWrite.at("success").get<bool>() &&
+               typedWrite.at("data_type") == "word" &&
+               typedWrite.at("hex") == "FFFF" &&
+               typedWrite.at("completion") == "completed" &&
+               backend.lastWriteBytes ==
+                   std::vector<unsigned char>({0xFF, 0xFF}),
+           "typed write adapter should normalize and encode scalar values");
+
+    const json legacyTypedWrite = json::parse(
+        tools.memoryWriteValue(
+            R"({"address":8192,"value":"0x7F","value_type":"int8"})",
+            true,
+            targetContext));
+    expect(legacyTypedWrite.at("success").get<bool>() &&
+               legacyTypedWrite.at("hex") == "7F",
+           "hidden write_value alias should retain integer addresses");
 
     backend.connected = false;
     const json disconnected = json::parse(
@@ -1115,10 +1311,12 @@ void testNonTargetToolsAndStaleResult() {
 int main() {
     const std::vector<std::pair<std::string, std::function<void()>>> tests = {
         {"address contract", &testAddressContract},
+        {"scalar value codec", &testScalarValueCodec},
         {"status and generation", &testStatusAndConnectionGeneration},
         {"process pagination and open", &testProcessPaginationAndOpen},
         {"memory target validation", &testMemoryReadTargetValidation},
         {"memory write completion contract", &testMemoryWriteCompletionContract},
+        {"typed memory service", &testTypedMemoryService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},

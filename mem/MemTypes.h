@@ -95,6 +95,41 @@ struct MemoryBlock {
     TargetSnapshot target;
 };
 
+enum class ScalarType {
+    Byte,
+    Word,
+    Dword,
+    Qword,
+    Xor,
+    Float,
+    Double,
+};
+
+struct ValueReadRequest {
+    uint64_t address = 0;
+    ScalarType type = ScalarType::Dword;
+};
+
+struct ValueWriteRequest {
+    uint64_t address = 0;
+    ScalarType type = ScalarType::Dword;
+    std::vector<unsigned char> bytes;
+};
+
+struct ScalarValue {
+    uint64_t address = 0;
+    ScalarType type = ScalarType::Dword;
+    std::vector<unsigned char> bytes;
+    TargetSnapshot target;
+};
+
+struct DecodedScalarValue {
+    ScalarType type = ScalarType::Dword;
+    bool floatingPoint = false;
+    uint64_t integerValue = 0;
+    double floatingValue = 0.0;
+};
+
 struct MemoryWriteRequest {
     uint64_t address = 0;
     std::vector<unsigned char> bytes;
@@ -119,5 +154,7 @@ inline constexpr uint32_t kMaxAgentMemoryReadBytes = 64u * 1024u;
 inline constexpr uint32_t kMaxAgentMemoryWriteBytes = 4u * 1024u;
 inline constexpr size_t kMaxProcessPageSize = 1000;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
+inline constexpr size_t kMaxScalarTypeNameBytes = 64;
+inline constexpr size_t kMaxScalarValueTextBytes = 256;
 
 } // namespace Mem

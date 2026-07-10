@@ -249,6 +249,7 @@ set(MEM_SOURCES
     mem/Address.cpp
     mem/MemService.cpp
     mem/SystemMemService.cpp
+    mem/ValueCodec.cpp
 )
 
 set(RENDERER_SOURCES
@@ -364,6 +365,7 @@ if(BUILD_TESTING)
         tests/MemServiceTests.cpp
         mem/Address.cpp
         mem/MemService.cpp
+        mem/ValueCodec.cpp
         socket/DeviceSession.cpp
         gui/ai/AgentMemTools.cpp
         gui/ai/AgentRunContext.cpp

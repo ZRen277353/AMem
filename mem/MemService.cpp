@@ -1,4 +1,5 @@
 #include "MemService.h"
+#include "ValueCodec.h"
 
 #include <algorithm>
 #include <chrono>
@@ -368,6 +369,44 @@ Result<MemoryBlock> MemService::readMemory(
                                         elapsedMilliseconds(start));
 }
 
+Result<ScalarValue> MemService::readValue(
+    const OperationContext& context,
+    const ValueReadRequest& request) {
+    const auto start = Clock::now();
+    const size_t size = scalarTypeSize(request.type);
+    if (size == 0) {
+        return Result<ScalarValue>::failure(
+            ErrorCode::InvalidArgument,
+            "invalid scalar data type",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    MemoryReadRequest rawRequest;
+    rawRequest.address = request.address;
+    rawRequest.size = static_cast<uint32_t>(size);
+    auto raw = readMemory(context, rawRequest);
+    if (!raw.ok()) {
+        return Result<ScalarValue>::failure(
+            raw.error(), elapsedMilliseconds(start));
+    }
+    if (raw.value().bytes.size() != size) {
+        return Result<ScalarValue>::failure(
+            ErrorCode::ProtocolError,
+            "typed memory read returned fewer bytes than required",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    ScalarValue value;
+    value.address = raw.value().address;
+    value.type = request.type;
+    value.bytes = std::move(raw.value().bytes);
+    value.target = raw.value().target;
+    return Result<ScalarValue>::success(
+        std::move(value), elapsedMilliseconds(start));
+}
+
 Result<WriteReceipt> MemService::writeMemory(
     const OperationContext& context,
     const MemoryWriteRequest& request) {
@@ -455,6 +494,31 @@ Result<WriteReceipt> MemService::writeMemory(
     receipt.target = *context.target;
     return Result<WriteReceipt>::success(
         std::move(receipt), elapsedMilliseconds(start));
+}
+
+Result<WriteReceipt> MemService::writeValue(
+    const OperationContext& context,
+    const ValueWriteRequest& request) {
+    const auto start = Clock::now();
+    const size_t expectedSize = scalarTypeSize(request.type);
+    if (expectedSize == 0 || request.bytes.size() != expectedSize) {
+        return Result<WriteReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "typed memory write byte count does not match data_type",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    MemoryWriteRequest rawRequest;
+    rawRequest.address = request.address;
+    rawRequest.bytes = request.bytes;
+    auto raw = writeMemory(context, rawRequest);
+    if (!raw.ok()) {
+        return Result<WriteReceipt>::failure(
+            raw.error(), elapsedMilliseconds(start));
+    }
+    return Result<WriteReceipt>::success(
+        std::move(raw.value()), elapsedMilliseconds(start));
 }
 
 } // namespace Mem

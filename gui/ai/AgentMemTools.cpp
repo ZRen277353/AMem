@@ -1,9 +1,11 @@
 #include "AgentMemTools.h"
 
 #include "../../mem/Address.h"
+#include "../../mem/ValueCodec.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -88,6 +90,45 @@ std::string optionalString(const json& args, const char* key) {
         throw std::runtime_error(std::string(key) + " exceeds 4096 bytes");
     }
     return value;
+}
+
+std::string scalarValueText(const json& args) {
+    if (!args.contains("value")) {
+        throw std::runtime_error("value is required");
+    }
+    const json& value = args.at("value");
+    std::string text;
+    if (value.is_string()) {
+        text = value.get<std::string>();
+    } else if (value.is_number_unsigned()) {
+        text = std::to_string(value.get<unsigned long long>());
+    } else if (value.is_number_integer()) {
+        text = std::to_string(value.get<long long>());
+    } else if (value.is_number_float()) {
+        text = value.dump();
+    } else {
+        throw std::runtime_error("value must be a string or number");
+    }
+    if (text.size() > Mem::kMaxScalarValueTextBytes) {
+        throw std::runtime_error("value exceeds 256 bytes");
+    }
+    return text;
+}
+
+Mem::Result<Mem::ScalarType> scalarTypeArgument(
+    const json& args,
+    bool allowLegacyArguments) {
+    std::string type;
+    if (allowLegacyArguments && args.contains("value_type") &&
+        !args.at("value_type").is_null()) {
+        type = optionalString(args, "value_type");
+    } else {
+        type = optionalString(args, "data_type");
+    }
+    if (type.empty()) {
+        type = "dword";
+    }
+    return Mem::parseScalarType(type);
 }
 
 Mem::Result<uint64_t> parseAddressArgument(const json& value,
@@ -416,6 +457,66 @@ std::string AgentMemTools::memoryRead(const std::string& argsJson,
     }
 }
 
+std::string AgentMemTools::memoryReadValue(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto parsedAddress =
+            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        if (!parsedAddress.ok()) {
+            return errorResult(parsedAddress.error(),
+                               parsedAddress.durationMs());
+        }
+        const auto parsedType = scalarTypeArgument(args, allowLegacyArguments);
+        if (!parsedType.ok()) {
+            return errorResult(parsedType.error(), parsedType.durationMs());
+        }
+
+        Mem::ValueReadRequest request;
+        request.address = parsedAddress.value();
+        request.type = parsedType.value();
+        const auto response = service_.readValue(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::ScalarValue& value = response.value();
+        const auto decoded = Mem::decodeScalarValue(value.type, value.bytes);
+        if (!decoded.ok()) {
+            return errorResult(decoded.error(), response.durationMs());
+        }
+
+        json output;
+        output["success"] = true;
+        output["address"] = Mem::formatAddress(value.address);
+        output["data_type"] = Mem::scalarTypeName(value.type);
+        output["hex"] = compactHex(value.bytes);
+        output["value_text"] = Mem::formatScalarValue(decoded.value());
+        if (decoded.value().floatingPoint) {
+            output["value"] = std::isfinite(decoded.value().floatingValue)
+                ? json(decoded.value().floatingValue)
+                : json(nullptr);
+        } else {
+            output["value"] = decoded.value().integerValue;
+            output["value_hex"] =
+                Mem::formatAddress(decoded.value().integerValue);
+        }
+        output["meta"] = resultMeta(response.durationMs(),
+                                    value.target.connectionGeneration,
+                                    &value.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "read_value" : "memory_read_value",
+            error);
+    }
+}
+
 std::string AgentMemTools::memoryWrite(
     const std::string& argsJson,
     bool allowLegacyArguments,
@@ -467,6 +568,67 @@ std::string AgentMemTools::memoryWrite(
     } catch (const std::exception& error) {
         return exceptionResult(
             allowLegacyArguments ? "write_bytes" : "memory_write", error);
+    }
+}
+
+std::string AgentMemTools::memoryWriteValue(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto parsedAddress =
+            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        if (!parsedAddress.ok()) {
+            return errorResult(parsedAddress.error(),
+                               parsedAddress.durationMs());
+        }
+        const auto parsedType = scalarTypeArgument(args, allowLegacyArguments);
+        if (!parsedType.ok()) {
+            return errorResult(parsedType.error(), parsedType.durationMs());
+        }
+        const auto encoded = Mem::encodeScalarValue(
+            parsedType.value(), scalarValueText(args));
+        if (!encoded.ok()) {
+            return errorResult(encoded.error(), encoded.durationMs());
+        }
+
+        Mem::ValueWriteRequest request;
+        request.address = parsedAddress.value();
+        request.type = parsedType.value();
+        request.bytes = encoded.value();
+        const auto response = service_.writeValue(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::WriteReceipt& receipt = response.value();
+        json output;
+        output["success"] = true;
+        output["address"] = Mem::formatAddress(receipt.address);
+        output["data_type"] = Mem::scalarTypeName(request.type);
+        output["written_bytes"] = receipt.writtenBytes;
+        output["hex"] = compactHex(request.bytes);
+        output["completed_after_cancel_request"] =
+            receipt.completedAfterCancelRequest;
+        output["completed_after_deadline"] =
+            receipt.completedAfterDeadline;
+        output["completion"] = receipt.completedAfterCancelRequest
+            ? "completed_after_cancel_request"
+            : (receipt.completedAfterDeadline
+                   ? "completed_after_deadline"
+                   : "completed");
+        output["meta"] = resultMeta(response.durationMs(),
+                                    receipt.target.connectionGeneration,
+                                    &receipt.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "write_value" : "memory_write_value",
+            error);
     }
 }
 

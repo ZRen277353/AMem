@@ -937,47 +937,16 @@ std::string execReadMemory(const std::string& argsJson,
     return getAgentMemTools().memoryRead(argsJson, true, context);
 }
 
-// read_value
-std::string execReadValue(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const uint64_t address = parseAddressJson(args.at("address"));
-        const std::string dataType = optionalStringArg(args, "data_type", "dword", 64, false);
-        const int size = dataTypeToSize(dataType);
+// canonical memory_read_value
+std::string execMemoryReadValue(const std::string& argsJson,
+                                const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryReadValue(argsJson, false, context);
+}
 
-        std::vector<unsigned char> bytes;
-        if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), bytes, PORT_MAIN)) {
-            return makeError("socket communication error: read_value");
-        }
-        if (static_cast<int>(bytes.size()) < size) {
-            return makeError("read_value returned fewer bytes than requested");
-        }
-
-        json result;
-        result["address"] = toHexAddress(address);
-        result["data_type"] = dataType;
-        result["hex"] = bytesToCompactHex(bytes);
-        const std::string t = lowerCopy(dataType);
-        if (t == "float") {
-            float v = 0.0f;
-            std::memcpy(&v, bytes.data(), sizeof(v));
-            result["value"] = v;
-        } else if (t == "double") {
-            double v = 0.0;
-            std::memcpy(&v, bytes.data(), sizeof(v));
-            result["value"] = v;
-        } else {
-            uint64_t value = 0;
-            for (int i = 0; i < size; ++i) {
-                value |= static_cast<uint64_t>(bytes[i]) << (8 * i);
-            }
-            result["value"] = value;
-            result["value_hex"] = toHexAddress(value);
-        }
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("read_value: ") + e.what());
-    }
+// hidden read_value compatibility alias
+std::string execReadValue(const std::string& argsJson,
+                          const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryReadValue(argsJson, true, context);
 }
 
 // memory_write
@@ -992,30 +961,16 @@ std::string execWriteBytes(const std::string& argsJson,
     return getAgentMemTools().memoryWrite(argsJson, true, context);
 }
 
-// write_value
-std::string execWriteValue(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const uint64_t address = parseAddressJson(args.at("address"));
-        const std::string dataType = valueTypeFromArgs(args);
-        std::vector<unsigned char> bytes = encodeScanValue(dataType, args.at("value"));
-        if (bytes.empty() || bytes.size() > 8) {
-            return makeError("write_value supports scalar values up to 8 bytes");
-        }
+// canonical memory_write_value
+std::string execMemoryWriteValue(const std::string& argsJson,
+                                 const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryWriteValue(argsJson, false, context);
+}
 
-        const uint32_t size = static_cast<uint32_t>(bytes.size());
-        if (!WriteProcessMemoryBytes(address, size, bytes, PORT_MAIN)) {
-            return makeError("socket communication error: write_value");
-        }
-
-        json result;
-        result["address"] = toHexAddress(address);
-        result["written_bytes"] = static_cast<int>(size);
-        result["hex"] = bytesToCompactHex(bytes);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("write_value: ") + e.what());
-    }
+// hidden write_value compatibility alias
+std::string execWriteValue(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().memoryWriteValue(argsJson, true, context);
 }
 
 // scan_value
@@ -2028,12 +1983,45 @@ constexpr const char* kSchemaReadMemory = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaMemoryReadValue = R"JSON({
+  "type": "object",
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
+    },
+    "data_type": {
+      "type": "string",
+      "description": "byte, word, dword, qword, xor, float, or double"
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaReadValue = R"JSON({
   "type": "object",
   "required": ["address"],
   "properties": {
     "address": {
       "description": "Memory address as hex string or integer"
+    },
+    "data_type": {
+      "type": "string",
+      "description": "byte, word, dword, qword, xor, float, or double"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaMemoryWriteValue = R"JSON({
+  "type": "object",
+  "required": ["address", "value"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
+    },
+    "value": {
+      "description": "Scalar value to write; use a string for exact qword values"
     },
     "data_type": {
       "type": "string",
@@ -2485,13 +2473,21 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
+        "memory_read_value",
+        "Read one typed scalar from an explicit 0x-prefixed target address.",
+        kSchemaMemoryReadValue,
+        ToolSafety::ReadOnly,
+        &execMemoryReadValue,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "read_value",
-        "Read a single typed scalar value from process memory.",
+        "Compatibility alias for memory_read_value.",
         kSchemaReadValue,
         ToolSafety::ReadOnly,
         &execReadValue,
-        true,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Bound,
+        false);
 
     registerTool(
         "memory_write",
@@ -2511,13 +2507,21 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
+        "memory_write_value",
+        "Write one typed scalar to an explicit 0x-prefixed target address. Requires user confirmation.",
+        kSchemaMemoryWriteValue,
+        ToolSafety::Write,
+        &execMemoryWriteValue,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "write_value",
-        "Write a single typed scalar value to process memory. Requires user confirmation.",
+        "Compatibility alias for memory_write_value.",
         kSchemaWriteValue,
         ToolSafety::Write,
         &execWriteValue,
-        true,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Bound,
+        false);
 
     registerTool(
         "scan_set_range",
