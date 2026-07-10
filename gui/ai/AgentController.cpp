@@ -102,6 +102,9 @@ ToolResult contextFailureResult(const Mem::Error& error,
     result.success = false;
     result.resultJson = output.dump();
     result.errorMessage = error.message;
+    result.completion = staleResult
+        ? staleResult->completion
+        : ToolCompletionState::RejectedBeforeStart;
     return result;
 }
 

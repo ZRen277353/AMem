@@ -6,13 +6,9 @@
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <chrono>
-#include <condition_variable>
 #include <exception>
-#include <future>
-#include <memory>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <utility>
 
 namespace AI {
@@ -274,6 +270,52 @@ std::string extractToolError(const std::string& resultJson) {
     }
 }
 
+ToolCompletionState extractCompletionState(const std::string& resultJson) {
+    try {
+        const json result = json::parse(resultJson);
+        if (!result.is_object()) {
+            return ToolCompletionState::Completed;
+        }
+
+        if (result.contains("completion") &&
+            result["completion"].is_string()) {
+            const std::string completion =
+                result["completion"].get<std::string>();
+            if (completion == "rejected_before_start")
+                return ToolCompletionState::RejectedBeforeStart;
+            if (completion == "cancelled_before_start")
+                return ToolCompletionState::CancelledBeforeStart;
+            if (completion == "timed_out_before_start")
+                return ToolCompletionState::TimedOutBeforeStart;
+            if (completion == "timed_out")
+                return ToolCompletionState::TimedOut;
+            if (completion == "cancel_requested")
+                return ToolCompletionState::CancelRequested;
+            if (completion == "completion_unknown")
+                return ToolCompletionState::CompletionUnknown;
+            if (completion == "completed_after_cancel_request")
+                return ToolCompletionState::CompletedAfterCancelRequest;
+            if (completion == "completed_after_deadline")
+                return ToolCompletionState::CompletedAfterDeadline;
+        }
+
+        if (result.contains("error") && result["error"].is_object() &&
+            result["error"].contains("code") &&
+            result["error"]["code"].is_string()) {
+            const std::string code =
+                result["error"]["code"].get<std::string>();
+            if (code == "cancel_requested")
+                return ToolCompletionState::CancelRequested;
+            if (code == "timeout")
+                return ToolCompletionState::TimedOut;
+            if (code == "completion_unknown")
+                return ToolCompletionState::CompletionUnknown;
+        }
+    } catch (const std::exception&) {
+    }
+    return ToolCompletionState::Completed;
+}
+
 std::optional<Mem::TargetSnapshot> extractSelectedTarget(
     const std::string& resultJson,
     std::string& error) {
@@ -303,31 +345,6 @@ std::optional<Mem::TargetSnapshot> extractSelectedTarget(
         error = std::string("invalid target-selection result: ") + exception.what();
         return std::nullopt;
     }
-}
-
-std::shared_future<std::string> runExecutorAsync(
-    std::function<std::string(const std::string&,
-                              const Mem::OperationContext&)> executor,
-    std::string argsJson,
-    Mem::OperationContext context,
-    int timeoutSeconds) {
-    auto promise = std::make_shared<std::promise<std::string>>();
-    std::shared_future<std::string> future = promise->get_future().share();
-
-    std::thread([promise,
-                 executor = std::move(executor),
-                 argsJson = std::move(argsJson),
-                 context = std::move(context),
-                 timeoutSeconds]() mutable {
-        try {
-            SocketIoTimeout::ScopedTimeout socketTimeout(timeoutSeconds);
-            promise->set_value(executor(argsJson, context));
-        } catch (...) {
-            promise->set_exception(std::current_exception());
-        }
-    }).detach();
-
-    return future;
 }
 
 } // namespace
@@ -459,43 +476,27 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
         executionContext.deadline = timeoutDeadline;
     }
 
-    // Invoke the executor asynchronously. Read-only tools enforce a
-    // wall-clock timeout (AC 6.6); write-classified tools wait for the real
-    // result in this background thread so the agent never continues from an
-    // ambiguous "timed out but may still commit" target state.
+    if (std::chrono::steady_clock::now() >= executionContext.deadline) {
+        ToolResult result;
+        result.success = false;
+        result.errorMessage = "Tool '" + call.name +
+                              "' deadline expired before execution";
+        result.completion = ToolCompletionState::TimedOutBeforeStart;
+        return result;
+    }
+
+    // AgentTaskExecutor owns the worker thread. Execute synchronously here so
+    // no untracked inner task can outlive shutdown; the same absolute
+    // deadline flows into MemService and socket lock/I/O budgets.
     ToolResult result;
     try {
-        std::shared_future<std::string> fut =
-            runExecutorAsync(registration.executor,
-                             normalizedArgsJson,
-                             executionContext,
-                             timeoutSeconds);
-        if (fut.wait_for(std::chrono::seconds(timeoutSeconds)) == std::future_status::timeout) {
-            if (registration.safety == ToolSafety::Write) {
-                result.resultJson = fut.get();
-                result.errorMessage = extractToolError(result.resultJson);
-                result.success = result.errorMessage.empty();
-                if (result.success &&
-                    registration.targetPolicy == ToolTargetPolicy::Selection) {
-                    std::string targetError;
-                    result.selectedTarget =
-                        extractSelectedTarget(result.resultJson, targetError);
-                    if (!result.selectedTarget) {
-                        result.success = false;
-                        result.errorMessage = std::move(targetError);
-                    }
-                }
-                return result;
-            }
-
-            result.success = false;
-            result.errorMessage = "Tool '" + call.name + "' execution timed out after " +
-                                  std::to_string(timeoutSeconds) + " seconds";
-            return result;
-        }
-        result.resultJson = fut.get();
+        SocketIoTimeout::ScopedTimeout socketTimeout(
+            executionContext.deadline);
+        result.resultJson =
+            registration.executor(normalizedArgsJson, executionContext);
         result.errorMessage = extractToolError(result.resultJson);
         result.success = result.errorMessage.empty();
+        result.completion = extractCompletionState(result.resultJson);
         if (result.success &&
             registration.targetPolicy == ToolTargetPolicy::Selection) {
             std::string targetError;
@@ -504,6 +505,21 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
             if (!result.selectedTarget) {
                 result.success = false;
                 result.errorMessage = std::move(targetError);
+            }
+        }
+
+        if (std::chrono::steady_clock::now() >= executionContext.deadline &&
+            result.success) {
+            if (registration.safety == ToolSafety::Write) {
+                if (result.completion == ToolCompletionState::Completed) {
+                    result.completion =
+                        ToolCompletionState::CompletedAfterDeadline;
+                }
+            } else {
+                result.success = false;
+                result.errorMessage = "Tool '" + call.name +
+                                      "' completed after its deadline";
+                result.completion = ToolCompletionState::TimedOut;
             }
         }
     } catch (const std::exception& e) {
@@ -561,40 +577,6 @@ void ToolExecutor::setExecutionTimeout(int seconds) {
 int ToolExecutor::getExecutionTimeout() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return executionTimeout_;
-}
-
-bool ToolExecutor::beginToolWorker() {
-    std::lock_guard<std::mutex> lock(lifecycleMutex_);
-    if (shuttingDown_) {
-        return false;
-    }
-    ++inFlightWorkers_;
-    return true;
-}
-
-void ToolExecutor::endToolWorker() {
-    std::lock_guard<std::mutex> lock(lifecycleMutex_);
-    if (--inFlightWorkers_ <= 0) {
-        inFlightWorkers_ = 0;
-        lifecycleCv_.notify_all();
-    }
-}
-
-bool ToolExecutor::isShuttingDown() const {
-    std::lock_guard<std::mutex> lock(lifecycleMutex_);
-    return shuttingDown_;
-}
-
-void ToolExecutor::shutdown() {
-    std::unique_lock<std::mutex> lock(lifecycleMutex_);
-    shuttingDown_ = true;
-    // Detached tool workers can't be joined; give them a bounded window to
-    // finish delivering their result (and stop touching UIMessageQueue /
-    // socket singletons) before we return into static destruction. A worker
-    // blocked on slow device I/O may exceed this — the wait is a best-effort
-    // guard, not a hard guarantee, matching HttpClient::shutdown().
-    lifecycleCv_.wait_for(lock, std::chrono::seconds(3),
-                          [this] { return inFlightWorkers_ == 0; });
 }
 
 } // namespace AI

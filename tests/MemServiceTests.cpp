@@ -1,5 +1,6 @@
 #include "../gui/ai/AgentMemTools.h"
 #include "../gui/ai/AgentController.h"
+#include "../gui/ai/AgentTaskExecutor.h"
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
 #include "../mem/Address.h"
@@ -10,8 +11,10 @@
 #include <functional>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -38,6 +41,10 @@ void expect(bool condition, const std::string& message) {
         throw std::runtime_error(message);
     }
 }
+
+AI::ToolCall toolCall(std::string id,
+                      std::string name,
+                      std::string arguments = "{}");
 
 class FakeBackend final : public Mem::IMemBackend {
 public:
@@ -429,6 +436,13 @@ void testHiddenToolRegistration() {
                           AI::ToolSafety::ReadOnly,
                           [](const std::string&) { return std::string("{}"); },
                           false);
+    registry.registerTool(
+        "test_completion_unknown", "completion", "{}",
+        AI::ToolSafety::Write,
+        [](const std::string&) {
+            return std::string(
+                R"({"success":false,"error":{"code":"completion_unknown","message":"receipt lost","retryable":false}})");
+        });
 
     const auto definitions = registry.getToolDefinitions();
     bool foundVisible = false;
@@ -446,6 +460,13 @@ void testHiddenToolRegistration() {
     const AI::ToolResult executed = registry.execute(call);
     expect(executed.success,
            "hidden compatibility alias must remain executable for old sessions");
+
+    call.name = "test_completion_unknown";
+    const AI::ToolResult unknown = registry.execute(call);
+    expect(!unknown.success &&
+               unknown.completion ==
+                   AI::ToolCompletionState::CompletionUnknown,
+           "structured completion_unknown must survive result normalization");
 }
 
 void testDeviceSessionLifecycle() {
@@ -509,6 +530,216 @@ void testDeviceSessionLifecycle() {
         auto lifecycle = session.AcquireLifecycle();
         session.Disconnect();
     }
+}
+
+void testAgentTaskExecutorLifecycle() {
+    auto& registry = AI::ToolExecutor::getInstance();
+    std::mutex stateMutex;
+    std::condition_variable stateCv;
+    std::vector<AI::AgentToolTaskOutcome> outcomes;
+    bool blockerStarted = false;
+    bool releaseBlocker = false;
+    bool cancellableStarted = false;
+    bool cancellableFinished = false;
+    int immediateExecutions = 0;
+    std::thread::id executorThread;
+    std::thread::id callbackThread;
+
+    registry.registerTool(
+        "test_task_immediate", "immediate", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&](const std::string&) {
+            ++immediateExecutions;
+            executorThread = std::this_thread::get_id();
+            return std::string(R"({"success":true})");
+        });
+    registry.registerTool(
+        "test_task_blocker", "blocker", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&](const std::string&, const Mem::OperationContext& context) {
+            std::unique_lock<std::mutex> lock(stateMutex);
+            blockerStarted = true;
+            stateCv.notify_all();
+            while (!releaseBlocker &&
+                   !(context.cancellation &&
+                     context.cancellation->load(std::memory_order_acquire))) {
+                stateCv.wait_for(lock, std::chrono::milliseconds(5));
+            }
+            return std::string(R"({"success":true})");
+        },
+        AI::ToolTargetPolicy::None);
+    registry.registerTool(
+        "test_task_cancellable", "cancellable", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&](const std::string&, const Mem::OperationContext& context) {
+            {
+                std::lock_guard<std::mutex> lock(stateMutex);
+                cancellableStarted = true;
+                stateCv.notify_all();
+            }
+            while (!(context.cancellation &&
+                     context.cancellation->load(std::memory_order_acquire))) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            {
+                std::lock_guard<std::mutex> lock(stateMutex);
+                cancellableFinished = true;
+                stateCv.notify_all();
+            }
+            return std::string(
+                R"({"success":false,"error":{"code":"cancel_requested","message":"cancel observed","retryable":false}})");
+        },
+        AI::ToolTargetPolicy::None);
+    registry.registerTool(
+        "test_task_slow_read", "slow read", "{}",
+        AI::ToolSafety::ReadOnly,
+        [&](const std::string&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            return std::string(R"({"success":true,"value":1})");
+        });
+
+    AI::AgentTaskExecutor executor(registry);
+    const auto completion = [&](AI::AgentToolTaskOutcome outcome) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        callbackThread = std::this_thread::get_id();
+        outcomes.push_back(std::move(outcome));
+        stateCv.notify_all();
+    };
+    const auto waitFor = [&](const std::function<bool()>& predicate,
+                             const char* message) {
+        std::unique_lock<std::mutex> lock(stateMutex);
+        if (!stateCv.wait_for(lock, std::chrono::seconds(2), predicate)) {
+            throw std::runtime_error(message);
+        }
+    };
+    const auto completionFor = [&](const std::string& runId) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        for (const auto& outcome : outcomes) {
+            if (outcome.runId == runId) {
+                return outcome.result.completion;
+            }
+        }
+        throw std::runtime_error("missing task outcome for " + runId);
+    };
+    const auto enqueue = [&](const std::string& runId,
+                             const std::string& tool,
+                             Mem::OperationContext context = {}) {
+        AI::AgentToolTask task;
+        task.runId = runId;
+        task.call = toolCall(runId + "-call", tool);
+        task.context = std::move(context);
+        return executor.enqueue(std::move(task), completion);
+    };
+
+    expect(enqueue("task-basic", "test_task_immediate"),
+           "owned task executor should accept work");
+    waitFor([&] { return outcomes.size() >= 1; },
+            "basic task did not complete");
+    expect(immediateExecutions == 1 && executorThread == callbackThread &&
+               executorThread != std::this_thread::get_id(),
+           "tool and callback should run on the same owned worker thread");
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        blockerStarted = false;
+        releaseBlocker = false;
+    }
+    expect(enqueue("task-block-timeout", "test_task_blocker"),
+           "blocker should enqueue for queue-timeout test");
+    waitFor([&] { return blockerStarted; }, "blocker did not start");
+    Mem::OperationContext shortDeadline;
+    shortDeadline.deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+    expect(enqueue("task-queued-timeout", "test_task_immediate",
+                   shortDeadline),
+           "queued timeout task should enqueue");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        releaseBlocker = true;
+        stateCv.notify_all();
+    }
+    waitFor([&] { return outcomes.size() >= 3; },
+            "queue-timeout outcomes did not complete");
+    expect(completionFor("task-queued-timeout") ==
+               AI::ToolCompletionState::TimedOutBeforeStart &&
+               immediateExecutions == 1,
+           "expired queued task must not invoke its tool executor");
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        blockerStarted = false;
+        releaseBlocker = false;
+    }
+    expect(enqueue("task-block-cancel", "test_task_blocker"),
+           "blocker should enqueue for cancellation test");
+    waitFor([&] { return blockerStarted; },
+            "cancellation blocker did not start");
+    expect(enqueue("task-queued-cancel", "test_task_immediate"),
+           "queued cancellation task should enqueue");
+    executor.cancelRun("task-queued-cancel");
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        releaseBlocker = true;
+        stateCv.notify_all();
+    }
+    waitFor([&] { return outcomes.size() >= 5; },
+            "queued cancellation outcomes did not complete");
+    expect(completionFor("task-queued-cancel") ==
+               AI::ToolCompletionState::CancelledBeforeStart &&
+               immediateExecutions == 1,
+           "cancelled queued task must not invoke its tool executor");
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        cancellableStarted = false;
+        cancellableFinished = false;
+    }
+    expect(enqueue("task-active-cancel", "test_task_cancellable"),
+           "active cancellation task should enqueue");
+    waitFor([&] { return cancellableStarted; },
+            "cancellable task did not start");
+    executor.cancelRun("task-active-cancel");
+    waitFor([&] { return outcomes.size() >= 6; },
+            "active cancellation outcome did not complete");
+    expect(cancellableFinished &&
+               completionFor("task-active-cancel") ==
+                   AI::ToolCompletionState::CancelRequested,
+           "active task should observe cancellation without being detached");
+
+    Mem::OperationContext slowDeadline;
+    slowDeadline.deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    expect(enqueue("task-slow-timeout", "test_task_slow_read", slowDeadline),
+           "slow read should enqueue");
+    waitFor([&] { return outcomes.size() >= 7; },
+            "slow timeout outcome did not complete");
+    expect(completionFor("task-slow-timeout") ==
+               AI::ToolCompletionState::TimedOut,
+           "late read must finish on the owned worker and report timed_out");
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        cancellableStarted = false;
+        cancellableFinished = false;
+    }
+    expect(enqueue("task-shutdown", "test_task_cancellable"),
+           "shutdown task should enqueue");
+    waitFor([&] { return cancellableStarted; },
+            "shutdown task did not start");
+    expect(enqueue("task-shutdown-queued", "test_task_immediate"),
+           "queued shutdown task should enqueue");
+    executor.shutdown();
+    expect(cancellableFinished && !executor.isAccepting() &&
+               executor.pendingCount() == 0 &&
+               completionFor("task-shutdown") ==
+                   AI::ToolCompletionState::CancelRequested &&
+               completionFor("task-shutdown-queued") ==
+                   AI::ToolCompletionState::CancelledBeforeStart &&
+               immediateExecutions == 1,
+           "shutdown must cancel and join the active worker");
+    expect(!enqueue("task-after-shutdown", "test_task_immediate"),
+           "executor must reject work after shutdown");
 }
 
 void testAgentAdapter() {
@@ -591,7 +822,7 @@ void testAgentAdapter() {
 
 AI::ToolCall toolCall(std::string id,
                       std::string name,
-                      std::string arguments = "{}") {
+                      std::string arguments) {
     AI::ToolCall call;
     call.id = std::move(id);
     call.name = std::move(name);
@@ -891,6 +1122,7 @@ int main() {
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},
+        {"agent task executor lifecycle", &testAgentTaskExecutorLifecycle},
         {"approval context invalidation", &testApprovalContextInvalidation},
         {"process open advances run target", &testProcessOpenAdvancesRunTarget},
         {"non-target and stale result handling", &testNonTargetToolsAndStaleResult},

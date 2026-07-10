@@ -149,6 +149,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/AgentController.cpp
     gui/ai/AgentRunner.cpp
     gui/ai/AgentRunContext.cpp
+    gui/ai/AgentTaskExecutor.cpp
     gui/ai/AgentMemTools.cpp
     gui/ai/AgentMemToolsSystem.cpp
     gui/ai/ChatWindow.cpp
@@ -366,6 +367,7 @@ if(BUILD_TESTING)
         socket/DeviceSession.cpp
         gui/ai/AgentMemTools.cpp
         gui/ai/AgentRunContext.cpp
+        gui/ai/AgentTaskExecutor.cpp
         gui/ai/AgentRunner.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp

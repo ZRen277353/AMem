@@ -4,7 +4,6 @@
 #include "AIProvider.h"
 #include "AgentRunContext.h"
 
-#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -13,6 +12,43 @@
 #include <vector>
 
 namespace AI {
+
+enum class ToolCompletionState {
+    Completed,
+    RejectedBeforeStart,
+    CancelledBeforeStart,
+    TimedOutBeforeStart,
+    TimedOut,
+    CancelRequested,
+    CompletionUnknown,
+    CompletedAfterCancelRequest,
+    CompletedAfterDeadline,
+};
+
+inline const char* toolCompletionStateName(ToolCompletionState state) {
+    switch (state) {
+        case ToolCompletionState::Completed:
+            return "completed";
+        case ToolCompletionState::RejectedBeforeStart:
+            return "rejected_before_start";
+        case ToolCompletionState::CancelledBeforeStart:
+            return "cancelled_before_start";
+        case ToolCompletionState::TimedOutBeforeStart:
+            return "timed_out_before_start";
+        case ToolCompletionState::TimedOut:
+            return "timed_out";
+        case ToolCompletionState::CancelRequested:
+            return "cancel_requested";
+        case ToolCompletionState::CompletionUnknown:
+            return "completion_unknown";
+        case ToolCompletionState::CompletedAfterCancelRequest:
+            return "completed_after_cancel_request";
+        case ToolCompletionState::CompletedAfterDeadline:
+            return "completed_after_deadline";
+        default:
+            return "completed";
+    }
+}
 
 // A registry entry describing a single tool: its AI-facing definition, safety
 // classification, and the native executor that performs the work.
@@ -34,6 +70,7 @@ struct ToolResult {
     std::string resultJson;
     std::string errorMessage;
     std::optional<Mem::TargetSnapshot> selectedTarget;
+    ToolCompletionState completion = ToolCompletionState::Completed;
 };
 
 // Meyer's singleton that owns the tool registry and drives tool execution on
@@ -77,10 +114,9 @@ public:
     // decoupled from the socket-backed tool implementations.
     void initBuiltinTools();
 
-    // Execute a tool_call received from the AI. Performs: lookup,
-    // JSON parse, schema validation, invocation with timeout, and error
-    // wrapping. Never throws; any exception from the executor is captured
-    // and surfaced as a ToolResult with success=false.
+    // Execute synchronously on the caller-owned worker. Performs lookup,
+    // JSON parse, schema validation, deadline propagation, invocation, and
+    // error wrapping. Thread ownership belongs to AgentTaskExecutor.
     ToolResult execute(const ToolCall& call);
     ToolResult execute(const ToolCall& call,
                        const Mem::OperationContext& context);
@@ -100,24 +136,6 @@ public:
     void setExecutionTimeout(int seconds);
     int getExecutionTimeout() const;
 
-    // Drain in-flight tool-execution worker threads during app teardown so
-    // a detached worker can't push to UIMessageQueue or touch socket
-    // singletons after they've been destroyed. Bounded, best-effort, and
-    // idempotent — mirrors HttpClient::shutdown(). Call from main() before
-    // static destruction begins.
-    void shutdown();
-
-    // True once shutdown() has begun. Tool workers check this before
-    // delivering a result so a late worker (one that outran shutdown()'s
-    // bounded wait) does not touch already-destroyed singletons.
-    bool isShuttingDown() const;
-
-    // Register / retire a tool-execution worker around its full lifetime
-    // (execute() + result delivery). beginToolWorker() returns false when a
-    // shutdown is already in progress, signalling the caller not to start.
-    bool beginToolWorker();
-    void endToolWorker();
-
 private:
     ToolExecutor() = default;
     ToolExecutor(const ToolExecutor&) = delete;
@@ -126,14 +144,6 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ToolRegistration> tools_;
     int executionTimeout_ = 30; // seconds, AC 6.5 default
-
-    // Lifecycle tracking for detached tool-execution workers (teardown
-    // drain). Guarded independently of mutex_ so a long-running executor
-    // never blocks registry queries.
-    mutable std::mutex lifecycleMutex_;
-    std::condition_variable lifecycleCv_;
-    int inFlightWorkers_ = 0;   // detached workers still running
-    bool shuttingDown_ = false; // set by shutdown()
 };
 
 } // namespace AI

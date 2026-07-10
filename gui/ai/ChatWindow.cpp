@@ -3,6 +3,7 @@
 #include "ChatWindow.h"
 
 #include "ApiKeyStore.h"
+#include "AgentTaskExecutor.h"
 #include "AiSettings.h"
 #include "DefaultSystemPrompt.h"
 #include "HttpClient.h"
@@ -27,7 +28,6 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -448,6 +448,7 @@ ChatWindow::~ChatWindow() {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    AgentTaskExecutor::getInstance().cancelRun(agentController_.runId());
 
     // Best-effort persist on shutdown. addMessage() already auto-persists
     // after every append, but saving again here captures any in-memory
@@ -998,9 +999,9 @@ void ChatWindow::drawInputArea() {
     // Stop cancels model streaming, a pending tool approval, or an in-flight
     // tool run. Once a tool has started we can't recall a side effect that
     // already reached the device, but the user still gets an escape hatch: the
-    // run returns to Idle and the tool's late result is dropped by the runId
-    // gate in pollMessages(). The worker's socket I/O is bounded by the tool
-    // timeout, so the detached thread exits on its own.
+    // run returns to Idle and the owned task receives a cancellation request.
+    // A command already sent to the device may still complete; its late UI
+    // result is isolated by runId while the worker remains joinable/tracked.
     if (state_ == State::WaitingResponse ||
         state_ == State::ToolConfirmation ||
         state_ == State::ToolExecuting) {
@@ -1095,6 +1096,7 @@ void ChatWindow::cancelRequest() {
     if (cancelToken_) {
         cancelToken_->store(true);
     }
+    AgentTaskExecutor::getInstance().cancelRun(agentController_.runId());
     activeDispatchRunId_.clear();
 
     // Preserve any partial streaming content as an assistant message so the
@@ -1621,40 +1623,35 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
     const Mem::OperationContext operationContext =
         agentController_.operationContext();
 
-    // Register the worker with ToolExecutor so app teardown can drain it
-    // before UIMessageQueue / socket singletons are destroyed. If a
-    // shutdown is already underway, don't start a new worker.
-    if (!ToolExecutor::getInstance().beginToolWorker()) {
-        return;
-    }
-    std::thread([call, runId, operationContext]() {
-        // Retire the worker registration no matter how this scope exits so
-        // shutdown()'s drain can observe completion.
-        struct WorkerGuard {
-            ~WorkerGuard() { ToolExecutor::getInstance().endToolWorker(); }
-        } workerGuard;
+    AgentToolTask task;
+    task.runId = runId;
+    task.call = call;
+    task.context = operationContext;
+    const bool queued = AgentTaskExecutor::getInstance().enqueue(
+        std::move(task), [](AgentToolTaskOutcome outcome) {
+        UIMessage msg;
+        msg.type = UIMessageType::ToolResult;
+        msg.runId = std::move(outcome.runId);
+        msg.toolCall = std::move(outcome.call);
+        msg.toolResult = std::move(outcome.result);
+        msg.durationMs = outcome.durationMs;
+        UIMessageQueue::getInstance().push(std::move(msg));
+    });
 
-        const long long startMs = nowSteadyMs();
-        ToolResult result =
-            ToolExecutor::getInstance().execute(call, operationContext);
-        const long long durationMs = nowSteadyMs() - startMs;
-
-        // If teardown began while this worker was running, skip delivery:
-        // UIMessageQueue may already be gone. On-time workers still deliver
-        // because shutdown() waits for endToolWorker() (via WorkerGuard)
-        // before returning into static destruction.
-        if (ToolExecutor::getInstance().isShuttingDown()) {
-            return;
-        }
-
+    if (!queued) {
         UIMessage msg;
         msg.type = UIMessageType::ToolResult;
         msg.runId = runId;
         msg.toolCall = call;
-        msg.toolResult = std::move(result);
-        msg.durationMs = durationMs;
+        msg.toolResult.success = false;
+        msg.toolResult.errorMessage =
+            "Tool task queue is shutting down or full";
+        msg.toolResult.resultJson =
+            R"({"success":false,"error":{"code":"internal_error","message":"tool task queue is shutting down or full","retryable":false},"completion":"cancelled_before_start"})";
+        msg.toolResult.completion =
+            ToolCompletionState::CancelledBeforeStart;
         UIMessageQueue::getInstance().push(std::move(msg));
-    }).detach();
+    }
 }
 
 void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {

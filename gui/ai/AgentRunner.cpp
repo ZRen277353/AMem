@@ -305,6 +305,7 @@ ChatMessage AgentRunner::makeToolMessage(const ToolCall& tc,
     audit["tool"] = tc.name;
     audit["success"] = result.success;
     audit["duration_ms"] = durationMs;
+    audit["completion"] = toolCompletionStateName(result.completion);
     try {
         audit["arguments"] = tc.arguments.empty()
                                  ? nlohmann::json::object()

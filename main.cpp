@@ -9,8 +9,8 @@
 #include "ExceptionHandler.h"
 #include "ipc/IpcServer.h"
 #ifdef HAVE_AI_CHAT
+#include "ai/AgentTaskExecutor.h"
 #include "ai/HttpClient.h"
-#include "ai/ToolExecutor.h"
 #endif
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -125,18 +125,17 @@ int main(int, char**)
     // 停止 IPC Server
     IpcServer::GetInstance().Stop();
 
+#ifdef HAVE_AI_CHAT
+    // Stop model delivery, then cancel and join the owned tool worker before
+    // closing the device session it may still be using.
+    AI::HttpClient::getInstance().shutdown();
+    AI::AgentTaskExecutor::getInstance().shutdown();
+#endif
+
     // Close the managed device session while AppContext and all socket
     // consumers are still alive. The socket singleton destructor only has
     // to release raw clients and never re-enters process cleanup.
     DisconnectMultiPort();
-
-#ifdef HAVE_AI_CHAT
-    // Drain in-flight AI HTTP requests and tool-execution workers so their
-    // detached threads can't outlive the singletons (HttpClient /
-    // ToolExecutor / UIMessageQueue) they touch during static destruction.
-    AI::HttpClient::getInstance().shutdown();
-    AI::ToolExecutor::getInstance().shutdown();
-#endif
 
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();

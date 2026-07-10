@@ -80,6 +80,36 @@ public:
             std::chrono::milliseconds(g_threadTimeoutMs);
     }
 
+    explicit ScopedTimeout(
+        std::chrono::steady_clock::time_point deadline)
+        : previous_(g_threadTimeoutMs),
+          previousDeadline_(g_threadDeadline) {
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline ==
+            (std::chrono::steady_clock::time_point::max)()) {
+            g_threadTimeoutMs = 0;
+            g_threadDeadline = {};
+            return;
+        }
+        if (deadline <= now) {
+            g_threadTimeoutMs = 1;
+            g_threadDeadline = deadline;
+            return;
+        }
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now).count();
+        if (remaining <= 0) {
+            remaining = 1;
+        }
+        g_threadTimeoutMs = ClampTimeoutMs(
+            static_cast<unsigned long long>(remaining));
+        if (g_threadTimeoutMs == 0) {
+            g_threadTimeoutMs = 1;
+        }
+        g_threadDeadline = deadline;
+    }
+
     ~ScopedTimeout() {
         g_threadTimeoutMs = previous_;
         g_threadDeadline = previousDeadline_;
