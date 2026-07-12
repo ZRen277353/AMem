@@ -473,10 +473,7 @@ ChatWindow::~ChatWindow() {
     // promptly instead of running to completion against a destroyed
     // window. The worker only inspects this flag between chunks, so a
     // brief delay is still possible; acceptable for a UI shutdown path.
-    if (cancelToken_) {
-        cancelToken_->store(true);
-    }
-    AgentTaskExecutor::getInstance().cancelRun(agentController_.runId());
+    requestActiveRunCancellation();
 
     // Best-effort persist on shutdown. addMessage() already auto-persists
     // after every append, but saving again here captures any in-memory
@@ -684,9 +681,7 @@ void ChatWindow::switchToSession(const std::string& id) {
 
     // Cancel any in-flight request so a late completion can't land on
     // the newly-loaded session and corrupt it.
-    if (cancelToken_) {
-        cancelToken_->store(true);
-    }
+    requestActiveRunCancellation();
     clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
@@ -726,9 +721,7 @@ void ChatWindow::createNewSession() {
 
     // Clear in-memory state and bind session_ to the new path without
     // touching the previous session's file on disk.
-    if (cancelToken_) {
-        cancelToken_->store(true);
-    }
+    requestActiveRunCancellation();
     clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
@@ -751,9 +744,7 @@ void ChatWindow::deleteSession(const std::string& id) {
     if (wasActive) {
         // Clear in-memory state before switching; if sessions remain the
         // manager already picked a new active id, otherwise create one.
-        if (cancelToken_) {
-            cancelToken_->store(true);
-        }
+        requestActiveRunCancellation();
         clearActiveRunContext();
         streamingContent_.clear();
         agentController_.resetForNewRun();
@@ -1232,10 +1223,9 @@ void ChatWindow::sendMessage() {
 }
 
 void ChatWindow::cancelRequest() {
-    if (cancelToken_) {
-        cancelToken_->store(true);
-    }
-    AgentTaskExecutor::getInstance().cancelRun(agentController_.runId());
+    const bool mutationMayStillComplete =
+        activeToolIsMutation_ && !activeToolRunId_.empty();
+    requestActiveRunCancellation();
     activeDispatchRunId_.clear();
 
     // Preserve any partial streaming content as an assistant message so the
@@ -1257,7 +1247,9 @@ void ChatWindow::cancelRequest() {
     ChatMessage notice;
     notice.role = Role::System;
     notice.timestamp = nowUnixSeconds();
-    notice.content = "[cancelled]";
+    notice.content = mutationMayStillComplete
+        ? "[cancel requested] Active mutation may still complete; final status is recorded in Audit."
+        : "[cancelled]";
     session_.addMessage(std::move(notice));
     touchActiveSession();
 
@@ -1268,19 +1260,25 @@ void ChatWindow::cancelRequest() {
     state_ = State::Idle;
 }
 
+void ChatWindow::requestActiveRunCancellation() {
+    if (cancelToken_) {
+        cancelToken_->store(true, std::memory_order_release);
+    }
+    AgentTaskExecutor::getInstance().cancelRun(agentController_.runId());
+}
+
 void ChatWindow::clearActiveRunContext() {
     activeRunProvider_.clear();
     activeRunModel_.clear();
     activeDispatchRunId_.clear();
     activeToolRunId_.clear();
+    activeToolIsMutation_ = false;
 }
 
 void ChatWindow::clearHistory() {
     // Cancel any in-flight request first so its completion callback
     // doesn't re-add a stale assistant message after the clear.
-    if (cancelToken_) {
-        cancelToken_->store(true);
-    }
+    requestActiveRunCancellation();
     clearActiveRunContext();
     streamingContent_.clear();
     agentController_.resetForNewRun();
@@ -1420,6 +1418,7 @@ void ChatWindow::pollMessages() {
             }
             case UIMessageType::ToolResult: {
                 activeToolRunId_.clear();
+                activeToolIsMutation_ = false;
                 handleAgentOutcome(agentController_.completeToolExecution(
                     msg.toolCall,
                     msg.toolResult,
@@ -1788,6 +1787,9 @@ void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
 
 void ChatWindow::startToolExecution(const ToolCall& call) {
     activeToolRunId_ = agentController_.runId();
+    activeToolIsMutation_ =
+        ToolExecutor::getInstance().getToolSafety(call.name) ==
+        ToolSafety::Write;
     const std::string runId = activeToolRunId_;
     const Mem::OperationContext operationContext =
         agentController_.operationContext();

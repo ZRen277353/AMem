@@ -83,6 +83,7 @@ private:
     // ---- actions -------------------------------------------------------
     void sendMessage();
     void cancelRequest();
+    void requestActiveRunCancellation();
     void clearHistory();
     void clearActiveRunContext();
 
@@ -148,6 +149,7 @@ private:
     // when a request completes so late HTTP callbacks cannot mutate the chat.
     std::string activeDispatchRunId_;
     std::string activeToolRunId_;
+    bool activeToolIsMutation_ = false;
 
     ChatSession session_;
 
