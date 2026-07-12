@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AgentTaskExecutor.h"
+#include "AgentMutationAudit.h"
 
 #include "../../mem/MemResult.h"
 #include "../../third_party/nlohmann/json.hpp"
@@ -53,10 +54,15 @@ AgentTaskExecutor& AgentTaskExecutor::getInstance() {
 }
 
 AgentTaskExecutor::AgentTaskExecutor()
-    : AgentTaskExecutor(ToolExecutor::getInstance()) {}
+    : AgentTaskExecutor(ToolExecutor::getInstance(),
+                        &AgentMutationAuditLog::getInstance()) {}
 
 AgentTaskExecutor::AgentTaskExecutor(ToolExecutor& toolExecutor)
-    : toolExecutor_(toolExecutor) {
+    : AgentTaskExecutor(toolExecutor, nullptr) {}
+
+AgentTaskExecutor::AgentTaskExecutor(ToolExecutor& toolExecutor,
+                                     AgentMutationAuditLog* auditLog)
+    : toolExecutor_(toolExecutor), auditLog_(auditLog) {
     worker_ = std::thread([this] { workerLoop(); });
 }
 
@@ -73,6 +79,9 @@ bool AgentTaskExecutor::enqueue(AgentToolTask task,
         task.context.cancellation =
             std::make_shared<std::atomic<bool>>(false);
     }
+    task.safety = toolExecutor_.getToolSafety(task.call.name);
+    task.targetPolicy =
+        toolExecutor_.getToolTargetPolicy(task.call.name);
     const auto executorDeadline =
         Clock::now() +
         std::chrono::seconds(toolExecutor_.getExecutionTimeout());
@@ -224,15 +233,33 @@ void AgentTaskExecutor::workerLoop() {
 void AgentTaskExecutor::deliver(QueuedTask task,
                                 ToolResult result,
                                 long long durationMs) {
-    if (!task.completion) {
-        return;
-    }
-
     AgentToolTaskOutcome outcome;
     outcome.runId = std::move(task.task.runId);
     outcome.call = std::move(task.task.call);
     outcome.result = std::move(result);
+    outcome.context = std::move(task.task.context);
+    outcome.safety = task.task.safety;
+    outcome.targetPolicy = task.task.targetPolicy;
+    outcome.approval = task.task.approval;
     outcome.durationMs = durationMs;
+
+    if (auditLog_ && outcome.safety == ToolSafety::Write) {
+        AgentMutationAuditEvent event;
+        event.runId = outcome.runId;
+        event.call = outcome.call;
+        event.result = outcome.result;
+        event.context = outcome.context;
+        event.safety = outcome.safety;
+        event.targetPolicy = outcome.targetPolicy;
+        event.approval = outcome.approval;
+        event.durationMs = outcome.durationMs;
+        outcome.auditPersisted =
+            auditLog_->append(event, &outcome.auditError);
+    }
+
+    if (!task.completion) {
+        return;
+    }
     try {
         task.completion(std::move(outcome));
     } catch (...) {

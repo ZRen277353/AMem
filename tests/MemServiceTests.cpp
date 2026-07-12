@@ -1,5 +1,6 @@
 #include "../gui/ai/AgentMemTools.h"
 #include "../gui/ai/AgentController.h"
+#include "../gui/ai/AgentMutationAudit.h"
 #include "../gui/ai/AgentTaskExecutor.h"
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
@@ -16,9 +17,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -2196,6 +2200,221 @@ void testAgentTaskExecutorLifecycle() {
            "executor must reject work after shutdown");
 }
 
+void testMutationAuditPersistence() {
+    const auto unique = std::chrono::steady_clock::now()
+                            .time_since_epoch()
+                            .count();
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("amem_mutation_audit_" + std::to_string(unique));
+    std::filesystem::create_directories(directory);
+    const std::filesystem::path filepath = directory / "mutations.jsonl";
+
+    AI::AgentMutationAuditLog audit(filepath.string(), 64u * 1024u, 3);
+    const std::string cardSecret = "audit-card-secret-91a2";
+    AI::AgentMutationAuditEvent driver;
+    driver.runId = "audit-driver-run";
+    driver.call = toolCall(
+        "audit-driver-call", "driver_initialize",
+        std::string("{\"card\":\"") + cardSecret + "\"}");
+    AI::applyToolCallRedaction(driver.call);
+    driver.result.success = false;
+    driver.result.errorMessage =
+        "driver receipt was lost for " + cardSecret;
+    driver.result.resultJson = json{
+        {"success", false},
+        {"error", {
+            {"code", "completion_unknown"},
+            {"message", "driver receipt was lost for " + cardSecret},
+            {"retryable", false},
+        }},
+        {"completion", "completion_unknown"},
+    }.dump();
+    driver.result.completion = AI::ToolCompletionState::CompletionUnknown;
+    driver.context.connectionGeneration = 7;
+    driver.context.target = Mem::TargetSnapshot{42, 420, 8, 7};
+    driver.safety = AI::ToolSafety::Write;
+    driver.targetPolicy = AI::ToolTargetPolicy::None;
+    driver.approval = AI::MutationApproval::Approved;
+    driver.durationMs = 12;
+
+    std::string appendError;
+    expect(audit.append(driver, &appendError),
+           "driver mutation audit should persist: " + appendError);
+
+    const std::string luaSecret = "print('audit-lua-secret-4b6c')";
+    AI::AgentMutationAuditEvent lua = driver;
+    lua.runId = "audit-lua-run";
+    lua.call = toolCall(
+        "audit-lua-call", "lua_execute",
+        std::string("{\"code\":\"") + luaSecret + "\"}");
+    lua.result.success = false;
+    lua.result.errorMessage = "Lua error near " + luaSecret;
+    lua.result.resultJson = json{
+        {"success", false},
+        {"error", {
+            {"code", "internal_error"},
+            {"message", "Lua error near " + luaSecret},
+            {"retryable", false},
+        }},
+        {"output", "audit-output-secret"},
+        {"completion", "completed_after_cancel_request"},
+    }.dump();
+    lua.result.completion =
+        AI::ToolCompletionState::CompletedAfterCancelRequest;
+    lua.targetPolicy = AI::ToolTargetPolicy::Bound;
+    lua.approval = AI::MutationApproval::AutoApproved;
+    expect(audit.append(lua, &appendError),
+           "Lua mutation audit should persist: " + appendError);
+
+    AI::AgentMutationAuditEvent denied = driver;
+    denied.runId = "audit-denied-run";
+    denied.approval = AI::MutationApproval::Denied;
+    denied.result.errorMessage = "tool execution denied by user";
+    denied.result.resultJson =
+        R"({"success":false,"error":{"code":"permission_denied","message":"tool execution denied by user","retryable":false},"completion":"rejected_before_start"})";
+    denied.result.completion =
+        AI::ToolCompletionState::RejectedBeforeStart;
+    expect(audit.append(denied, &appendError),
+           "denied mutation audit should persist: " + appendError);
+
+    AI::AgentMutationAuditEvent readOnly = driver;
+    readOnly.runId = "audit-read-run";
+    readOnly.safety = AI::ToolSafety::ReadOnly;
+    expect(audit.append(readOnly, &appendError) &&
+               audit.recent().size() == 3,
+           "read-only tools must not enter the mutation audit");
+
+    std::ifstream input(filepath, std::ios::binary);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    const std::string persisted = contents.str();
+    input.close();
+    expect(!persisted.empty() &&
+               persisted.find(cardSecret) == std::string::npos &&
+               persisted.find(luaSecret) == std::string::npos &&
+               persisted.find("audit-output-secret") == std::string::npos,
+           "mutation audit must redact card, Lua code, and bulk output");
+
+    std::istringstream lines(persisted);
+    std::string firstLine;
+    std::getline(lines, firstLine);
+    const json firstRecord = json::parse(firstLine);
+    expect(firstRecord.at("run_id") == "audit-driver-run" &&
+               firstRecord.at("completion") == "completion_unknown" &&
+               firstRecord.at("effect") == "connection_mutation" &&
+               firstRecord.at("resource_domain") == "connection" &&
+               firstRecord.at("approval") == "approved" &&
+               firstRecord.at("error") == "[REDACTED]" &&
+               firstRecord.at("connection_generation") == 7 &&
+               firstRecord.at("target").at("process_revision") == 8 &&
+               firstRecord.at("arguments").at("card").at("omitted") == true,
+           "mutation audit should preserve run, target, completion, and redaction metadata");
+
+    for (int index = 0; index < 180; ++index) {
+        AI::AgentMutationAuditEvent rotated = driver;
+        rotated.runId = "audit-rotation-" + std::to_string(index);
+        rotated.result.errorMessage = std::string(600, 'x');
+        const bool appended = audit.append(rotated, &appendError);
+        expect(appended,
+               "mutation audit rotation append should succeed: " + appendError);
+    }
+    expect(std::filesystem::exists(filepath.string() + ".1") &&
+               audit.recent().size() == 3,
+           "mutation audit should rotate at its bound and cap in-memory history");
+
+    AI::AgentMutationAuditLog reloaded(filepath.string(), 64u * 1024u, 3);
+    expect(!reloaded.recent().empty() && reloaded.recent().size() <= 3,
+           "mutation audit should reload bounded valid JSONL records");
+
+    auto& registry = AI::ToolExecutor::getInstance();
+    std::mutex stateMutex;
+    std::condition_variable stateCv;
+    bool executionStarted = false;
+    bool callbackReceived = false;
+    bool auditVisibleBeforeCallback = false;
+    AI::AgentToolTaskOutcome finalOutcome;
+    registry.registerTool(
+        "test_audited_write", "audited write", "{}",
+        AI::ToolSafety::Write,
+        [&](const std::string&, const Mem::OperationContext& context) {
+            {
+                std::lock_guard<std::mutex> lock(stateMutex);
+                executionStarted = true;
+                stateCv.notify_all();
+            }
+            while (!(context.cancellation &&
+                     context.cancellation->load(std::memory_order_acquire))) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            return std::string(
+                R"({"success":true,"address":"0x1000","written_bytes":4,"completion":"completed"})");
+        },
+        AI::ToolTargetPolicy::Bound);
+
+    const std::filesystem::path executorPath =
+        directory / "executor_mutations.jsonl";
+    AI::AgentMutationAuditLog executorAudit(
+        executorPath.string(), 64u * 1024u, 10);
+    AI::AgentTaskExecutor executor(registry, &executorAudit);
+    AI::AgentToolTask task;
+    task.runId = "stopped-agent-run";
+    task.call = toolCall(
+        "stopped-agent-call", "test_audited_write",
+        R"({"address":"0x1000","data_hex":"DE AD BE EF"})");
+    task.context.connectionGeneration = 11;
+    task.context.target = Mem::TargetSnapshot{77, 770, 12, 11};
+    task.approval = AI::MutationApproval::Approved;
+    expect(executor.enqueue(
+               std::move(task),
+               [&](AI::AgentToolTaskOutcome outcome) {
+                   std::lock_guard<std::mutex> lock(stateMutex);
+                   auditVisibleBeforeCallback = !executorAudit.recent().empty();
+                   finalOutcome = std::move(outcome);
+                   callbackReceived = true;
+                   stateCv.notify_all();
+               }),
+           "audited write should enqueue");
+    {
+        std::unique_lock<std::mutex> lock(stateMutex);
+        expect(stateCv.wait_for(
+                   lock, std::chrono::seconds(2),
+                   [&] { return executionStarted; }),
+               "audited write did not start");
+    }
+    executor.cancelRun("stopped-agent-run");
+    {
+        std::unique_lock<std::mutex> lock(stateMutex);
+        expect(stateCv.wait_for(
+                   lock, std::chrono::seconds(2),
+                   [&] { return callbackReceived; }),
+               "audited write callback did not complete");
+    }
+    executor.shutdown();
+
+    const auto executorEntries = executorAudit.recent();
+    expect(auditVisibleBeforeCallback && finalOutcome.auditPersisted &&
+               finalOutcome.result.completion ==
+                   AI::ToolCompletionState::CompletedAfterCancelRequest &&
+               executorEntries.size() == 1 &&
+               executorEntries.front().runId == "stopped-agent-run" &&
+               executorEntries.front().approval == "approved" &&
+               executorEntries.front().effect == "target_mutation" &&
+               executorEntries.front().completion ==
+                   "completed_after_cancel_request",
+           "stopped write must be durably audited before UI callback delivery");
+
+    std::ifstream executorInput(executorPath, std::ios::binary);
+    std::ostringstream executorContents;
+    executorContents << executorInput.rdbuf();
+    expect(executorContents.str().find("DE AD BE EF") == std::string::npos,
+           "raw write bytes must not be copied into the mutation audit");
+    executorInput.close();
+
+    std::error_code removeError;
+    std::filesystem::remove_all(directory, removeError);
+}
+
 void testAgentAdapter() {
     FakeBackend backend;
     Mem::MemService service(backend);
@@ -2943,6 +3162,7 @@ int main() {
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},
         {"agent task executor lifecycle", &testAgentTaskExecutorLifecycle},
+        {"mutation audit persistence", &testMutationAuditPersistence},
         {"approval context invalidation", &testApprovalContextInvalidation},
         {"process open advances run target", &testProcessOpenAdvancesRunTarget},
         {"non-target and stale result handling", &testNonTargetToolsAndStaleResult},

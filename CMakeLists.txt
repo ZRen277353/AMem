@@ -148,6 +148,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/SessionManager.cpp
     gui/ai/AgentController.cpp
     gui/ai/AgentRunner.cpp
+    gui/ai/AgentMutationAudit.cpp
     gui/ai/ToolCallSecurity.cpp
     gui/ai/AgentRunContext.cpp
     gui/ai/AgentTaskExecutor.cpp
@@ -372,6 +373,7 @@ if(BUILD_TESTING)
         gui/ai/AgentRunContext.cpp
         gui/ai/AgentTaskExecutor.cpp
         gui/ai/AgentRunner.cpp
+        gui/ai/AgentMutationAudit.cpp
         gui/ai/ToolCallSecurity.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp

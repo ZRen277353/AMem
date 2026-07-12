@@ -1,7 +1,7 @@
 #pragma once
 #ifdef HAVE_AI_CHAT
 
-#include "ToolExecutor.h"
+#include "AgentMutationAudit.h"
 
 #include <condition_variable>
 #include <cstddef>
@@ -17,13 +17,22 @@ struct AgentToolTask {
     std::string runId;
     ToolCall call;
     Mem::OperationContext context;
+    ToolSafety safety = ToolSafety::ReadOnly;
+    ToolTargetPolicy targetPolicy = ToolTargetPolicy::None;
+    MutationApproval approval = MutationApproval::NotRequired;
 };
 
 struct AgentToolTaskOutcome {
     std::string runId;
     ToolCall call;
     ToolResult result;
+    Mem::OperationContext context;
+    ToolSafety safety = ToolSafety::ReadOnly;
+    ToolTargetPolicy targetPolicy = ToolTargetPolicy::None;
+    MutationApproval approval = MutationApproval::NotRequired;
     long long durationMs = 0;
+    bool auditPersisted = true;
+    std::string auditError;
 };
 
 class AgentTaskExecutor {
@@ -35,6 +44,8 @@ public:
 
     AgentTaskExecutor();
     explicit AgentTaskExecutor(ToolExecutor& toolExecutor);
+    AgentTaskExecutor(ToolExecutor& toolExecutor,
+                      AgentMutationAuditLog* auditLog);
     ~AgentTaskExecutor();
 
     AgentTaskExecutor(const AgentTaskExecutor&) = delete;
@@ -59,11 +70,12 @@ private:
     static constexpr size_t kMaxQueuedTasks = 64;
 
     void workerLoop();
-    static void deliver(QueuedTask task,
-                        ToolResult result,
-                        long long durationMs);
+    void deliver(QueuedTask task,
+                 ToolResult result,
+                 long long durationMs);
 
     ToolExecutor& toolExecutor_;
+    AgentMutationAuditLog* auditLog_ = nullptr;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<QueuedTask> queue_;
