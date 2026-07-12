@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android device over Socket and provides memory scanning, hardware breakpoint debugging, a hex memory viewer, value freezing, ELF symbol resolution, and Lua scripting. The UI is built with Dear ImGui (docking branch) rendered via DirectX 12.
 
-On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores that unsafe endpoint only for migration diagnostics. Native framing and a secured Named Pipe transport foundation exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, framed session, or supported external Agent adapter yet.
+On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores that unsafe endpoint only for migration diagnostics. Native framing, bounded pipe I/O, Observe-only Hello negotiation, and secured transport exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, request session/dispatch, or supported external Agent adapter yet.
 
 The `NativeAgent` branch is migrating all front ends to one native `MemService` and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
 
@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_ipc_protocol` covers frame validation; `native_ipc_transport` has five Windows groups for DACL contents, remote/name flags, local connection, single-instance reuse, status, cancellation, and joined shutdown. `native_agent_native_ipc_gate` keeps compilation opt-in and main startup absent; the catalog, no-Python-MCP, and legacy IPC gates retain their boundaries. Provider, native handshake/capability/approval, opt-in legacy IPC, real Android transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` contains 23 no-device C++ groups. Native IPC adds 5 protocol, 5 transport, 7 framed-I/O, and 8 handshake groups; the total suite has nine CTests. Coverage includes pre-allocation header checks, exact/fragmented I/O, limits/UTF-8, deadlines/Stop, DACL/name ownership, Hello schema/version, structured rejection, and Observe-only negotiation. Provider, persistent request/deadline/cancel/capability enforcement, approval, opt-in legacy IPC, real Android transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ## Dependencies
 
@@ -120,13 +120,15 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
   - Legacy migrations run once on startup: `ai_config.dat`→`ai_config.json`, `ai_session.json`→`ai_sessions/`.
 - **Provider trust**: `OpenAIProvider` currently defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS alone does not establish that the recipient is the provider the user intended.
 
-### Native IPC foundation (`ipc/IpcProtocol.*`, `ipc/NamedPipeServer.*`)
+### Native IPC foundation (`ipc/IpcProtocol.*`, `ipc/IpcFramedConnection.*`, `ipc/IpcHandshakeSession.*`, `ipc/NamedPipeServer.*`)
 
 The transport-independent codec uses an explicit 24-byte little-endian header: `AMEM` magic, exact protocol version `1.0`, message type, zero flags, request id, and payload length. The message types are `Hello`, `HelloAck`, `Request`, `Response`, `Cancel`, and `Error`; handshake ids are zero and request/response/cancel ids are non-zero. Request payloads have an immutable 1 MiB ceiling, all other frames have a 4 MiB ceiling, payloads must be valid UTF-8, and incomplete frames do not consume input.
 
 `NativePipeSecurity` creates a protected DACL granting read/write only to the current process user SID and SYSTEM. `NamedPipeServer` creates one reusable `\\.\pipe\AMem.NativeAgent.v1` instance with remote clients rejected and first-instance ownership. Accept and the serial handler share one owned thread; stop signals an event, calls `CancelIoEx`, and joins. Status snapshots expose lifecycle state, accepted count, pipe name, and error.
 
-This remains compile-only infrastructure. `ENABLE_NATIVE_IPC` defaults OFF and `main.cpp` does not start it. There is no framed read/write loop, handshake/capability state, request deadline/cancel routing, GUI enable/status, or approval broker.
+`IpcFramedConnection` validates the fixed header before payload allocation and performs exact overlapped reads/writes with absolute deadlines and Stop cancellation. `IpcHandshakeSession` limits Hello to 16 KiB, validates structured JSON identity/capability fields, requires exact header version `1.0`, grants only requested `Observe`, and denies any requested privileged capability. Invalid schema gets a structured Error with a bounded drain; version/length protocol failures close immediately.
+
+This remains compile-only infrastructure. `ENABLE_NATIVE_IPC` defaults OFF and `main.cpp` does not start it. There is no persistent request JSON/session, per-request deadline/cancel routing, capability enforcement/approval, `MemService` dispatch, GUI enable/status, or target/generation invalidation.
 
 ### Legacy IPC server (`ipc/IpcServer.cpp`)
 
