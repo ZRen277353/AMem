@@ -1,7 +1,7 @@
 # AMem AI Agent 架构文档
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-11
+最后更新：2026-07-12
 
 本文描述当前工作区中的内置 AI Chat、IPC/MCP 桥接和它们共享的设备协议层。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
@@ -258,7 +258,7 @@ Idle
 5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
 6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
 
-当前注册表有 **41 个可执行名称**。其中 10 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 31 个定义。当前目录如下（H=hidden）：
+当前注册表有 **43 个可执行名称**。其中 13 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 30 个定义。当前目录如下（H=hidden）：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
@@ -266,7 +266,7 @@ Idle
 | 内存读 | `memory_read` R, `read_memory` H, `memory_read_value` R, `read_value` H, `read_disassembly` R |
 | 内存写 | `memory_write` W, `write_bytes` H, `memory_write_value` W, `write_value` H |
 | 扫描 | `scan_set_range` W, `scan_value` W, `scan_next` W, `scan_fuzzy` W, `scan_hex` W, `get_scan_count` R, `get_scan_results` R, `clear_scan` W |
-| 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `get_module_list` R, `list_modules` R, `get_module_base` R, `resolve_offset_chain` R |
+| 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `resolve_offset_chain` R |
 | 断点 | `set_breakpoint` W, `remove_breakpoint` W, `read_breakpoint_info` R, `suspend_breakpoint` W, `resume_breakpoint` W |
 | 符号 | `resolve_symbol` R, `symbol_init` R, `symbol_list` R, `symbol_find` R |
 | 脚本 | `execute_lua` W |
@@ -289,7 +289,7 @@ Idle
 - 当前 scan/symbol epoch
 - endpoint/provider 数据去向
 
-七个已迁移工具（`status`、`process_list`、`process_open`、raw/typed memory read/write）在 service 边界消费 `OperationContext`。`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入；typed write 复用 raw write 的 partial/completion-unknown 回执。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
+九个已迁移工具（`status`、`process_list`、`process_open`、`module_list`、`module_resolve`、raw/typed memory read/write）在 service 边界消费 `OperationContext`。模块解析按完整名、basename、唯一子串依次匹配并拒绝歧义；`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -407,7 +407,7 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent | 31 个广告定义 / 41 个可执行名称 | 10 个旧名称仅作隐藏兼容 |
+| 内置 Agent | 30 个广告定义 / 43 个可执行名称 | 13 个旧名称仅作隐藏兼容 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
@@ -480,7 +480,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 14 个测试组覆盖地址/scalar codec、分页、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 15 个测试组覆盖地址/scalar codec、进程与模块分页/解析、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

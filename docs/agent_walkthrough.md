@@ -1,7 +1,7 @@
 # AMem AI Agent 代码走读
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-11
+最后更新：2026-07-12
 
 本文按实际调用顺序解释内置 AI Chat 如何启动、请求模型、审批并执行工具、回喂结果、取消和退出。组件清单见 [`agent_architecture.md`](./agent_architecture.md)，当前问题编号见 [`agent_project_issues.md`](./agent_project_issues.md)，目标重构步骤见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 41 个可执行名称，其中 10 个为隐藏兼容 alias，provider 实际收到 31 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 43 个可执行名称，其中 13 个为隐藏兼容 alias，provider 实际收到 30 个定义。
 
 ### 1.2 加载 provider 配置
 
@@ -100,7 +100,7 @@ endpoint 校验目前只要求 `https://`。它不会验证域名归属。特别
 
 `CompletionRequest` 仍只带 run id，不直接序列化 PID/handle/revision；同一 `AgentController` 的 `AgentRunContext` 在首轮请求前捕获 connection generation 和 target snapshot。后续审批、工具出队和结果回收都使用该 context，run id 只负责异步消息隔离。
 
-provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 31 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
+provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 30 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
 
 ## 3. HTTP 和 SSE 后台路径
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-七个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+九个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-raw/typed memory read/write 都已在 service send 边界消费 context。`memory_read_value`/`memory_write_value` 使用统一 `ValueCodec`；旧 `read_value`/`write_value` 仅作为 hidden alias。module、scan、breakpoint、symbol 和 Lua 等未迁移 executor 目前只有 Controller 出队和结果回收保护，因此仍需优先迁移。
+module list/resolve 和 raw/typed memory read/write 都已在 service 边界消费 context。`module_resolve` 只接受确定的完整名、basename 或唯一子串；旧 module 名称仅作为 hidden aliases。`resolve_offset_chain` 仍是多命令 legacy 路径，必须和事务边界一起迁移。scan、breakpoint、symbol 和 Lua 也仍只有 Controller 出队和结果回收保护。
 
 ### 5.3 受管工具队列
 
@@ -442,7 +442,7 @@ MCP client
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
 | 地址字符串 `"1234"` | 规范 raw/typed memory 工具拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 31 个广告定义 / 41 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | 30 个广告定义 / 43 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
@@ -531,7 +531,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 14 个测试组已覆盖地址/scalar codec、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 15 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
