@@ -1272,6 +1272,46 @@ void testPointerResolveTransaction() {
            "pointer transaction must observe cancellation between reads");
 }
 
+void testDisassemblyService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    backend.memory = {
+        0xC0, 0x03, 0x5F, 0xD6,
+        0x1F, 0x20, 0x03, 0xD5,
+    };
+
+    Mem::DisassemblyRequest request;
+    request.address = 0x8000;
+    request.instructionCount = 2;
+    const auto block = service.disassemble(
+        service.captureContext(true), request);
+    expect(block.ok() && block.value().bytes == backend.memory &&
+               block.value().instructions.size() == 2 &&
+               block.value().instructions[0].address == 0x8000 &&
+               block.value().instructions[0].encoding == 0xD65F03C0 &&
+               block.value().instructions[1].address == 0x8004 &&
+               block.value().instructions[1].encoding == 0xD503201F &&
+               block.value().target == backend.targetSnapshot(),
+           "disassembly service should decode complete little-endian ARM64 words");
+
+    request.instructionCount = 0;
+    const int readsBeforeInvalid = backend.readCalls;
+    const auto invalid = service.disassemble(
+        service.captureContext(true), request);
+    expect(!invalid.ok() &&
+               invalid.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.readCalls == readsBeforeInvalid,
+           "invalid disassembly counts must fail before backend access");
+
+    request.instructionCount = 2;
+    backend.memory.resize(4);
+    const auto partial = service.disassemble(
+        service.captureContext(true), request);
+    expect(!partial.ok() &&
+               partial.error().code == Mem::ErrorCode::ProtocolError,
+           "partial instruction reads must not produce truncated disassembly");
+}
+
 void testSymbolSessionService() {
     FakeBackend backend;
     Mem::MemService service(backend);
@@ -2222,6 +2262,30 @@ void testAgentAdapter() {
                legacyEmptyPointer.at("dereference_count") == 0,
            "hidden resolve_offset_chain should retain empty-chain behavior");
 
+    const json strictDisassemblyAddress = json::parse(
+        tools.disassemble(
+            R"({"address":"8000","count":1})", targetContext));
+    expect(!strictDisassemblyAddress.at("success").get<bool>() &&
+               strictDisassemblyAddress.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical disassemble should require a 0x-prefixed address");
+
+    backend.memory = {
+        0xC0, 0x03, 0x5F, 0xD6,
+        0x1F, 0x20, 0x03, 0xD5,
+    };
+    const json disassembly = json::parse(
+        tools.disassemble(
+            R"({"address":"0x8000","count":2})", targetContext));
+    expect(disassembly.at("success").get<bool>() &&
+               disassembly.at("architecture") == "arm64" &&
+               disassembly.at("count") == 2 &&
+               !disassembly.at("decoded").get<bool>() &&
+               disassembly.at("raw_bytes") == "C0035FD61F2003D5" &&
+               disassembly.at("instructions").at(0).at("encoding") ==
+                   "0xD65F03C0",
+           "disassemble adapter should expose bounded canonical encodings");
+
     const json symbolPage = json::parse(
         tools.symbolList(
             R"({"module_name":"libgame.so","count":2})",
@@ -2712,6 +2776,7 @@ int main() {
         {"typed memory service", &testTypedMemoryService},
         {"module list and resolve", &testModuleListAndResolve},
         {"pointer resolve transaction", &testPointerResolveTransaction},
+        {"disassembly service", &testDisassemblyService},
         {"symbol session service", &testSymbolSessionService},
         {"breakpoint service", &testBreakpointService},
         {"scan session service", &testScanSessionService},

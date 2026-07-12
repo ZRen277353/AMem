@@ -909,6 +909,55 @@ std::string AgentMemTools::pointerResolve(
     }
 }
 
+std::string AgentMemTools::disassemble(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        Mem::DisassemblyRequest request;
+        request.address = address.value();
+        request.instructionCount = optionalSize(
+            args, "count", 16, Mem::kMaxDisassemblyInstructionCount);
+        const auto response = service_.disassemble(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json instructions = json::array();
+        for (const auto& instruction : response.value().instructions) {
+            char encoding[16];
+            std::snprintf(
+                encoding, sizeof(encoding), "0x%08X", instruction.encoding);
+            instructions.push_back({
+                {"address", Mem::formatAddress(instruction.address)},
+                {"encoding", encoding},
+            });
+        }
+        json output;
+        output["success"] = true;
+        output["architecture"] = "arm64";
+        output["address"] = Mem::formatAddress(response.value().address);
+        output["count"] = response.value().instructions.size();
+        output["instructions"] = std::move(instructions);
+        output["raw_bytes"] = compactHex(response.value().bytes);
+        output["decoded"] = false;
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            response.value().target.connectionGeneration,
+            &response.value().target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("disassemble", error);
+    }
+}
+
 std::string AgentMemTools::symbolResolve(
     const std::string& argsJson,
     const Mem::OperationContext& context) {

@@ -29,6 +29,8 @@ public:
     std::string pointerResolve(const std::string& argsJson,
                                bool allowLegacyArguments,
                                const Mem::OperationContext& context);
+    std::string disassemble(const std::string& argsJson,
+                            const Mem::OperationContext& context);
     std::string symbolResolve(const std::string& argsJson,
                               const Mem::OperationContext& context);
     std::string symbolList(const std::string& argsJson,

@@ -1285,14 +1285,20 @@ std::string execResolveOffsetChain(const std::string& argsJson,
     return getAgentMemTools().pointerResolve(argsJson, true, context);
 }
 
-// read_disassembly
+std::string execDisassemble(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().disassemble(argsJson, context);
+}
+
+// Hidden compatibility implementation for read_disassembly.
 //
 // The AI chat module is compiled independently of HAVE_CAPSTONE, so rather
 // than pulling in DisassemblyHelper we return the raw instruction bytes and
 // note that full disassembly rendering is not yet wired through the tool
 // interface. The AI still receives enough to reason about instruction
 // encodings or to display them to the user.
-std::string execReadDisassembly(const std::string& argsJson) {
+std::string execReadDisassemblyLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -2286,6 +2292,24 @@ constexpr const char* kSchemaResolveOffsetChain = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaDisassemble = R"JSON({
+  "type": "object",
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
+      "description": "Explicit 0x-prefixed ARM64 instruction address"
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of fixed-width ARM64 instructions (default 16)",
+      "minimum": 1,
+      "maximum": 512
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaReadDisassembly = R"JSON({
   "type": "object",
   "required": ["address", "count"],
@@ -2907,12 +2931,20 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
+        "disassemble",
+        "Read bounded ARM64 instruction encodings from an explicit target address.",
+        kSchemaDisassemble,
+        ToolSafety::ReadOnly,
+        &execDisassemble,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "read_disassembly",
-        "Read a range of ARM64 instructions as raw 32-bit encodings plus hex bytes.",
+        "Compatibility alias for disassemble.",
         kSchemaReadDisassembly,
         ToolSafety::ReadOnly,
-        &execReadDisassembly,
-        true,
+        &execReadDisassemblyLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(

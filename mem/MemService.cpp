@@ -873,6 +873,65 @@ Result<PointerResolution> MemService::resolvePointer(
         std::move(resolution), elapsedMilliseconds(start));
 }
 
+Result<DisassemblyBlock> MemService::disassemble(
+    const OperationContext& context,
+    const DisassemblyRequest& request) {
+    const auto start = Clock::now();
+    if (request.instructionCount == 0 ||
+        request.instructionCount > kMaxDisassemblyInstructionCount) {
+        return Result<DisassemblyBlock>::failure(
+            ErrorCode::InvalidArgument,
+            "disassembly count must be between 1 and 512 instructions",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const size_t byteCount = request.instructionCount * sizeof(uint32_t);
+    if (request.address >
+        (std::numeric_limits<uint64_t>::max)() - (byteCount - 1u)) {
+        return Result<DisassemblyBlock>::failure(
+            ErrorCode::InvalidArgument,
+            "disassembly range overflows the uint64 address space",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    MemoryReadRequest readRequest;
+    readRequest.address = request.address;
+    readRequest.size = static_cast<uint32_t>(byteCount);
+    auto raw = readMemory(context, readRequest);
+    if (!raw.ok()) {
+        return Result<DisassemblyBlock>::failure(
+            raw.error(), elapsedMilliseconds(start));
+    }
+    if (raw.value().bytes.size() != byteCount) {
+        return Result<DisassemblyBlock>::failure(
+            ErrorCode::ProtocolError,
+            "disassembly read returned fewer bytes than requested",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    DisassemblyBlock block;
+    block.address = request.address;
+    block.bytes = std::move(raw.value().bytes);
+    block.target = raw.value().target;
+    block.instructions.reserve(request.instructionCount);
+    for (size_t index = 0; index < request.instructionCount; ++index) {
+        const size_t offset = index * sizeof(uint32_t);
+        const uint32_t encoding =
+            static_cast<uint32_t>(block.bytes[offset]) |
+            (static_cast<uint32_t>(block.bytes[offset + 1]) << 8u) |
+            (static_cast<uint32_t>(block.bytes[offset + 2]) << 16u) |
+            (static_cast<uint32_t>(block.bytes[offset + 3]) << 24u);
+        block.instructions.push_back(InstructionWord{
+            request.address + offset,
+            encoding,
+        });
+    }
+    return Result<DisassemblyBlock>::success(
+        std::move(block), elapsedMilliseconds(start));
+}
+
 Result<ResolvedSymbol> MemService::resolveSymbol(
     const OperationContext& context,
     const SymbolResolveRequest& request) {

@@ -133,6 +133,23 @@ struct PointerResolution {
     TargetSnapshot target;
 };
 
+struct DisassemblyRequest {
+    uint64_t address = 0;
+    size_t instructionCount = 0;
+};
+
+struct InstructionWord {
+    uint64_t address = 0;
+    uint32_t encoding = 0;
+};
+
+struct DisassemblyBlock {
+    uint64_t address = 0;
+    std::vector<unsigned char> bytes;
+    std::vector<InstructionWord> instructions;
+    TargetSnapshot target;
+};
+
 struct SymbolResolveRequest {
     std::string moduleName;
     std::string symbolName;
@@ -430,6 +447,7 @@ inline constexpr size_t kMaxModulePageSize = 1000;
 inline constexpr size_t kMaxModuleResultCount = 65536;
 inline constexpr size_t kMaxModuleNameBytesTotal = 16u * 1024u * 1024u;
 inline constexpr size_t kMaxPointerOffsetCount = 1024;
+inline constexpr size_t kMaxDisassemblyInstructionCount = 512;
 inline constexpr size_t kMaxSymbolPageSize = 1000;
 inline constexpr size_t kMaxSymbolResultCount = 1000000;
 inline constexpr size_t kMaxSymbolNameBytes = 64u * 1024u;

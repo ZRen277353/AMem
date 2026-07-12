@@ -30,6 +30,9 @@ public:
     Result<PointerResolution> resolvePointer(
         const OperationContext& context,
         const PointerResolveRequest& request) override;
+    Result<DisassemblyBlock> disassemble(
+        const OperationContext& context,
+        const DisassemblyRequest& request) override;
     Result<ResolvedSymbol> resolveSymbol(
         const OperationContext& context,
         const SymbolResolveRequest& request) override;
