@@ -3,9 +3,9 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、尚未进入产品启动路径的 native IPC framing/Hello/request-session/catalog/Observe-dispatch/transport/runtime 基础，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/Observe-dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、12 个 Observe `MemService` dispatch 和 owned runtime composition 已有无设备测试，但 `ENABLE_NATIVE_IPC` 默认 OFF，主程序没有 start 路径，也没有 GUI control/privileged 审批，因此不等于 native IPC 产品可用。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的 privileged 外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、12 个 Observe `MemService` dispatch、owned runtime 和显式 GUI control 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 Observe。privileged approval 未落地，因此三类特权 capability 始终 denied。
 
 ## 1. 系统总览
 
@@ -177,8 +177,8 @@ HTTP 2xx 不等于 provider stream 完整：
 | Agent 工具 worker | `AgentTaskExecutor` 构造 | 单个 joinable `std::thread` | 串行取队列、同步调用 `ToolExecutor`、投递 completion callback |
 | IPC accept thread | `IpcServer::Start()` | `serverThread_`，可 join | accept 客户端 |
 | IPC client handler | `IpcServer::ServerThread()` | 每连接 detached，未登记 | HTTP 解析、handler、发送响应 |
-| Native pipe server/handler | `NativeAgentRuntime::start()` -> `NamedPipeServer::start()` | runtime 持有单个 joinable `std::thread`；当前只由测试启动 | overlapped accept、串行 handshake/session handler、stop event/`CancelIoEx`、实例复用 |
-| Native request dispatch | `NativeAgentRuntime` -> `IpcRequestSession::run()` | 每个已建立 session 一个 owned/joinable worker；当前只由测试启动 | 单 active request、Observe dispatch、server-owned capability 检查、cooperative deadline/Cancel、bounded response |
+| Native pipe server/handler | `NativeAgentIpcWindow` -> `NativeAgentRuntime::start()` -> `NamedPipeServer::start()` | 用户显式启用后，system runtime 持有单个 joinable `std::thread` | overlapped accept、串行 handshake/session handler、stop event/`CancelIoEx`、实例复用 |
+| Native request dispatch | `NativeAgentRuntime` -> `IpcRequestSession::run()` | 每个已建立 session 一个 owned/joinable worker | 单 active request、Observe dispatch、server-owned capability 检查、cooperative deadline/Cancel、bounded response |
 
 ### 5.1 UI 线程边界
 
@@ -418,7 +418,7 @@ handler/caller thread 持续读取 Request/Cancel，一个 owned joinable worker
 
 `NativePipeSecurity` 生成 protected DACL，仅向当前进程用户 SID 和 SYSTEM 授予 pipe read/write，不授予 owner/DACL 修改权。`NamedPipeServer` 固定 `\\.\pipe\AMem.NativeAgent.v1`，使用 `PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE` 和 `nMaxInstances=1`；同一个 server handle 在连接间复用。overlapped accept 与 client handler 串行运行在一个 owned thread 上，`stop()` 先发 stop event、对活动 handle 调用 `CancelIoEx`，再 join。状态快照提供 stopped/listening/connected/stopping/failed、累计连接数、名称和错误。
 
-`NativeAgentRuntime` 已持有 server，并为每个客户端依次装配 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。runtime snapshot 以独立 mutex 暴露 server/phase、session count、活动 client name/version/capability、最后 handshake/session 状态和有界计数；完成后清活动身份，且不保存 request params/result。Stop 会取消握手或 active service context，并等待 handler 与 dispatch worker join。尚未实现的是产品 start 路径、GUI enable/status、privileged capability grant 和 approval broker。`ENABLE_NATIVE_IPC` 默认 OFF，`native_agent_native_ipc_gate` 仍明确禁止 main 自动启动。因此 native IPC 当前不可作为产品入口，也没有新的外部 target mutation 路径。
+`NativeAgentRuntime` 已持有 server，并为每个客户端依次装配 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。runtime snapshot 以独立 mutex 暴露 server/phase、session count、活动 client name/version/capability、最后 handshake/session 状态和有界计数；完成后清活动身份，且不保存 request params/result。Stop 会取消握手或 active service context，并等待 handler 与 dispatch worker join。`SystemNativeAgentRuntime` 延迟构造产品 owner；`NativeAgentIpcWindow` 显示状态、pipe、会话/请求计数和错误，并提供显式启停。`main.cpp` 不自动 start，只在设备断连前调用 shutdown。`ENABLE_NATIVE_IPC` 默认 OFF，runtime 默认 stopped。尚未实现 privileged capability grant 和 approval broker，因此当前产品入口严格 Observe-only，也没有新的外部 target mutation 路径。
 
 ### 10.2 Legacy HTTP 协议
 
@@ -489,7 +489,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 6. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 7. provider `maxContextTokens` 会自动限制实际请求。
 8. 内置 Agent 与临时 IPC 暴露相同能力和结果契约。
-9. Native IPC 基础已经提供 product runtime composition、privileged approval 或 GUI enable/status。
+9. Native IPC 的显式 Observe control 等同于 privileged approval 或允许外部 target mutation。
 
 ## 12. 扩展检查单
 
@@ -533,7 +533,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - legacy IPC HTTP parser/auth/sendAll
-- Native IPC 真实 GUI enable/teardown、privileged approval broker 与 target-bound approval invalidation
+- Native IPC GUI 交互自动化、privileged approval broker 与 target-bound approval invalidation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - fake transport partial I/O、迟到响应和三端口 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐
