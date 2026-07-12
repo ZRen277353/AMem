@@ -242,12 +242,63 @@ struct CeFindSymbolOutput {
 
 #pragma pack()
 
+class IWindowsSocketOps {
+public:
+    virtual ~IWindowsSocketOps() = default;
+
+    virtual SOCKET CreateTcpSocket() = 0;
+    virtual int Connect(SOCKET socketValue, const sockaddr* address,
+                        int addressLength) = 0;
+    virtual int Send(SOCKET socketValue, const char* buffer, int length,
+                     int flags) = 0;
+    virtual int Receive(SOCKET socketValue, char* buffer, int length,
+                        int flags) = 0;
+    virtual int Close(SOCKET socketValue) = 0;
+    virtual int LastError() const = 0;
+};
+
+class SystemWindowsSocketOps final : public IWindowsSocketOps {
+public:
+    SOCKET CreateTcpSocket() override {
+        return ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    }
+
+    int Connect(SOCKET socketValue, const sockaddr* address,
+                int addressLength) override {
+        return ::connect(socketValue, address, addressLength);
+    }
+
+    int Send(SOCKET socketValue, const char* buffer, int length,
+             int flags) override {
+        return ::send(socketValue, buffer, length, flags);
+    }
+
+    int Receive(SOCKET socketValue, char* buffer, int length,
+                int flags) override {
+        return ::recv(socketValue, buffer, length, flags);
+    }
+
+    int Close(SOCKET socketValue) override {
+        return ::closesocket(socketValue);
+    }
+
+    int LastError() const override {
+        return ::WSAGetLastError();
+    }
+};
+
+inline IWindowsSocketOps& GetSystemWindowsSocketOps() {
+    static SystemWindowsSocketOps ops;
+    return ops;
+}
+
 class WindowsSocketClient {
 private:
     SOCKET sock_;
     bool connected_;
     WSADATA wsaData_;
     std::function<void()> poisonCallback_;
+    IWindowsSocketOps* socketOps_;
 
     void NotifyPoisoned() {
         if (poisonCallback_) {
@@ -256,7 +307,11 @@ private:
     }
 
 public:
-    WindowsSocketClient() : sock_(INVALID_SOCKET), connected_(false) {
+    WindowsSocketClient()
+        : WindowsSocketClient(GetSystemWindowsSocketOps()) {}
+
+    explicit WindowsSocketClient(IWindowsSocketOps& socketOps)
+        : sock_(INVALID_SOCKET), connected_(false), socketOps_(&socketOps) {
         // 初始化Winsock
         int result = WSAStartup(MAKEWORD(2, 2), &wsaData_);
         if (result != 0) {
@@ -274,9 +329,10 @@ public:
             Close();
         }
 
-        sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sock_ = socketOps_->CreateTcpSocket();
         if (sock_ == INVALID_SOCKET) {
-            std::cerr << "socket() failed: " << WSAGetLastError() << std::endl;
+            std::cerr << "socket() failed: " << socketOps_->LastError()
+                      << std::endl;
             return false;
         }
 
@@ -286,14 +342,17 @@ public:
 
         if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) != 1) {
             std::cerr << "Invalid address: " << host << std::endl;
-            closesocket(sock_);
+            socketOps_->Close(sock_);
             sock_ = INVALID_SOCKET;
             return false;
         }
 
-        if (connect(sock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-            std::cerr << "connect() failed: " << WSAGetLastError() << std::endl;
-            closesocket(sock_);
+        if (socketOps_->Connect(sock_,
+                                reinterpret_cast<sockaddr*>(&serverAddr),
+                                sizeof(serverAddr)) == SOCKET_ERROR) {
+            std::cerr << "connect() failed: " << socketOps_->LastError()
+                      << std::endl;
+            socketOps_->Close(sock_);
             sock_ = INVALID_SOCKET;
             return false;
         }
@@ -311,9 +370,11 @@ public:
         size_t totalSent = 0;
 
         while (totalSent < size) {
-            int sent = ::send(sock_, buffer + totalSent, static_cast<int>(size - totalSent), 0);
+            int sent = socketOps_->Send(
+                sock_, buffer + totalSent,
+                static_cast<int>(size - totalSent), 0);
             if (sent == SOCKET_ERROR) {
-                int err = WSAGetLastError();
+                int err = socketOps_->LastError();
                 std::cerr << "send() failed: " << err << std::endl;
                 // Any failed I/O may leave this unframed stream out of sync.
                 timeoutGuard.dismissRestore();
@@ -340,9 +401,11 @@ public:
         size_t totalReceived = 0;
 
         while (totalReceived < size) {
-            int received = ::recv(sock_, buf + totalReceived, static_cast<int>(size - totalReceived), 0);
+            int received = socketOps_->Receive(
+                sock_, buf + totalReceived,
+                static_cast<int>(size - totalReceived), 0);
             if (received == SOCKET_ERROR) {
-                int err = WSAGetLastError();
+                int err = socketOps_->LastError();
                 std::cerr << "recv() failed: " << err << std::endl;
                 timeoutGuard.dismissRestore();
                 NotifyPoisoned();
@@ -363,7 +426,7 @@ public:
 
     void Close() {
         if (sock_ != INVALID_SOCKET) {
-            closesocket(sock_);
+            socketOps_->Close(sock_);
             sock_ = INVALID_SOCKET;
         }
         connected_ = false;
@@ -377,7 +440,7 @@ public:
 };
 
 
-static void CloseServer(WindowsSocketClient& client) {
+inline void CloseServer(WindowsSocketClient& client) {
     std::cout << "\n=== Closing Server ===" << std::endl;
     unsigned char command = CMD_TERMINATESERVER;
     client.Send(&command, sizeof(command));

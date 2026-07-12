@@ -693,6 +693,28 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_agent_mem_service COMMAND NativeAgentMemTests)
+
+    add_executable(NativeSocketClientTransportTests
+        tests/SocketClientTransportTests.cpp
+        socket/DeviceSession.cpp
+    )
+    target_include_directories(NativeSocketClientTransportTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    target_link_libraries(NativeSocketClientTransportTests PRIVATE ws2_32)
+    if(MSVC)
+        target_compile_options(NativeSocketClientTransportTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeSocketClientTransportTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeSocketClientTransportTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(
+        NAME native_socket_client_transport
+        COMMAND NativeSocketClientTransportTests
+    )
+
     add_test(
         NAME native_agent_catalog
         COMMAND ${CMAKE_COMMAND}
