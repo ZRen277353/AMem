@@ -68,6 +68,9 @@ public:
     virtual bool fetchServerVersion(int& version,
                                     std::string& versionString) = 0;
     virtual bool fetchArchitecture(int& type, std::string& name) = 0;
+    virtual DriverInitializationBackendResult initializeDriver(
+        const OperationContext& context,
+        const std::string& card) = 0;
     virtual bool fetchProcesses(std::vector<ProcessInfo>& processes) = 0;
     virtual bool openProcess(int pid, const std::string& name) = 0;
     virtual bool fetchModules(std::vector<ModuleInfo>& modules) = 0;

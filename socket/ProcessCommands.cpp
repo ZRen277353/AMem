@@ -56,75 +56,90 @@ bool GetMemType(int &outType, PortType type) {
     });
 }
 
-bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
-    resStr.clear();
-    if (Card.empty() || Card.size() > static_cast<size_t>(kMaxDriverCardSize)) {
-        resStr = "invalid driver card length";
-        return false;
+DriverInitializationIoResult InitDriverTracked(
+    const std::string& card, PortType type) {
+    DriverInitializationIoResult result;
+    if (card.empty() || card.size() > static_cast<size_t>(kMaxDriverCardSize)) {
+        result.message = "invalid driver card length";
+        return result;
     }
 
-    int ret = 0;
-    int resStrlen = 0;
-    std::vector<char> resStrVec;
-
-    bool success = SocketCommand::executeNoHandle(type, [&](WindowsSocketClient* client) -> bool {
-        unsigned char command = CMD_INITRWDRIVER;
-        if (!client->Send(&command, sizeof(command)))
-            return false;
-        int Cardlen = static_cast<int>(Card.size());
-        if (!client->Send(&Cardlen, sizeof(Cardlen)))
-            return false;
-        if (!client->Send(Card.data(), static_cast<size_t>(Cardlen)))
-            return false;
-        if (!client->Receive(&ret, sizeof(ret)))
-            return false;
-        if (!client->Receive(&resStrlen, sizeof(resStrlen)))
-            return false;
-        if (!isValidCount(resStrlen, kMaxDriverResponseSize))
-            return false;
-        resStrVec.resize(resStrlen);
-        if (resStrlen > 0 && !client->Receive(resStrVec.data(), static_cast<size_t>(resStrlen)))
-            return false;
-        return true;
-    });
-
-    if (!success)
-        return false;
-
-    if (ret > 0) {
-        try {
-            std::string timestampStr(resStrVec.data(), resStrVec.size());
-            uint64_t timestamp_ms = 0;
-            if (!parseTimestampMs(timestampStr, timestamp_ms)) {
-                resStr = "时间戳解析失败";
-                return true;
+    int serverResult = 0;
+    int responseLength = 0;
+    std::vector<char> response;
+    (void)SocketCommand::executeNoHandle(
+        type, [&](WindowsSocketClient* client) -> bool {
+            result.requestStarted = true;
+            unsigned char command = CMD_INITRWDRIVER;
+            if (!client->Send(&command, sizeof(command)))
+                return false;
+            const int cardLength = static_cast<int>(card.size());
+            if (!client->Send(&cardLength, sizeof(cardLength)))
+                return false;
+            if (!client->Send(card.data(), static_cast<size_t>(cardLength)))
+                return false;
+            if (!client->Receive(&serverResult, sizeof(serverResult)))
+                return false;
+            if (!client->Receive(&responseLength, sizeof(responseLength)))
+                return false;
+            if (!isValidCount(responseLength, kMaxDriverResponseSize))
+                return false;
+            response.resize(static_cast<size_t>(responseLength));
+            if (responseLength > 0 &&
+                !client->Receive(response.data(), response.size())) {
+                return false;
             }
-            time_t timestamp = static_cast<time_t>(timestamp_ms / 1000);
-            if (timestamp > 0) {
-                std::tm timeinfo{};
+            result.responseReceived = true;
+            result.accepted = serverResult > 0;
+            return true;
+        });
+
+    if (!result.responseReceived) {
+        return result;
+    }
+
+    if (!result.accepted) {
+        result.message.assign(response.begin(), response.end());
+        return result;
+    }
+
+    const std::string timestampText(response.begin(), response.end());
+    uint64_t timestampMs = 0;
+    if (!parseTimestampMs(timestampText, timestampMs)) {
+        result.message = "driver initialized; timestamp parse failed";
+        return result;
+    }
+    const time_t timestamp = static_cast<time_t>(timestampMs / 1000);
+    if (timestamp <= 0) {
+        result.message = "driver initialized; invalid timestamp";
+        return result;
+    }
+
+    std::tm timeInfo{};
 #ifdef _WIN32
-                if (localtime_s(&timeinfo, &timestamp) == 0) {
+    const bool converted = localtime_s(&timeInfo, &timestamp) == 0;
 #else
-                std::tm *local = std::localtime(&timestamp);
-                if (local != nullptr) {
-                    timeinfo = *local;
-#endif
-                    char dateTime[20];
-                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeinfo);
-                    resStr = dateTime;
-                } else {
-                    resStr = "时间格式化失败";
-                }
-            } else {
-                resStr = "无效的时间戳";
-            }
-        } catch (const std::exception &) {
-            resStr = "时间戳解析失败";
-        }
-    } else {
-        resStr.assign(resStrVec.data(), resStrVec.size());
+    const std::tm* local = std::localtime(&timestamp);
+    const bool converted = local != nullptr;
+    if (converted) {
+        timeInfo = *local;
     }
-    return true;
+#endif
+    if (!converted) {
+        result.message = "driver initialized; timestamp formatting failed";
+        return result;
+    }
+
+    char dateTime[20];
+    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeInfo);
+    result.message = dateTime;
+    return result;
+}
+
+bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
+    const DriverInitializationIoResult result = InitDriverTracked(Card, type);
+    resStr = result.message;
+    return result.responseReceived;
 }
 
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type) {

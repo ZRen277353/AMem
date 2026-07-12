@@ -633,6 +633,52 @@ std::string AgentMemTools::status(
     return output.dump();
 }
 
+std::string AgentMemTools::driverInitialize(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        const char* key = "card";
+        if (allowLegacyArguments && !args.contains(key) &&
+            args.contains("card_name")) {
+            key = "card_name";
+        }
+        Mem::DriverInitializeRequest request;
+        request.card = optionalString(args, key);
+        if (request.card.empty()) {
+            throw std::runtime_error(
+                allowLegacyArguments
+                    ? "card or card_name must be a non-empty string"
+                    : "card must be a non-empty string");
+        }
+
+        const auto response = service_.initializeDriver(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::DriverInitializationReceipt& receipt = response.value();
+        json output;
+        output["success"] = true;
+        output["message"] = receipt.message;
+        output["confirmed"] = true;
+        output["completed_after_cancel_request"] =
+            receipt.completedAfterCancelRequest;
+        output["completed_after_deadline"] = receipt.completedAfterDeadline;
+        output["completion"] = receipt.completedAfterCancelRequest
+            ? "completed_after_cancel_request"
+            : (receipt.completedAfterDeadline
+                   ? "completed_after_deadline"
+                   : "completed");
+        output["meta"] = resultMeta(
+            response.durationMs(), receipt.connectionGeneration);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("driver_initialize", error);
+    }
+}
+
 std::string AgentMemTools::serverVersion(
     const std::string& /*argsJson*/,
     const Mem::OperationContext& context) {

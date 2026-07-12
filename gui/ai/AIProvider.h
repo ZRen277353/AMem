@@ -45,6 +45,10 @@ struct ToolCall {
     std::string id;
     std::string name;
     std::string arguments; // JSON string
+    // Optional display/persistence-safe copy. The original arguments remain
+    // available only in memory for execution and the immediate provider
+    // follow-up that must preserve tool-call continuity.
+    std::string redactedArguments;
 };
 
 // 聊天消息

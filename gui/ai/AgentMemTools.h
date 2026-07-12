@@ -12,6 +12,9 @@ public:
 
     std::string status(const std::string& argsJson,
                        const Mem::OperationContext& context);
+    std::string driverInitialize(const std::string& argsJson,
+                                 bool allowLegacyArguments,
+                                 const Mem::OperationContext& context);
     std::string serverVersion(const std::string& argsJson,
                               const Mem::OperationContext& context);
     std::string architecture(const std::string& argsJson,

@@ -906,22 +906,15 @@ std::string execGetArchitecture(const std::string& /*argsJson*/,
     return getAgentMemTools().architecture("{}", context);
 }
 
-// init_driver
-std::string execInitDriver(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        std::string card = requiredStringArg(
-            args, {"card_name", "card"}, "card_name", kMaxToolStringParamBytes);
-        std::string message;
-        if (!InitDriver(card, message, PORT_MAIN)) {
-            return makeError("socket communication error: init_driver");
-        }
-        json result;
-        result["message"] = message;
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("init_driver: ") + e.what());
-    }
+// driver_initialize / init_driver compatibility alias
+std::string execDriverInitialize(const std::string& argsJson,
+                                 const Mem::OperationContext& context) {
+    return getAgentMemTools().driverInitialize(argsJson, false, context);
+}
+
+std::string execInitDriver(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().driverInitialize(argsJson, true, context);
 }
 
 // canonical memory_read
@@ -2002,7 +1995,20 @@ constexpr const char* kSchemaEmptyObject = R"JSON({
   "properties": {}
 })JSON";
 
-constexpr const char* kSchemaStatusInitDriver = R"JSON({
+constexpr const char* kSchemaDriverInitialize = R"JSON({
+  "type": "object",
+  "required": ["card"],
+  "properties": {
+    "card": {
+      "type": "string",
+      "description": "Driver authorization card/key string",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaLegacyInitDriver = R"JSON({
   "type": "object",
   "anyOf": [
     { "required": ["card_name"] },
@@ -2647,13 +2653,21 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
-        "init_driver",
+        "driver_initialize",
         "Initialize the Android memory driver with an authorization card/key. Requires user confirmation.",
-        kSchemaStatusInitDriver,
+        kSchemaDriverInitialize,
+        ToolSafety::Write,
+        &execDriverInitialize,
+        ToolTargetPolicy::None);
+
+    registerTool(
+        "init_driver",
+        "Compatibility alias for driver_initialize.",
+        kSchemaLegacyInitDriver,
         ToolSafety::Write,
         &execInitDriver,
-        true,
-        ToolTargetPolicy::None);
+        ToolTargetPolicy::None,
+        false);
 
     registerTool(
         "memory_read",

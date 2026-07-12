@@ -162,6 +162,16 @@ enum MemType {
 
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type = PORT_MAIN);
 bool GetMemType(int &outType, PortType type = PORT_MAIN);
+
+struct DriverInitializationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool accepted = false;
+  std::string message;
+};
+
+DriverInitializationIoResult InitDriverTracked(
+    const std::string &card, PortType type = PORT_MAIN);
 bool InitDriver(std::string &Card, std::string &resStr,
                 PortType type = PORT_MAIN);
 

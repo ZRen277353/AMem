@@ -360,6 +360,25 @@ public:
         return true;
     }
 
+    DriverInitializationBackendResult initializeDriver(
+        const OperationContext& context,
+        const std::string& card) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction ||
+            transaction.generation() != context.connectionGeneration) {
+            return {};
+        }
+
+        const DriverInitializationIoResult io =
+            InitDriverTracked(card, PORT_MAIN);
+        DriverInitializationBackendResult result;
+        result.requestStarted = io.requestStarted;
+        result.responseReceived = io.responseReceived;
+        result.accepted = io.accepted;
+        result.message = io.message;
+        return result;
+    }
+
     bool fetchProcesses(std::vector<ProcessInfo>& processes) override {
         std::vector<ProcessInfoItem> items;
         if (!FetchProcessList(items, PORT_MAIN)) {

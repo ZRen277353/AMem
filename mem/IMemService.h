@@ -11,6 +11,9 @@ public:
 
     virtual OperationContext captureContext(bool includeTarget) const = 0;
     virtual Result<Status> status(const OperationContext& context) = 0;
+    virtual Result<DriverInitializationReceipt> initializeDriver(
+        const OperationContext& context,
+        const DriverInitializeRequest& request) = 0;
     virtual Result<ProcessPage> listProcesses(
         const OperationContext& context,
         const ProcessListRequest& request) = 0;

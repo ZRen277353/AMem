@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AgentRunner.h"
+#include "ToolCallSecurity.h"
 
 #include "../../third_party/nlohmann/json.hpp"
 
@@ -306,12 +307,13 @@ ChatMessage AgentRunner::makeToolMessage(const ToolCall& tc,
     audit["success"] = result.success;
     audit["duration_ms"] = durationMs;
     audit["completion"] = toolCompletionStateName(result.completion);
+    const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
     try {
-        audit["arguments"] = tc.arguments.empty()
+        audit["arguments"] = auditArguments.empty()
                                  ? nlohmann::json::object()
-                                 : nlohmann::json::parse(tc.arguments);
+                                 : nlohmann::json::parse(auditArguments);
     } catch (const nlohmann::json::exception&) {
-        audit["arguments_raw"] = tc.arguments;
+        audit["arguments_raw"] = auditArguments;
     }
 
     if (result.success) {
@@ -342,12 +344,13 @@ ChatMessage AgentRunner::makeDeniedToolMessage(const ToolCall& tc) {
     audit["tool"] = tc.name;
     audit["success"] = false;
     audit["error"] = "tool execution denied by user";
+    const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
     try {
-        audit["arguments"] = tc.arguments.empty()
+        audit["arguments"] = auditArguments.empty()
                                  ? nlohmann::json::object()
-                                 : nlohmann::json::parse(tc.arguments);
+                                 : nlohmann::json::parse(auditArguments);
     } catch (const nlohmann::json::exception&) {
-        audit["arguments_raw"] = tc.arguments;
+        audit["arguments_raw"] = auditArguments;
     }
 
     ChatMessage denied;
@@ -366,12 +369,13 @@ ChatMessage AgentRunner::makeSkippedToolMessage(const ToolCall& tc,
     audit["success"] = false;
     audit["skipped"] = true;
     audit["error"] = reason;
+    const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
     try {
-        audit["arguments"] = tc.arguments.empty()
+        audit["arguments"] = auditArguments.empty()
                                  ? nlohmann::json::object()
-                                 : nlohmann::json::parse(tc.arguments);
+                                 : nlohmann::json::parse(auditArguments);
     } catch (const nlohmann::json::exception&) {
-        audit["arguments_raw"] = tc.arguments;
+        audit["arguments_raw"] = auditArguments;
     }
 
     ChatMessage skipped;

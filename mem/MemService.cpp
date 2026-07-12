@@ -436,6 +436,71 @@ Result<Status> MemService::status(const OperationContext& context) {
     return Result<Status>::success(std::move(value), elapsedMilliseconds(start));
 }
 
+Result<DriverInitializationReceipt> MemService::initializeDriver(
+    const OperationContext& context,
+    const DriverInitializeRequest& request) {
+    const auto start = Clock::now();
+    if (request.card.empty() || request.card.size() > kMaxDriverCardBytes) {
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "driver card must contain between 1 and 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<DriverInitializationReceipt>(*error, start);
+    }
+
+    const DriverInitializationBackendResult backendResult =
+        backend_.initializeDriver(context, request.card);
+    if (!backendResult.responseReceived) {
+        if (backendResult.requestStarted) {
+            return Result<DriverInitializationReceipt>::failure(
+                ErrorCode::CompletionUnknown,
+                "driver initialization was sent but its completion could not be confirmed; reconnect before continuing and do not retry automatically",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, false, true)) {
+            return failureFrom<DriverInitializationReceipt>(*error, start);
+        }
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "driver initialization could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    if (!backendResult.accepted) {
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::PermissionDenied,
+            backendResult.message.empty()
+                ? "Android server rejected driver initialization"
+                : backendResult.message,
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    if (const auto error = validateContext(context, true, false, false)) {
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "server confirmed driver initialization, but the original connection context is no longer current: " +
+                error->message,
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    DriverInitializationReceipt receipt;
+    receipt.message = backendResult.message;
+    receipt.completedAfterCancelRequest =
+        context.cancellation &&
+        context.cancellation->load(std::memory_order_acquire);
+    receipt.completedAfterDeadline = Clock::now() >= context.deadline;
+    receipt.connectionGeneration = context.connectionGeneration;
+    return Result<DriverInitializationReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
 Result<ProcessPage> MemService::listProcesses(
     const OperationContext& context,
     const ProcessListRequest& request) {

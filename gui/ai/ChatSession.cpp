@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "ChatSession.h"
+#include "ToolCallSecurity.h"
 
 #include "../Gui.h"
 #include "../../third_party/nlohmann/json.hpp"
@@ -54,7 +55,7 @@ nlohmann::json messageToJson(const ChatMessage& msg) {
             nlohmann::json tj;
             tj["id"]        = tc.id;
             tj["name"]      = tc.name;
-            tj["arguments"] = tc.arguments;
+            tj["arguments"] = toolCallArgumentsForDisplay(tc);
             arr.push_back(std::move(tj));
         }
         j["toolCalls"] = std::move(arr);

@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "ChatWindow.h"
+#include "ToolCallSecurity.h"
 
 #include "ApiKeyStore.h"
 #include "AgentTaskExecutor.h"
@@ -1222,6 +1223,9 @@ void ChatWindow::pollMessages() {
                     break;
                 }
                 const bool hasToolCalls = !calls.empty();
+                for (auto& call : calls) {
+                    applyToolCallRedaction(call);
+                }
                 std::vector<ToolCall> persistedCalls = calls;
                 const int maxCallsForHistory = std::clamp(maxToolCallsPerTurn_, 1, 64);
                 if (static_cast<int>(persistedCalls.size()) > maxCallsForHistory) {
@@ -1489,7 +1493,8 @@ void ChatWindow::renderMessage(const ChatMessage& msg, int index) {
 
     for (const auto& tc : msg.toolCalls) {
         ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::TextSecondary);
-        ImGui::BulletText("tool_call: %s(%s)", tc.name.c_str(), tc.arguments.c_str());
+        ImGui::BulletText("tool_call: %s(%s)", tc.name.c_str(),
+                          toolCallArgumentsForDisplay(tc).c_str());
         ImGui::PopStyleColor();
     }
     ImGui::PopID();
@@ -1573,10 +1578,12 @@ void ChatWindow::drawToolConfirmationModal() {
             // actually read what they're approving (AC 6.3). Fall back to
             // the raw string if the arguments aren't valid JSON, which can
             // happen for malformed tool calls we still want to surface.
-            std::string prettyArgs = pending->arguments;
+            const std::string& displayArguments =
+                toolCallArgumentsForDisplay(*pending);
+            std::string prettyArgs = displayArguments;
             try {
-                if (!pending->arguments.empty()) {
-                    const auto parsed = nlohmann::json::parse(pending->arguments);
+                if (!displayArguments.empty()) {
+                    const auto parsed = nlohmann::json::parse(displayArguments);
                     prettyArgs = parsed.dump(2);
                 }
             } catch (const nlohmann::json::exception&) {

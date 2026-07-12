@@ -57,6 +57,24 @@ struct Status {
     std::string architectureName;
 };
 
+struct DriverInitializeRequest {
+    std::string card;
+};
+
+struct DriverInitializationBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    bool accepted = false;
+    std::string message;
+};
+
+struct DriverInitializationReceipt {
+    std::string message;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+    uint64_t connectionGeneration = 0;
+};
+
 struct ProcessInfo {
     int pid = 0;
     std::string name;
@@ -458,6 +476,7 @@ inline constexpr size_t kMaxScanValueBytes = 4096;
 inline constexpr size_t kMaxScanResultPageSize = 1000;
 inline constexpr size_t kMaxScanResultCount = 5000000;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
+inline constexpr size_t kMaxDriverCardBytes = 4096;
 inline constexpr size_t kMaxScalarTypeNameBytes = 64;
 inline constexpr size_t kMaxScalarValueTextBytes = 256;
 

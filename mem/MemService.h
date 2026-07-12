@@ -15,6 +15,9 @@ public:
 
     OperationContext captureContext(bool includeTarget) const override;
     Result<Status> status(const OperationContext& context) override;
+    Result<DriverInitializationReceipt> initializeDriver(
+        const OperationContext& context,
+        const DriverInitializeRequest& request) override;
     Result<ProcessPage> listProcesses(
         const OperationContext& context,
         const ProcessListRequest& request) override;

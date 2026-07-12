@@ -3,6 +3,7 @@
 #include "../gui/ai/AgentTaskExecutor.h"
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
+#include "../gui/ai/ToolCallSecurity.h"
 #include "../mem/Address.h"
 #include "../mem/MemService.h"
 #include "../mem/ValueCodec.h"
@@ -85,6 +86,16 @@ public:
     int writeDelayMs = 0;
     Mem::CancellationToken cancelDuringWrite;
     int writeCalls = 0;
+    bool driverRequestStarted = true;
+    bool driverResponseReceived = true;
+    bool driverAccepted = true;
+    bool changeGenerationAfterDriver = false;
+    Mem::CancellationToken cancelDuringDriver;
+    int driverDelayMs = 0;
+    int driverCalls = 0;
+    uint64_t lastDriverContextGeneration = 0;
+    std::string driverMessage = "2026-07-12 12:00:00";
+    std::string lastDriverCard;
     int readCalls = 0;
     int fetchModuleCalls = 0;
     int beginReadTransactionCalls = 0;
@@ -215,6 +226,30 @@ public:
         type = 3;
         name = "Kernel";
         return connected;
+    }
+
+    Mem::DriverInitializationBackendResult initializeDriver(
+        const Mem::OperationContext& context,
+        const std::string& card) override {
+        ++driverCalls;
+        lastDriverCard = card;
+        lastDriverContextGeneration = context.connectionGeneration;
+        if (driverDelayMs > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(driverDelayMs));
+        }
+        if (cancelDuringDriver) {
+            cancelDuringDriver->store(true, std::memory_order_release);
+        }
+        if (changeGenerationAfterDriver) {
+            ++generation;
+        }
+        Mem::DriverInitializationBackendResult result;
+        result.requestStarted = driverRequestStarted;
+        result.responseReceived = driverResponseReceived;
+        result.accepted = driverAccepted;
+        result.message = driverMessage;
+        return result;
     }
 
     bool fetchProcesses(std::vector<Mem::ProcessInfo>& output) override {
@@ -674,6 +709,128 @@ public:
         return result;
     }
 };
+
+void testDriverInitializationAndSecretRedaction() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    const Mem::OperationContext context = service.captureContext(false);
+
+    auto empty = service.initializeDriver(context, {});
+    expect(!empty.ok() &&
+               empty.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.driverCalls == 0,
+           "empty driver cards must fail before reaching the backend");
+
+    const std::string secret = "test-card-secret-7f3a";
+    auto completed = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret});
+    expect(completed.ok() && backend.lastDriverCard == secret &&
+               backend.lastDriverContextGeneration == 1 &&
+               completed.value().connectionGeneration == 1 &&
+               !completed.value().completedAfterCancelRequest,
+           "confirmed driver initialization should preserve its connection receipt");
+
+    backend.driverRequestStarted = false;
+    backend.driverResponseReceived = false;
+    auto unsent = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret});
+    expect(!unsent.ok() &&
+               unsent.error().code == Mem::ErrorCode::ProtocolError &&
+               unsent.error().retryable,
+           "unsent driver initialization should remain retryable");
+
+    backend.driverRequestStarted = true;
+    auto unknown = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret});
+    expect(!unknown.ok() &&
+               unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
+               !unknown.error().retryable,
+           "sent driver initialization without a response must be completion_unknown");
+
+    backend.driverResponseReceived = true;
+    backend.driverAccepted = false;
+    backend.driverMessage = "authorization rejected";
+    auto rejected = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret});
+    expect(!rejected.ok() &&
+               rejected.error().code == Mem::ErrorCode::PermissionDenied &&
+               !rejected.error().retryable,
+           "server rejection must be a confirmed non-retryable failure");
+
+    backend.driverAccepted = true;
+    backend.driverMessage = "initialized";
+    backend.cancelDuringDriver = std::make_shared<std::atomic<bool>>(false);
+    Mem::OperationContext cancelledContext = context;
+    cancelledContext.cancellation = backend.cancelDuringDriver;
+    auto cancelledAfterCompletion = service.initializeDriver(
+        cancelledContext, Mem::DriverInitializeRequest{secret});
+    expect(cancelledAfterCompletion.ok() &&
+               cancelledAfterCompletion.value().completedAfterCancelRequest,
+           "confirmed initialization must retain a late cancellation marker");
+
+    backend.cancelDuringDriver.reset();
+    backend.driverDelayMs = 30;
+    Mem::OperationContext deadlineContext = context;
+    deadlineContext.deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(10);
+    auto completedAfterDeadline = service.initializeDriver(
+        deadlineContext, Mem::DriverInitializeRequest{secret});
+    expect(completedAfterDeadline.ok() &&
+               completedAfterDeadline.value().completedAfterDeadline,
+           "confirmed initialization must retain a late deadline marker");
+
+    backend.driverDelayMs = 0;
+    backend.changeGenerationAfterDriver = true;
+    auto replacedConnection = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret});
+    expect(!replacedConnection.ok() &&
+               replacedConnection.error().code ==
+                   Mem::ErrorCode::CompletionUnknown,
+           "confirmed initialization on a replaced connection must be completion_unknown");
+
+    FakeBackend adapterBackend;
+    Mem::MemService adapterService(adapterBackend);
+    AI::AgentMemTools tools(adapterService);
+    const json adapterResult = json::parse(tools.driverInitialize(
+        std::string("{\"card\":\"") + secret + "\"}",
+        false,
+        adapterService.captureContext(false)));
+    expect(adapterResult.at("success").get<bool>() &&
+               adapterResult.at("completion") == "completed" &&
+               adapterResult.dump().find(secret) == std::string::npos,
+           "driver adapter should return a structured receipt without echoing the card");
+
+    AI::ToolCall call = toolCall(
+        "driver-secret", "driver_initialize",
+        std::string("{\"card\":\"") + secret + "\"}");
+    AI::applyToolCallRedaction(call);
+    expect(call.arguments.find(secret) != std::string::npos &&
+               AI::toolCallArgumentsForDisplay(call).find(secret) ==
+                   std::string::npos &&
+               AI::toolCallArgumentsForDisplay(call).find("[REDACTED]") !=
+                   std::string::npos,
+           "execution arguments should remain available while storage/display arguments are redacted");
+
+    AI::ToolExecutor::getInstance().registerTool(
+        "driver_initialize", "driver test", "{}", AI::ToolSafety::Write,
+        [](const std::string&, const Mem::OperationContext&) {
+            return std::string(R"({"success":true})");
+        },
+        AI::ToolTargetPolicy::None);
+    AI::AgentRunner runner;
+    AI::AgentRunner::Config config;
+    auto awaiting = runner.beginToolCalls({call}, config);
+    expect(awaiting.kind ==
+               AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+           "driver initialization must remain write-classified");
+    auto denied = runner.resumeDenied(config);
+    expect(!denied.messages.empty() &&
+               denied.messages.front().content.find(secret) ==
+                   std::string::npos &&
+               denied.messages.front().content.find("[REDACTED]") !=
+                   std::string::npos,
+           "denied-tool audit output must not contain the driver card");
+}
 
 void testAddressContract() {
     const auto parsed = Mem::parseAddress(" 0x7ff0 ");
@@ -2770,6 +2927,8 @@ int main() {
         {"address contract", &testAddressContract},
         {"scalar value codec", &testScalarValueCodec},
         {"status and generation", &testStatusAndConnectionGeneration},
+        {"driver initialization and secret redaction",
+         &testDriverInitializationAndSecretRedaction},
         {"process pagination and open", &testProcessPaginationAndOpen},
         {"memory target validation", &testMemoryReadTargetValidation},
         {"memory write completion contract", &testMemoryWriteCompletionContract},
