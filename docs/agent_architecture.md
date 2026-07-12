@@ -290,7 +290,7 @@ Idle
 - catalog-owned effect/resource metadata（当前独立审计按 canonical/alias 名称归类）
 - endpoint/provider 数据去向
 
-二十三个 canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit page 在 service/Agent 边界限制为 100 项。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
+二十三个 canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
 
 ### 7.3 独立 mutation audit
 
@@ -322,7 +322,7 @@ canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个
 
 canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，GUI/IPC/隐藏 alias 的 init 会使其失效。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
 
-canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确认和本地 cleanup tracker 更新处于同一 MAIN transaction。`ClearTrackedKernelBreakpoints()` 持 gate 完成 tracker snapshot 和逐项 remove，避免并发 set 落在 cleanup 缝隙；disconnect/reconnect 不向旧 target 发命令，只清本地 tracker。四种 mutation 使用相同 receipt：未发送可重试，已发送无响应为非重试 `completion_unknown`，确认后才报告 completed/cancel/deadline 状态。`BreakpointWindow` 也显式注入同一个 `IMemService`，set/remove/enable/suspend/resume 每次捕获 target context 并消费结构化错误。hits 协议没有 offset 参数，socket 层流式丢弃页外记录，Agent 只收到最多 100 项及实际可取总数；GUI 命中详情仍读取 legacy DEBUG-port `HW_HIT_INFO`，因为 service DTO 尚未保留 FPSIMD 字段。
+canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确认和本地 cleanup tracker 更新处于同一 MAIN transaction。`ClearTrackedKernelBreakpoints()` 持 gate 完成 tracker snapshot 和逐项 remove，避免并发 set 落在 cleanup 缝隙；disconnect/reconnect 不向旧 target 发命令，只清本地 tracker。四种 mutation 使用相同 receipt：未发送可重试，已发送无响应为非重试 `completion_unknown`，确认后才报告 completed/cancel/deadline 状态。`BreakpointWindow` 显式注入同一个 `IMemService`，mutation 与 hit refresh 每次捕获 target context。hits 协议没有 offset/cursor，socket 层必须排空一次响应；`ReadKernelBreakpointInfoTail` 按块接收并只保留最新 tail。service DTO 保存 GPR、`orig_x0`、syscall、FPSR/FPCR 和 32 个 128-bit vector registers；GUI 上限 50,000，Agent 上限 100，二者返回 `available/dropped` 而不是虚假 continuation cursor。
 
 当前复合序列包括：
 
@@ -496,7 +496,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

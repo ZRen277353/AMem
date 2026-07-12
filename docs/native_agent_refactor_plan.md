@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint mutation、Lua host boundary、独立 mutation audit、连接生命周期、run target 与受管工具 worker 已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint 域、Lua host boundary、独立 mutation audit、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成十五个纵向切片：
+截至 2026-07-12 已完成十六个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -22,19 +22,19 @@
 - 每端口新增可重入 transaction gate；普通 socket 命令短暂持有，pointer chain 跨 module list 和全部 8-byte read 持有。`pointer_resolve` 固定 generation/target，逐跳检查取消、deadline 和 uint64 overflow，释放事务后再复核完整 snapshot。
 - scan mutation 统一推进单调 epoch；`scan_start` 在一个事务内执行 range+scan，refine/results/clear 要求最新 epoch，results 绑定 count+page，clear 用 count=0 确认。长扫描通过 DEBUG stop 响应 cancellation，sent-without-terminal 保留 `completion_unknown`。
 - symbol init 在取得 transaction gate 后推进单调 epoch；`symbol_resolve`/`symbol_list` 在一个 MAIN transaction 内完成 module 唯一匹配、init 与 find/page，续页要求最新 epoch。旧 GUI/IPC/隐藏 alias init 会使 native session 失效。
-- breakpoint set/remove/suspend/resume 使用统一 tracked receipt，区分未发送、server reject、发送后未知和确认后 cancel/deadline；设备确认与 cleanup tracker 在同一 MAIN transaction 更新，disconnect 清本地 tracker。hits 以 100 项分页并把 64 位寄存器转为字符串。
+- breakpoint set/remove/suspend/resume 使用统一 tracked receipt，区分未发送、server reject、发送后未知和确认后 cancel/deadline；设备确认与 cleanup tracker 在同一 MAIN transaction 更新，disconnect 清本地 tracker。hits 使用无 cursor 的最新批次；Agent 上限 100 并把 64 位值转为字符串。
 - `disassemble` 统一校验 ARM64 固定宽度 `count * 4`、拒绝短读，返回 little-endian encoding 和明确的 `decoded=false`；旧 `read_disassembly` 仅作隐藏 alias。
 - `driver_initialize` 在 service/send 边界绑定 connection generation，区分未发送、server reject、`completion_unknown` 与确认后 cancel/deadline；`card`/`card_name` 在审批、审计和会话 JSON 中统一脱敏，原值仅瞬时用于执行/provider 连续性。
 - `lua_execute` 与隐藏 `execute_lua` 仅在 `HAVE_LUAJIT` 时注册；执行前复核 target/generation，Lua timeout 不得延长 task absolute deadline，开始后取消只记录回执而不声称硬中止。
 - write-classified 与 symbol-session outcome 在 UI callback 前写 `ai_mutation_audit.jsonl`；manual deny/queue rejection 同样记录。日志保存 approval/effect/resource/target/completion 的脱敏摘要，64 KiB/record、4 MiB active + 一个轮转备份，并由独立 Audit 表展示最近 100 条。
-- GUI `BreakpointWindow` 显式注入 `IMemService`；set/remove/enable/suspend/resume 捕获 target context，只在 confirmed success 后更新本地状态。命中详情仍保留 legacy DEBUG-port DTO，等待 service 补齐 FPSIMD 与 GUI 分页契约。
+- GUI `BreakpointWindow` 显式注入 `IMemService`；set/remove/enable/suspend/resume 与 hit refresh 捕获 target context。hit DTO 保存完整 GPR/FPSIMD，DEBUG 响应按块排空并保留最新 50,000 条。
 - `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 旧名称仍可执行但不再向 provider 广告。LuaJIT 构建当前有 57 个可执行名称、33 个隐藏 alias、24 个广告定义；无 LuaJIT 时为 55/32/23。
-- `NativeAgentMemTests` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
+- `NativeAgentMemTests` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：GUI/IPC scan/symbol、GUI breakpoint hit、IPC breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录、Stop 后 mutation 独立审计和 GUI breakpoint mutation 已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 仍只能视为部分修复；A-03 与 A-07 已由 joinable worker、shutdown 和 mutation-audit 测试关闭。
+尚未完成：GUI/IPC scan/symbol、IPC breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录、Stop 后 mutation 独立审计和 GUI breakpoint 域迁移已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 仍只能视为部分修复；A-03 与 A-07 已由 joinable worker、shutdown 和 mutation-audit 测试关闭。
 
 ## 1. 结论
 
@@ -581,7 +581,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第九批加入 `MemService` symbol domain/session 和全局 symbol epoch，注册 `symbol_resolve`/`symbol_list`，并隐藏 `resolve_symbol`/`symbol_init`/`symbol_find`。module resolve + init + find/page 位于同一 MAIN transaction，续页携带最新 epoch；当前二元安全模型明确按目标/主机 mutation 审批，内部 symbol session mutation 保持 ReadOnly 且由事务审计语义约束。同时修正 scan/symbol epoch 的推进位置，使其发生在取得 transaction gate 后，保证 epoch 顺序与真实 mutation 顺序一致。
 
-第十批加入 `MemService` breakpoint mutation/hit page，注册 `breakpoint_set`/`breakpoint_remove`/`breakpoint_hits`/`breakpoint_suspend`/`breakpoint_resume`，并隐藏五个旧名称。mutation 统一 target snapshot 和 request-started/response-received/applied 回执；设备确认与 cleanup tracker 在同一 transaction 内更新，cleanup 持 gate 避免并发 set 漏项，disconnect 清除本地旧 tracker。hits 在 socket 层按块读取并仅保留请求页，Agent 边界用字符串保存 64 位寄存器/时间精度。
+第十批加入 `MemService` breakpoint mutation/hit 读取，注册 `breakpoint_set`/`breakpoint_remove`/`breakpoint_hits`/`breakpoint_suspend`/`breakpoint_resume`，并隐藏五个旧名称。mutation 统一 target snapshot 和 request-started/response-received/applied 回执；设备确认与 cleanup tracker 在同一 transaction 内更新，cleanup 持 gate 避免并发 set 漏项，disconnect 清除本地旧 tracker。第十六批进一步纠正 hits 的无 cursor 协议语义。
 
 第十一批加入 `MemService::disassemble` 与 canonical `disassemble`，隐藏 `read_disassembly`。ARM64 请求固定读取 `count * 4` 字节，短读视为协议错误；当前返回结构化 little-endian encoding 与 `decoded=false`，不在无解码器证据时伪造 mnemonic。
 
@@ -593,4 +593,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十五批开始迁移 GUI 消费者。`BreakpointWindow` 由 `CEWindow` 显式注入系统 `IMemService`，五个 mutation 入口不再直接调用 socket singleton；每次操作绑定当前 target/generation，并区分结构化失败与 confirmed success。GUI hit history 仍依赖包含 FPSIMD 的 `HW_HIT_INFO` 和 DEBUG 端口，因此留给后续 DTO/分页切片。
 
-十五个切片均已通过 Debug/Release 应用构建和 22 组无设备测试，模型可见规范目录、Stop 后 mutation 审计与首个 GUI service 迁移已完成。下一批应补齐 breakpoint hit DTO/分页，再推进 GUI scan/symbol、隐藏 alias 删除以及 IPC/MCP 收敛。
+第十六批完成 GUI breakpoint hit 迁移并修正 canonical batch 语义。`BreakpointHit` 补齐 `orig_x0`、syscall、FPSR/FPCR 和 32 个 128-bit vector registers；socket 按块排空无 cursor 响应，只保留最新 tail。GUI 通过 service 读取最多 50,000 条，Agent 读取最多 100 条并返回 `available/dropped`；旧 `offset` 在 backend 前拒绝，不再返回虚假 `next_cursor`。
+
+十六个切片均已通过 Debug/Release 应用构建和 22 组无设备测试，模型可见规范目录、Stop 后 mutation 审计与 GUI breakpoint 域迁移已完成。下一批应推进 GUI scan/symbol、隐藏 alias 删除以及 IPC/MCP 收敛。
