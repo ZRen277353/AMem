@@ -3,9 +3,9 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC 和它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、尚未接入 transport 的 native IPC framing codec，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。`IpcProtocol` 只是经过测试的帧编解码基础，不等于 Named Pipe 服务可用。
 
 ## 1. 系统总览
 
@@ -47,7 +47,7 @@ Opt-in HTTP IPC :28100 ---------+
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
-| IPC | `IpcServer` | 回环 HTTP JSON 入口，方法注册和 C++ handler |
+| IPC | `IpcProtocol`, `IpcServer` | 独立 native frame codec；默认关闭的回环 HTTP JSON 入口 |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
@@ -382,9 +382,27 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 因此 `tokenLimit` 只是本地近似阈值，不是“请求一定适配当前模型”的保证。自定义 endpoint/model 还需要显式的 context 配置。
 
-## 10. 默认关闭的 legacy HTTP IPC
+## 10. IPC 迁移状态
 
-### 10.1 IPC 协议
+### 10.1 Native framing contract
+
+`ipc/IpcProtocol.*` 定义与 transport 无关的帧编解码，当前只加入独立测试目标，没有链接进 `ImGuiProject`。header 固定 24 bytes，并逐字段按 little endian 编码，不发送 C++ struct 内存：
+
+| Offset | 字段 |
+|--------|------|
+| 0 | magic `uint32`，wire bytes 为 `AMEM` |
+| 4 | major `uint16`，当前为 1 |
+| 6 | minor `uint16`，当前为 0；版本必须精确匹配 `1.0` |
+| 8 | message type `uint16` |
+| 10 | flags `uint16`，当前必须为 0 |
+| 12 | request id `uint64` |
+| 20 | payload length `uint32` |
+
+消息类型为 `Hello`、`HelloAck`、`Request`、`Response`、`Cancel` 和 `Error`。handshake 的 request id 必须为 0；request/response/cancel 必须非零；error 可为 0 或非零。request payload 硬上限为 1 MiB，其余帧为 4 MiB，调用方传入更大配置也不能抬高协议上限。decoder 在读取 payload 前验证 magic、精确版本、type、flags、id 和 length；payload 必须是合法 UTF-8。partial header/payload 返回 `NeedMoreData` 且不消费输入，一次 decode 只消费一帧。
+
+尚未实现 `\\.\pipe\AMem.NativeAgent.v1` server、当前用户 SID + SYSTEM DACL、remote-client 拒绝、连接级 handshake/capability 状态、deadline/cancel 路由、受管 handler 生命周期和 GUI approval broker。因此 native IPC 当前不可用，也没有外部 target mutation 路径。
+
+### 10.2 Legacy HTTP 协议
 
 默认构建不包含 `IpcServer.cpp`。只有 `ENABLE_LEGACY_HTTP_IPC=ON` 时，`IpcServer` 才监听 `127.0.0.1:28100` 并接受：
 
@@ -409,7 +427,7 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 请求 parser 已校验 method/path/Content-Length，并设置 1 MiB 请求上限。当前响应发送只有一次 `send()`，没有 short-write 循环。
 
-### 10.2 Python MCP 已删除
+### 10.3 Python MCP 已删除
 
 FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAgent` 删除。`tools/protocol_reference/amem_client.py` 仅是可选的 Android wire-protocol 排障脚本，不连接 GUI IPC，不参与产品构建，也不能作为新的 Agent adapter。
 
@@ -423,7 +441,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 
 内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 HTTP IPC 的 feature-gate 和结果行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
-### 10.3 当前 IPC 安全边界
+### 10.4 当前 IPC 安全边界
 
 默认关闭已移除标准构建的监听面。显式启用时，IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS；任意可访问该端口的本地客户端都能绕过内置 Agent 的写审批。因此不要新增 IPC 能力；替换或删除它之前，必须先考虑鉴权、浏览器访问和 capability。
 
@@ -441,6 +459,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 6. 工具、IPC、provider 和持久化入口都要在分配前验证不可信长度。
 7. provider streaming 成功必须有合法终止事件，partial content 不进入工具执行。
 8. socket timeout、EOF 或 partial I/O 必须 poison 当前 `DeviceSession` generation，旧连接在显式重连前不得复用。
+9. IPC header 必须逐字段编码；版本、flags、request id、UTF-8 和不可放宽的 payload 上限在 codec 边界验证。
 
 ### 尚未满足、不能假定成立的目标
 
@@ -452,6 +471,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 6. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 7. provider `maxContextTokens` 会自动限制实际请求。
 8. 内置 Agent 与临时 IPC 暴露相同能力和结果契约。
+9. Native framing codec 已经提供 Named Pipe 身份校验、handshake 状态、capability、cancel 或审批。
 
 ## 12. 扩展检查单
 
@@ -487,14 +507,15 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令；`native_agent_legacy_ipc_gate` 固定 default-off option 与 main/source compile gate。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_ipc_protocol` 的 5 组测试固定 wire bytes、message/id 规则、partial/连续帧、header 早期拒绝、request 1 MiB/其他帧 4 MiB 硬上限和 UTF-8；`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令；`native_agent_legacy_ipc_gate` 固定 default-off option 与 main/source compile gate。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
 - config/index 损坏恢复
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
-- IPC HTTP/auth/sendAll/capability
+- legacy IPC HTTP parser/auth/sendAll
+- Named Pipe ACL/remote rejection、handshake/capability、deadline/cancel、handler shutdown 和 approval invalidation
 - fake transport partial I/O、迟到响应和三端口 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐
 
