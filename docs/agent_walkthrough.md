@@ -457,13 +457,16 @@ Hello 建立后的测试调用链是：
 ```text
 handler reader -> IpcRequestSession::run()
   -> strict Request {method, params, timeout_ms?}
-  -> lifetime request-id dedupe / one-active / capability check
-  -> owned dispatch worker -> IIpcRequestDispatcher::execute(context)
+  -> lifetime request-id dedupe / one-active / IpcMethodCatalog capability
+  -> owned dispatch worker -> IpcMemServiceDispatcher
+       -> shared MemJsonTools -> IMemService(context)
   -> validated Response {ok, completion, result|error}
-Cancel/deadline/Stop -> same cooperative cancellation context
+Cancel/deadline/invalidation/Stop -> same cooperative cancellation context
 ```
 
 `timeout_ms` 默认 30 秒、最大 5 分钟，接收 Request 时转换成 server `steady_clock` absolute deadline。client 不能在 payload 中声明 capability；dispatcher registry 决定 method 需要 Observe、TargetSelection、TargetMutation 或 HostExecution。当前 handshake 只 grant Observe，所以 privileged fake methods 在 worker 前被拒绝。每个连接最多接纳 1024 个 unique request id；id 终身不复用，达到上限后返回 Error 并断开要求重连。Cancel 只接受 `{}`，不单独返回成功 ack；active request 的最终 Response 给出 completion。
+
+完整 catalog 与内置 Agent 同为 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution。`MemJsonTools` 是 AI 和 IPC 共用的参数/结果 adapter；IPC 的 12 个 Observe 调用不直接读 `AppContext` 或 socket。`IpcMemServiceDispatcher` 在构造时固定 connection/target baseline，并在执行前后及 reader 每 250 ms 复核。generation、PID、handle 或 process revision 变化会发 session-level Error、取消 active service context 并关闭该 session。privileged method 在 approval broker 落地前始终返回 `approval_required`，即使直接绕过 handshake 调 dispatcher 也不能执行。
 
 直接测试 `NamedPipeServer::start()` 时的调用链是：
 
@@ -476,7 +479,7 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前没有代码从产品运行时调用 `start()`，也没有 `MemService` method adapter、GUI enable/status、target/generation invalidation、privileged approval 或 approval broker。调试正常应用时看不到 pipe 是预期现状。
+`snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前还没有 runtime owner 把 server handler、handshake、`IpcMemServiceDispatcher` 和 request session 串起来，也没有 GUI enable/status 或 privileged approval broker；`main.cpp` 不调用 `start()`。调试正常应用时看不到 pipe 是预期现状。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -587,13 +590,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract 和 8 组 request-session 测试；新增覆盖 strict Request/Cancel schema、timeout/response bounds、persistent sequential use、duplicate/busy/count limit、server-owned capability denial、deadline/client/Stop cancellation、invalid dispatcher normalization、idle timeout 和 joined worker。连同 catalog、no-Python-MCP、legacy/native IPC gate，Debug/Release 当前各有 11 项 CTest。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog 和 5 组 MemService-dispatcher 测试。新增覆盖 session invalidation、24-name capability/target policy、12 Observe mapping、privileged double denial、retryable/error mapping 与 service context propagation。Debug/Release 当前各有 13 项 CTest。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Native IPC `MemService` adapter、target/generation invalidation、privileged approval broker 和 GUI enable/teardown 建立状态机/集成测试。
+5. 为 Native IPC runtime owner、GUI enable/status/teardown、privileged approval broker 和 target-bound approval invalidation 建立状态机/集成测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 

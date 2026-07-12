@@ -36,8 +36,8 @@ option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
 # 旧 loopback HTTP IPC 仅用于迁移验证。默认构建不编译也不监听 28100。
 option(ENABLE_LEGACY_HTTP_IPC "Enable legacy unauthenticated HTTP IPC" OFF)
 
-# 原生 Named Pipe transport 默认只编译测试。产品入口保持关闭，直到 handshake、
-# capability 和 GUI approval broker 完成。
+# 原生 Named Pipe transport 默认只编译测试。产品入口保持关闭，直到 owned
+# runtime composition、GUI status/control 和 privileged approval broker 完成。
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 
 # 生成版本信息头文件

@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport 基础已落地
+状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/Hello/request session/catalog/Observe adapter/安全 transport 基础已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成二十五个纵向切片：
+截至 2026-07-13 已完成二十六个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -41,9 +41,12 @@
 - `IpcHandshakeSession` 把首帧限制为 16 KiB `Hello` JSON，校验 identity/capability schema，精确匹配 header `1.0`，仅授予请求的 `Observe`，拒绝任何请求的 privileged capability；错误 Hello 返回 structured `Error`，unsupported version/oversized header 直接关闭，拒绝 drain 最长 1 秒。
 - `IpcRequestProtocol` 固定 strict `{method, params, timeout_ms?}`、空 object Cancel、30 秒默认/5 分钟最大 timeout、统一 completion/response envelope 和 output validation。
 - `IpcRequestSession` 在 Hello 后维持 one-active reader/worker 状态机；request id 连接内终身去重并以 1024 项封顶，dispatcher server metadata 决定 required capability，相对 timeout 固定为 absolute deadline，client Cancel/deadline/Stop 共用 cooperative cancellation，worker owned/joinable。
-- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；native IPC 有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract 和 8 组 request-session 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 11 项 CTest。
+- 原 `AgentMemTools` 实现提升为 AI/IPC 共享的 `MemJsonTools`；AI alias 保持调用面，地址/scalar/分页/parser/result 只有一份实现。
+- `IpcMethodCatalog` 与 Agent 同步固定 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution；3 None、20 Bound、1 Selection。只有 Observe 可免审批执行。
+- `IpcMemServiceDispatcher` 执行 12 个 Observe method，session baseline 绑定 connection/target，前后与 250 ms polling 复核；变化时发 session Error、取消 active context 并 join。deadline/Cancel 复用 service 原子 token；privileged direct call 在 service 前返回 `approval_required`。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog 和 5 组 MemService-dispatcher 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 13 项 CTest。
 
-尚未完成：HTTP IPC transport 的最终删除；Native IPC `MemService` method adapter、GUI enable/status、真实 target/generation invalidation 与 privileged approval broker；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC transport 的最终删除；Native IPC owned runtime composition、GUI enable/status 与 privileged approval broker；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、共享 JSON adapter、24-name catalog、12 Observe service adapter、session target/generation invalidation、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/session/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -479,7 +482,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] 实现有界 framed read/write、payload 分配前 header 校验、绝对 deadline 和 Stop cancellation。
 - [x] 实现 exact-version Hello、16 KiB schema 边界与 Observe-only capability negotiation。
 - [x] 实现严格 Request/Cancel DTO、bounded response、persistent one-active session、lifetime ID dedupe、deadline/client/Stop cancellation 和 server-owned capability enforcement。
-- 有外部调用需求时继续实现 GUI enable/status、`MemService` method adapter、target/generation invalidation 和 privileged approval broker。
+- [x] 固定完整 24-name capability/target catalog，共享 `MemJsonTools`，接入 12 Observe `MemService` method，并使 connection/target baseline 变化失效。
+- 有外部调用需求时继续实现 owned runtime composition、GUI enable/status 和 privileged approval broker。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
@@ -629,4 +633,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第二十五批固定 Request contract 与 persistent session。`IpcRequestProtocol` 严格解析 `{method, params, timeout_ms?}`，拒绝 client capability/unknown fields，限制 method/timeout，并验证 Cancel、completion/result/error 与 response size。`IpcRequestSession` 使用 caller reader + owned serial worker，同一连接 one-active、1024 unique-id lifetime bound；server dispatcher metadata 在执行前拒绝 unknown/privileged method，relative timeout 变为 absolute deadline，client Cancel/deadline/Stop 发同一 cooperative token，invalid/duplicate/busy/count limit 都有 stable Error。6 组 contract 与 8 组 session 测试落地；Debug/Release 完整 11/11、session 各连续 50 次、fresh `ENABLE_NATIVE_IPC=ON` 静态库编译通过。产品仍无 start 路径或真实业务 dispatch。
 
-二十五个切片已落地。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport 与 GUI breakpoint/symbol/scan 迁移已完成。下一批应实现只读 `MemService` adapter 与 method catalog，并在连接/target generation 变化时使外部 session 状态失效；在 GUI approval broker 完成前仍不得 grant privileged capability 或建立 product start 路径。
+第二十六批接入共享 catalog 与 Observe service adapter。原 `AgentMemTools.cpp` 提升为 `mem/MemJsonTools.cpp`，AI type alias 保持兼容，IPC 不再复制 23 个工具的 parser/result。`IpcMethodCatalog` 由 CTest 与 Agent 的 24-name 集合对齐，显式固定 12/1/9/2 capability 和 3/20/1 target policy。`IpcMemServiceDispatcher` 只执行 12 Observe，privileged direct call 返回 `approval_required`；dispatcher baseline 捕获 connection/target，reader 250 ms polling、request 前后和 service 自身三层复核，变化时以 `SessionInvalidated` 取消并 join。该 polling 还发现并修复了早期 wake 被误判为 request deadline 的竞态。新增 4 组 catalog、5 组 dispatcher 和第 9 组 session 测试；Debug/Release 完整 13/13、session 各连续 50 次、fresh opt-in 编译通过。
+
+二十六个切片已落地。模型可见规范目录、共享 JSON adapter、完整 IPC catalog、12 Observe service dispatch、session generation invalidation、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭与 native transport/session 基础均已完成。下一批应建立 compile-only owned runtime，把 server handler -> handshake -> dispatcher -> request session 完整装配并暴露线程安全 status；在 GUI approval broker 完成前仍不得 grant privileged capability 或建立 product start 路径。

@@ -13,7 +13,7 @@ Read the relevant documents before changing `gui/ai/`, `ipc/`, `tools/protocol_r
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android server over sockets and provides memory scanning, memory read/write, hardware breakpoints, a hex viewer, value freezing, ELF symbols, and Lua scripting. Dear ImGui (docking branch) is rendered through DirectX 12.
 
-The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics. Native framing, bounded pipe I/O, an Observe-only Hello handshake, a strict request/session state machine, and secured transport now exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, `MemService` dispatch/approval, or supported external Agent adapter yet.
+The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics. Native framing, secured transport, strict Hello/request sessions, a complete method catalog, and 12 Observe `MemService` adapters now exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime composition/start, GUI status, privileged approval, or supported external Agent adapter yet.
 
 Language: C++17 for the app. Platform: Windows 10/11 x64. The optional protocol probe in `tools/protocol_reference/` uses Python's standard library but is not a build or runtime dependency.
 
@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 5 protocol, 5 transport, 7 framed-I/O, 8 handshake, 6 request-contract, and 8 request-session groups. They cover early header validation, exact/fragmented I/O, immutable limits, UTF-8, DACL/name ownership, Hello negotiation, strict request/cancel JSON, lifetime request-id deduplication, server-owned capability enforcement, deadline/client/Stop cancellation, and joined dispatch shutdown. Eleven CTests include those six native IPC binaries plus catalog, no-Python-MCP, legacy/native IPC gates, and the service suite. Provider, native `MemService` dispatch/approval, opt-in legacy IPC, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 5 protocol, 5 transport, 7 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, and 5 `MemService` dispatcher groups. They cover framing/transport, Hello, strict JSON, lifetime request ids, capability/target policies, Observe dispatch, error normalization, connection/target invalidation, deadline/client/Stop cancellation, and joined shutdown. Thirteen CTests include those eight native IPC binaries plus the service suite and four static gates. Provider, native runtime/GUI/privileged approval, opt-in legacy IPC, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -172,7 +172,7 @@ ChatWindow
 - `AgentTaskExecutor` owns a bounded serial queue and one joinable worker. It fixes the absolute deadline at enqueue, propagates cancellation, calls `ToolExecutor` synchronously, and joins during shutdown.
 - `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, synchronous executor call, and result normalization.
 - With LuaJIT, `ToolDefinitions.cpp` has 24 executable and advertised canonical names with no hidden built-in aliases. Without `HAVE_LUAJIT`, `lua_execute` is not registered, leaving 23 executable and advertised names.
-- The native slice (`mem/`, `AgentMemTools`) owns status/driver/process/open, module/pointer/disassembly/symbol resolution, scan/symbol sessions, breakpoint mutations/hits, raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
+- The native slice (`mem/`, `MemJsonTools`, and the AI `AgentMemTools` alias) owns status/driver/process/open, module/pointer/disassembly/symbol resolution, scan/symbol sessions, breakpoint mutations/hits, raw and typed memory validation, scalar encoding, and structured results. AI and native IPC share this adapter; do not duplicate its parsers or result formatting.
 - `ChatSession::getMessagesForRequest()` is the required provider boundary; it cleans and pairs tool calls/results. Any group containing one of the 33 retired names is converted to inert assistant text with redacted arguments and recorded results, never sent as provider tool protocol or re-executed.
 
 ### Tool Safety
@@ -255,7 +255,9 @@ The current session format also stores `systemPrompt` and `tokenLimit`, even tho
 
 `IpcRequestSession` persists after `HelloAck`, permits one active request, remembers at most 1024 unique request ids for the connection lifetime, and requires reconnect after that limit. A server-owned dispatcher resolves each method's required capability; the client cannot self-assert it. The caller thread keeps reading Request/Cancel frames while one owned joinable worker dispatches, so client Cancel, absolute server deadline, pipe Stop, invalid/duplicate ids, and session shutdown have explicit outcomes. Cancellation remains cooperative; dispatchers must observe the supplied context, and a sent device operation is not thereby retracted.
 
-`ENABLE_NATIVE_IPC` only compiles and links this foundation; it defaults OFF and `main.cpp` has no native start path. `MemService` dispatch, GUI enable/status, target/generation invalidation, privileged capability approval, and the approval broker are unimplemented. Do not describe native IPC as available until those boundaries exist and are tested.
+`IpcMethodCatalog` contains the same 24 canonical names as the in-app registry: 12 Observe, 1 TargetSelection, 9 TargetMutation, and 2 HostExecution; target policies are 3 None, 20 Bound, and 1 Selection. Only the 12 Observe entries are executable without approval. `IpcMemServiceDispatcher` reuses `MemJsonTools` for those methods, captures `{connectionGeneration, target}` once per external session, checks it before/after dispatch and at 250 ms reader intervals, and propagates the same absolute deadline and atomic cancellation token into `OperationContext`. A stale baseline emits session-level Error, cancels active work, and joins. Privileged methods return `approval_required` before parsing or service invocation even if a caller constructs a dispatcher directly.
+
+`ENABLE_NATIVE_IPC` only compiles and links this foundation; it defaults OFF and `main.cpp` has no native start path. Runtime composition, GUI enable/status, privileged capability grants, and the approval broker are unimplemented. Do not describe native IPC as available until those boundaries exist and are tested.
 
 ### Legacy HTTP Server (`ipc/IpcServer.*`)
 
@@ -325,8 +327,8 @@ The only in-app Lua name is `lua_execute`, registered only with `HAVE_LUAJIT`; r
 16. Keep a generated capability matrix for in-app tools, temporary IPC methods, and feature gates.
 17. Reserve provider context for tool schemas and output; do not rely only on UTF-8 bytes/4.
 18. Encode IPC headers field-by-field; keep version, flags, request-id, UTF-8, and immutable payload-limit validation at the codec boundary.
-19. Keep native IPC compile-only and default-off until `MemService` dispatch, privileged capability approval, GUI status, and target/generation invalidation are complete; handlers and dispatch workers stay owned and joinable.
-20. Validate native frame headers before allocation; handshake grants only Observe, request capabilities come from server metadata, request ids are lifetime-deduplicated, and cancellation remains cooperative.
+19. Keep native IPC compile-only and default-off until runtime composition, privileged capability approval, and GUI status/control are complete; handlers and dispatch workers stay owned and joinable.
+20. Validate native frame headers before allocation; handshake grants only Observe, request capabilities/target policy come from the shared catalog, session baselines are generation-bound, and cancellation remains cooperative.
 
 ## Branches
 
