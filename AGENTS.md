@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. `native_socket_client_transport` adds 4 groups for the system Winsock adapter, partial send/receive, timeout/EOF poisoning, and late-byte isolation across reconnect generations. Seventeen CTests include those twelve runtime/service binaries plus the socket suite and four static gates. Provider, live GUI approval clicks, three-port lifecycle stress, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Socket coverage adds 4 client-transport groups and 6 multi-port manager groups for system Winsock loopback, partial I/O, timeout/EOF poisoning, all-port rollback, request/disconnect exclusion, and reconnect generation isolation. Eighteen CTests include these fourteen runtime/service suites plus four static gates. Provider, live GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -121,6 +121,7 @@ GUI, in-app Agent, and IPC all share this object. Each in-app Agent run captures
 ## Socket Communication
 
 - `client.hpp` wraps Winsock send/receive behind `IWindowsSocketOps`; production uses `SystemWindowsSocketOps`, while deterministic tests inject scripted partial I/O and failures.
+- `MultiPortClientManager` owns MAIN/DEBUG/ERROR clients, the shared `DeviceSession` lifecycle transition, all-port rollback, target-reset callback, poison propagation, and explicit reconnect. `WinSocketClientMgr` delegates connection ownership to it and retains protocol locks/epochs.
 - `WinSocketClientMgr` owns `PORT_MAIN`, `PORT_DEBUG`, and `PORT_ERROR`, each with a request-response mutex and a recursive high-level transaction gate.
 - Commands are split across `ProcessCommands.cpp`, `MemoryCommands.cpp`, `ScanCommands.cpp`, `BreakpointCommands.cpp`, `FreezeCommands.cpp`, and `SymbolCommands.cpp`.
 - Prefer `SocketCommand::execute`, `executeNoHandle`, or `executeWithResult`. These handle the shared connection lease, generation checks, process handle setup, and per-port locking.
@@ -146,7 +147,9 @@ Validate every untrusted count, string length, and byte size before allocating o
 
 `DeviceSession` gives commands a shared request lease and connect/disconnect/reconnect an exclusive lifecycle lease. `WSAETIMEDOUT`, EOF, and partial I/O poison the connection, advance its generation, close the failed client, and reject reuse until explicit reconnect. The old pending-data drain recovery path has been removed. Do not add direct `Connect()`/`Close()` calls or bypass the lifecycle gate; process handles and target snapshots remain generation-bound.
 
-`native_socket_client_transport` proves that partial send/receive offsets are preserved, timeout/EOF closes and poisons the failed stream, an in-flight lease becomes stale, and late bytes queued on the old endpoint cannot enter the explicitly reconnected generation. It does not replace real three-port concurrency or Android-device smoke tests.
+`native_socket_client_transport` proves that partial send/receive offsets are preserved, timeout/EOF closes and poisons the failed stream, an in-flight lease becomes stale, and late bytes queued on the old endpoint cannot enter the explicitly reconnected generation. This is the client-level boundary; the companion manager suite covers three-port ownership, while Android-device behavior remains a smoke-test requirement.
+
+`native_multi_port_client_manager` runs the production manager against both scripted failures and a real three-stream Winsock loopback. It covers MAIN/DEBUG/ERROR connect rollback, single-port poison, full reconnect, active-request exclusion, and repeated fresh endpoint generations. Android protocol and remote-state restoration still require device smoke tests.
 
 ## In-App AI Chat (`gui/ai/`)
 

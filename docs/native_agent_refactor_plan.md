@@ -10,11 +10,12 @@
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成三十八个纵向切片：
+截至 2026-07-13 已完成三十九个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
 - `WindowsSocketClient` 通过 `IWindowsSocketOps` 保留默认 Winsock adapter 并提供确定性故障注入；4 组测试覆盖真实 loopback、partial send/receive、timeout/EOF poison、旧 lease 失效和迟到字节的 reconnect generation 隔离。
+- `MultiPortClientManager` 在一个 exclusive lifecycle lease 内持有 MAIN/DEBUG/ERROR client、目标清理回调、失败回滚和显式重连；6 组测试覆盖真实三连接 loopback、活动 request 排斥、单端口 poison、全端口替换和重复 generation。
 - `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
 - `status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/symbol/breakpoint、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
 - raw write 保留 request-started/response-received/written-byte 状态，区分发送前取消、`completion_unknown`、部分写和 deadline/cancel 后确认完成。
@@ -56,9 +57,9 @@
 - `process_open` 在 mutex 保护下执行 controlled selection；只有 adapter 返回 snapshot、当前 service snapshot 与 grant generation/旧 baseline 全部一致时才推进 external session baseline。
 - Native IPC completion 新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，保留 deadline 后设备已确认完成的成功回执。
 - security audit schema 2 在同一有界 JSONL 中区分 `approval_transition` 与 `execution_outcome`；outcome 只含 authorized/observed target、success、completion 与 bounded error code，schema 1 继续可加载。post-effect 写盘失败进入 GUI health，但不覆盖真实设备回执。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket transport 另有 4 组。共 17 项 CTest，Debug/Release 全部通过；socket transport 各连续 100 次通过，fresh AI-off/AI-on 产品完整链接均通过。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket client 有 4 组，multi-port manager 有 6 组。共 18 项 CTest，Debug/Release 全部通过；两个 socket suite 各连续 100 次通过，fresh AI-off/AI-on 产品完整链接均通过。
 
-尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；三端口 manager 并发 connect/disconnect、单端口 poison 与真实 reconnect 压力。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 已完成。A-01、A-06、A-14、A-17、A-19 已关闭；A-20 仍部分修复。
+尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；真实 Android 三端口 timeout/reconnect 与远端状态恢复。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 已完成。A-01、A-06、A-14、A-17、A-19、A-20 已关闭。
 
 ## 1. 结论
 
@@ -551,7 +552,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - target：审批期间切进程、断线重连、handle 相同但 revision/generation 不同。
 - executor：排队取消、运行中取消、timeout、shutdown join、晚到结果。
 - service：scan/symbol 复合操作不被其他 caller 插入，错误不会留下半更新本地状态。
-- connection：partial send/receive、timeout/EOF poison、重连 generation 已覆盖；三端口并发 disconnect/reconnect 仍待补。
+- connection：partial send/receive、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和重连 generation 已覆盖；Android 远端状态恢复仍待设备验证。
 - provider：完整/截断/重复终止/malformed SSE。
 - persistence：损坏 JSON、字段类型错误、临时文件替换失败、旧会话迁移。
 - Native IPC：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
@@ -682,4 +683,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第三十八批加入可注入 socket transport 与迟到字节回归。`WindowsSocketClient` 的 public send/receive/connect 形态保持不变，底层系统调用由默认 `SystemWindowsSocketOps` 或测试注入的 `IWindowsSocketOps` 提供。新增 `native_socket_client_transport` 的 4 组测试：真实 Winsock loopback 往返；partial send 继续剩余 offset 后 `WSAETIMEDOUT` poison；partial receive 后 EOF poison；旧 endpoint partial response + timeout 后 generation 失效，显式重连只读取新 endpoint，迟到旧字节仍留在已关闭 endpoint。Debug/Release 各 17/17 CTest，transport 各 100/100。隔离 `ENABLE_NATIVE_IPC=ON` full product link：AI-off `29478400` bytes / `F468391129BE4149209A2FE07B79A73FC2B4D865E12E9BEEC20D77625509B973`，AI-on `35727360` bytes / `B121C81942CDE51A4C2AD5FD4A0773F3B0B17B12B5061445621DF371F7CB8A85`。
 
-三十八个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并补三端口 manager 的并发 connect/disconnect、单端口 poison 与真实 reconnect 压力。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
+第三十九批提取并验证三端口 lifecycle owner。新增 `MultiPortClientManager`，在一个 `DeviceSession` exclusive lease 内关闭旧 MAIN/DEBUG/ERROR、执行目标清理回调、顺序连接三端口并全量回滚失败；任一 client poison generation 后，新 request 全局拒绝，显式 reconnect 替换全部旧 endpoint。`WinSocketClientMgr` 改为委托该 owner，保留端口 mutex/transaction gate/epoch 和日志。新增 6 组 `native_multi_port_client_manager`：真实 Winsock 三连接 loopback、正常 connect/disconnect、MAIN/DEBUG/ERROR 逐端口失败回滚、单端口 timeout poison + 全端口重连、活动 request 阻塞 disconnect、50 轮 endpoint/generation 隔离。Debug/Release 各 18/18 CTest，socket 与 manager 各 100/100。隔离 `ENABLE_NATIVE_IPC=ON` full product link：AI-off `29480448` bytes / `ACA217055C4A9AD507030BE9D17ADE20846207B6AB5B4D62F4A0E10FFB98A7D3`，AI-on `35729920` bytes / `ED7AAEA0FEEE35C469EB070044AC2B0C48FF39FCB1C14EF75FF1E5BAAC52FF21`。
+
+三十九个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并记录真实设备三端口 timeout/reconnect 后的 driver/process/scan/breakpoint 状态。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
