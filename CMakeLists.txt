@@ -314,6 +314,7 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
         ipc/IpcRequestSession.cpp
         ipc/NamedPipeServer.cpp
         ipc/NativePipeSecurity.cpp
+        ipc/NativeAgentRuntime.cpp
     )
     target_include_directories(NativeIpcTransport PUBLIC
         ${CMAKE_SOURCE_DIR}
@@ -579,6 +580,27 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_ipc_transport COMMAND NativeIpcTransportTests)
+
+    add_executable(NativeAgentRuntimeTests
+        tests/NativeAgentRuntimeTests.cpp
+        mem/Address.cpp
+        mem/ValueCodec.cpp
+    )
+    target_include_directories(NativeAgentRuntimeTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(NativeAgentRuntimeTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeAgentRuntimeTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeAgentRuntimeTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeAgentRuntimeTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_agent_runtime COMMAND NativeAgentRuntimeTests)
 
     add_executable(NativeIpcProtocolTests
         tests/IpcProtocolTests.cpp
