@@ -7,31 +7,23 @@
 
 // ==================== WinSocketClientMgr 实现 ====================
 
-WinSocketClientMgr::WinSocketClientMgr() {
-  auto poison = [] { DeviceSession::GetInstance().MarkPoisoned(); };
-  m_main_client.SetPoisonCallback(poison);
-  m_debug_client.SetPoisonCallback(poison);
-  m_error_client.SetPoisonCallback(std::move(poison));
-}
+WinSocketClientMgr::WinSocketClientMgr()
+    : m_connection(DeviceSession::GetInstance(),
+                   GetSystemWindowsSocketOps(),
+                   GetSystemWindowsSocketOps(),
+                   GetSystemWindowsSocketOps(),
+                   [] { AppContext::Get().clearProcessForDisconnect(); }) {}
 
-WinSocketClientMgr::~WinSocketClientMgr() {
-  auto& session = DeviceSession::GetInstance();
-  auto lifecycle = session.AcquireLifecycle();
-  session.Disconnect();
-  CloseClients();
-}
-
-void WinSocketClientMgr::CloseClients() {
-  m_main_client.Close();
-  m_debug_client.Close();
-  m_error_client.Close();
-}
+WinSocketClientMgr::~WinSocketClientMgr() = default;
 
 WindowsSocketClient *WinSocketClientMgr::GetClient(PortType type) {
   switch (type) {
-  case PORT_MAIN:  return &m_main_client;
-  case PORT_DEBUG: return &m_debug_client;
-  case PORT_ERROR: return &m_error_client;
+  case PORT_MAIN:
+    return m_connection.GetClient(ManagedSocketPort::Main);
+  case PORT_DEBUG:
+    return m_connection.GetClient(ManagedSocketPort::Debug);
+  case PORT_ERROR:
+    return m_connection.GetClient(ManagedSocketPort::Error);
   default:         return nullptr;
   }
 }
@@ -56,52 +48,34 @@ std::recursive_timed_mutex *WinSocketClientMgr::GetTransactionMutex(
 }
 
 bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port) {
-  auto& session = DeviceSession::GetInstance();
-  auto lifecycle = session.AcquireLifecycle();
-  session.BeginConnect();
-  CloseClients();
-  AppContext::Get().clearProcessForDisconnect();
-
   std::cout << "[MultiPort] Connecting to server..." << std::endl;
   std::cout << "  Main:  " << host << ":" << Port << std::endl;
 
-  if (!m_main_client.Connect(host, Port)) {
+  const MultiPortConnectFailure failure = m_connection.Connect(host, Port);
+  if (failure == MultiPortConnectFailure::Main) {
     std::cerr << "[MultiPort] Failed to connect MAIN port" << std::endl;
-    session.FinishConnect(false);
     return false;
   }
-  if (!m_debug_client.Connect(host, Port)) {
+  if (failure == MultiPortConnectFailure::Debug) {
     std::cerr << "[MultiPort] Failed to connect DEBUG port" << std::endl;
-    CloseClients();
-    session.FinishConnect(false);
     return false;
   }
-  if (!m_error_client.Connect(host, Port)) {
+  if (failure == MultiPortConnectFailure::Error) {
     std::cerr << "[MultiPort] Failed to connect ERROR port" << std::endl;
-    CloseClients();
-    session.FinishConnect(false);
     return false;
   }
 
-  session.FinishConnect(true);
   std::cout << "[MultiPort] All ports connected successfully!" << std::endl;
   return true;
 }
 
 void WinSocketClientMgr::DisconnectMultiPort() {
-  auto& session = DeviceSession::GetInstance();
-  auto lifecycle = session.AcquireLifecycle();
-  const bool hadSession =
-      session.GetState() != DeviceSession::State::Disconnected;
-  session.Disconnect();
-  AppContext::Get().clearProcessForDisconnect();
-  CloseClients();
-  if (hadSession)
+  if (m_connection.Disconnect())
     std::cout << "[MultiPort] All ports disconnected" << std::endl;
 }
 
 bool WinSocketClientMgr::IsMultiPortConnected() const {
-  return DeviceSession::GetInstance().IsConnected();
+  return m_connection.IsConnected();
 }
 
 // ==================== 进程管理 ====================

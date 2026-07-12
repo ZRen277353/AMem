@@ -242,6 +242,7 @@ endif()
 
 set(SOCKET_SOURCES
     socket/DeviceSession.cpp
+    socket/MultiPortClientManager.cpp
     socket/client_singleton.cpp
     socket/ProcessCommands.cpp
     socket/MemoryCommands.cpp
@@ -713,6 +714,28 @@ if(BUILD_TESTING)
     add_test(
         NAME native_socket_client_transport
         COMMAND NativeSocketClientTransportTests
+    )
+
+    add_executable(NativeMultiPortClientManagerTests
+        tests/MultiPortClientManagerTests.cpp
+        socket/DeviceSession.cpp
+        socket/MultiPortClientManager.cpp
+    )
+    target_include_directories(NativeMultiPortClientManagerTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    target_link_libraries(NativeMultiPortClientManagerTests PRIVATE ws2_32)
+    if(MSVC)
+        target_compile_options(NativeMultiPortClientManagerTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeMultiPortClientManagerTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeMultiPortClientManagerTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(
+        NAME native_multi_port_client_manager
+        COMMAND NativeMultiPortClientManagerTests
     )
 
     add_test(

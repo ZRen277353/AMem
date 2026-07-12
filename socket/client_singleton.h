@@ -6,8 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "DeviceSession.h"
-#include "client.hpp"
+#include "MultiPortClientManager.h"
 
 
 // 端口类型枚举（与服务端保持一致）
@@ -23,10 +22,7 @@ enum PortType {
  */
 class WinSocketClientMgr {
 private:
-  // 三个端口的客户端
-  WindowsSocketClient m_main_client;
-  WindowsSocketClient m_debug_client;
-  WindowsSocketClient m_error_client;
+  MultiPortClientManager m_connection;
 
   // 每个端口的互斥锁
   std::mutex m_main_mutex;
@@ -49,8 +45,6 @@ private:
   // 私有构造函数（单例模式）
   WinSocketClientMgr();
   ~WinSocketClientMgr();
-
-  void CloseClients();
 
 public:
   // 获取单例实例
