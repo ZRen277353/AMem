@@ -442,13 +442,24 @@ read -> parse temporary -> validate all fields -> commit memory
 
 ## 9. IPC 迁移路径
 
-### 9.1 Native framing codec
+### 9.1 Native framing 与 transport 基础
 
-`ipc/IpcProtocol.*` 是 transport-independent codec，当前只被 `NativeIpcProtocolTests` 使用，没有链接进应用，也没有 accept/handler thread。固定 24-byte header 按 little endian 逐字段编码 `AMEM` magic、精确 `1.0` 版本、message type、零 flags、request id 和 payload length。
+`ipc/IpcProtocol.*` 是 transport-independent codec。默认测试构建单独验证它；`ENABLE_NATIVE_IPC=ON` 时 codec 和 native transport 会编入应用，但 `main.cpp` 仍无 start 路径。固定 24-byte header 按 little endian 逐字段编码 `AMEM` magic、精确 `1.0` 版本、message type、零 flags、request id 和 payload length。
 
 decoder 先用完整 header 验证版本/type/flags/id/长度，再等待或复制 payload。request 最大 1 MiB，其他帧最大 4 MiB；更大的调用方 limit 不能抬高硬上限。payload 只接受合法 UTF-8。header 或 payload 不完整时返回 `NeedMoreData`、`consumed=0`；连续帧只消费第一帧。当前 `Hello`/`HelloAck` 仅定义 wire type 和 id 规则，尚没有连接级 handshake 状态机。
 
-没有代码创建 `\\.\pipe\AMem.NativeAgent.v1`，也没有 SID DACL、remote-client 拒绝、capability grant、deadline/cancel 路由、managed handler 或 GUI approval broker。调试 native IPC 时若看不到 pipe 是预期现状，不能把 codec 测试通过解释为 server 已启用。
+直接测试 `NamedPipeServer::start()` 时的调用链是：
+
+```text
+NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
+  -> CreateNamedPipeW(\\.\pipe\AMem.NativeAgent.v1,
+       FIRST_PIPE_INSTANCE, REJECT_REMOTE_CLIENTS, max instances = 1)
+  -> owned thread: overlapped ConnectNamedPipe -> serial handler
+  -> DisconnectNamedPipe -> reuse the same server handle
+Stop -> signal stop event -> CancelIoEx(active pipe) -> join
+```
+
+`snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。handler 与 accept 共用同一 owned thread，必须响应 stop event 并使用可取消 I/O。当前没有代码从产品运行时调用 `start()`，server 也不读写 `IpcProtocol` frame；handshake/capability、request deadline/cancel、GUI enable/status 和 approval broker 均未实现。调试正常应用时看不到 pipe 是预期现状。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -555,18 +566,19 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 | 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
 | IPC client 返回无效 JSON | IPC 单次 `send()` 是否 short write、响应是否过大 |
 | IPC 与内置地址不同 | 无前缀字符串的 reject/decimal 差异，统一改成 `0x...` |
-| 退出偶发崩溃 | HTTP callback 和 IPC handler 两类 detached task；工具 worker 应已 join |
+| 退出偶发崩溃 | HTTP callback 和 legacy IPC handler 两类 detached task；工具 worker 应已 join，native pipe 当前未启动且测试路径会 join |
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_ipc_protocol` 的 5 组测试固定 wire bytes、message/id 规则、partial/连续帧、header 早期拒绝、request 1 MiB/其他帧 4 MiB 硬上限和 UTF-8。`native_agent_catalog` 校验 canonical 名称与 catalog 依赖边界，`native_agent_no_python_mcp` 校验已删除的运行时和配置不会回归，`native_agent_legacy_ipc_gate` 校验 HTTP server 默认关闭且 opt-in 路径仍有明确编译边界。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_ipc_protocol` 的 5 组测试固定 frame contract；`native_ipc_transport` 的 5 组测试固定 DACL/flags/name、同用户连接、单实例复用、status 和 joined stop；`native_agent_native_ipc_gate` 固定 default-off 与 no-main-start。catalog、no-Python-MCP 和 legacy IPC gate 保持原有边界。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Named Pipe ACL/remote rejection、handshake/capability、request deadline/cancel、handler shutdown 和 approval invalidation 建立 transport 测试。
-6. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
+5. 为 Named Pipe framed I/O、handshake/capability、request deadline/cancel 和 approval invalidation 建立状态机/transport 测试。
+6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
+7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 
 ## 13. 一页调用链
 

@@ -2,11 +2,11 @@
 
 审计日期：2026-07-13
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-审计范围：`gui/ai/`、`ipc/IpcProtocol.*`、`ipc/IpcServer.*`、`socket/` 中被 Agent/IPC 调用的命令层、`gui/AppContext.*`、`main.cpp`。
+审计范围：`gui/ai/`、`ipc/IpcProtocol.*`、`ipc/NamedPipeServer.*`、`ipc/NativePipeSecurity.*`、`ipc/IpcServer.*`、`socket/` 中被 Agent/IPC 调用的命令层、`gui/AppContext.*`、`main.cpp`。
 
 本文记录当前工作区中仍存在的问题，以及已经落地的修复摘要。目标架构和分阶段关闭方案见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。搜索/扫描协议自身的问题不在本文审计范围内。
 
-本次结论来自静态代码审阅、调用链核对和 native framing 无设备测试，没有连接 Android 设备，也没有执行 provider、IPC transport 或退出阶段的端到端压力测试。优先级含义：
+本次结论来自静态代码审阅、调用链核对、native framing/本机 Named Pipe transport 无设备测试，没有连接 Android 设备，也没有执行 provider、不同用户/remote IPC 或应用退出阶段的端到端压力测试。优先级含义：
 
 - **P0**：可能造成未授权调用、错误目标写入、协议串包、并发数据竞争、启动数据破坏或退出期悬空访问，应优先处理。
 - **P1**：明显影响可靠性、审计完整性、资源边界或敏感数据安全。
@@ -51,15 +51,16 @@
 - `IpcServer::HandleClient()` 接受浏览器 `OPTIONS` 预检。
 - `IpcServer::BuildHttpResponse()` 返回 `Access-Control-Allow-Origin: *`。
 - 同一入口暴露 `write_memory`、断点、扫描、`execute_lua`、进程切换等有副作用的方法。
+- Native transport 已有 protected 当前用户/SYSTEM read-write DACL、`PIPE_REJECT_REMOTE_CLIENTS` 和单实例所有权，但 `ENABLE_NATIVE_IPC` 默认 OFF、main 无启动路径，也没有 handshake/capability 或业务 dispatch。
 
 **影响**
 
-默认发行构建不再暴露该监听面。风险只在显式迁移构建中存在，但一旦启用，回环地址仍只阻止远端主机直接连接，并不阻止本机浏览器页面或其他本地进程访问。当前 CORS 配置还主动允许网页脚本读取响应；浏览器的 Private Network Access 策略不能作为服务端鉴权。
+默认发行构建不再暴露 legacy 监听面，也不创建 native pipe。legacy 风险只在显式迁移构建中存在，但一旦启用，回环地址仍只阻止远端主机直接连接，并不阻止本机浏览器页面或其他本地进程访问。当前 CORS 配置还主动允许网页脚本读取响应；浏览器的 Private Network Access 策略不能作为服务端鉴权。Native DACL/remote rejection 只建立主体边界，尚不能替代 capability 与危险操作审批。
 
 **建议**
 
 1. 保持 default-off gate，不把迁移选项暴露为普通用户设置；若继续保留 opt-in，先移除 CORS 和 `OPTIONS` 支持。
-2. 若确认需要外部自动化，按设计实现带当前用户 ACL、handshake、request id 和默认 Observe capability 的 Named Pipe，而不是恢复 Python MCP。
+2. 若确认需要外部自动化，在已落地的 ACL/remote rejection/受管 transport 上实现 framed handshake、request id/deadline/cancel 和默认 Observe capability，而不是恢复 Python MCP。
 3. 所有 target selection/mutation 与 Lua 请求进入 GUI approval broker，并绑定 target snapshot。
 4. 若没有明确外部调用方，删除整个 IPC source 和 CMake wiring。
 
@@ -133,6 +134,7 @@
 - `IpcServer::ServerThread()` 为每个客户端创建捕获 `this` 的 detached 线程。
 - `IpcServer::Stop()` 只关闭 listen socket 并 join accept 线程，不等待已接受请求。
 - `HandleClient()` 的多个响应路径只调用一次 `::send()`，没有循环发送剩余字节，也没有设置 `SO_SNDTIMEO`。
+- 新 `NamedPipeServer` 不使用 detached handler：accept 与串行 handler 在一个 owned thread 上，stop event + `CancelIoEx` 后 join；但它当前没有产品 start 路径，也未替代 legacy HTTP。
 
 **影响**
 
@@ -394,13 +396,14 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_ipc_protocol` 的 5 组测试覆盖固定小端 wire bytes、message/request-id 规则、partial/连续帧、header 早期拒绝、request 1 MiB/其他帧 4 MiB 不可放宽上限和 UTF-8；`native_agent_catalog` 精确验证 24 个 canonical 名称及 catalog 的 include 边界；`native_agent_no_python_mcp` 固定已删除的 runtime/config 和产品文档边界；`native_agent_legacy_ipc_gate` 固定 HTTP server 的 default-off compile/start gate。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_ipc_protocol` 的 5 组测试覆盖 frame contract；`native_ipc_transport` 的 5 组 Windows 测试覆盖 DACL 主体/权限、remote/name flags、同用户连接、单实例复用、status、stop cancellation 与 join；`native_agent_native_ipc_gate` 固定 compile default-off/no-main-start。catalog、no-Python-MCP 和 legacy IPC gate 保持原边界。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
 - config/index 损坏与错误字段类型。
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
-- Legacy IPC HTTP parser/partial send，以及 Named Pipe ACL、remote rejection、handshake、capability、cancel 和 handler lifecycle。
+- Legacy IPC HTTP parser/partial send，以及 Named Pipe framed I/O、handshake、capability、deadline/cancel 和 approval lifecycle。
+- 不同 Windows 用户/session 与真实 remote client 的 native transport 负向测试。
 - fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
 - C++ Agent/IPC capability、结果和 feature gate 对齐。
 
@@ -415,6 +418,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
 | HTTP IPC 默认监听未鉴权端口 | `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；标准构建不编译 `IpcServer.cpp`，main 的 include/start/stop 也受 compile gate 约束 |
 | Native IPC wire contract 未固定 | `IpcProtocol` 使用显式 24-byte little-endian header、精确版本与 request-id 规则、UTF-8、request 1 MiB 与其他帧 4 MiB 硬上限；partial frame 不消费输入并有独立 CTest |
+| Native IPC 身份与 handler 生命周期没有基础边界 | protected DACL 只允许当前进程用户和 SYSTEM read/write；拒绝 remote client，单实例 handle 持续占有名称；accept/handler 同属一个 joinable thread，stop event + `CancelIoEx` 后 join；产品仍不启动 |
 | Agent breakpoint 直连 socket 且回执/本地 tracker 分离 | 五个规范工具经 `MemService` 绑定 target；mutation 区分未发送/拒绝/完成未知/确认完成，设备确认与 cleanup tracker 在同一 transaction 更新，hits 使用有界最新批次且不伪造 cursor |
 | Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
@@ -438,16 +442,16 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - `SocketIoTimeout` 现在消费 task absolute deadline，但不提供事务回滚或撤回已经发送的写命令。
 - `AgentTaskExecutor::shutdown()` 会 join；`HttpClient` 的 3 秒 bounded wait 仍不是 HTTP worker 已全部退出的证明。
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
-- IPC 绑定 loopback 可缩小暴露面，但在无鉴权且允许 CORS 时不是完整安全边界；native framing codec 本身也不提供身份或 capability。
+- IPC 绑定 loopback 可缩小暴露面，但在无鉴权且允许 CORS 时不是完整安全边界；native DACL/remote rejection 也只提供身份边界，不提供 capability 或审批。
 - `installTempFile()` 已用于 `ApiKeyStore`、`AiSettings`、`SessionManager`，但 `ChatSession` 仍有独立且较弱的替换路径。
 - `DeviceSession` 已删除待处理字节清理恢复路径并 poison 失败连接，但尚缺 fake transport 对迟到字节/partial I/O 的完整证明。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
 ## 建议修复顺序
 
-1. 在保持 HTTP IPC default-off 的前提下，基于已固定 framing contract 决定彻底删除 IPC 或继续实现受限 Named Pipe；下一步至少要闭合 ACL/remote rejection、handshake/capability、cancel、受管 handler 和 approval broker，不能默认开启旧端口。
+1. 在保持 HTTP IPC 与 native runtime default-off 的前提下，基于已固定 framing 和安全 transport 实现 framed session、handshake/capability、deadline/cancel、GUI 状态与 approval broker；完成前不能建立产品 start 路径，也不能默认开启旧端口。
 2. 为已落地的 poison/lifecycle gate 增加 fake transport 与真实设备压力证明。
-3. 将 HTTP 和 IPC handler 也改为可管理、可 join 的任务生命周期（工具 worker 已完成）。
+3. 删除 legacy HTTP detached handler；native transport 已具备 join 基础，后续 frame/session handler 必须保持同一受管生命周期。
 4. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。
 5. 校验 provider 流式终止事件，并建立无需设备的 parser/config/state-machine 回归测试。
 6. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。

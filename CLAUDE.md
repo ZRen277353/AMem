@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android device over Socket and provides memory scanning, hardware breakpoint debugging, a hex memory viewer, value freezing, ELF symbol resolution, and Lua scripting. The UI is built with Dear ImGui (docking branch) rendered via DirectX 12.
 
-On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores that unsafe endpoint only for migration diagnostics. `ipc/IpcProtocol.*` provides a tested native framing codec, but no Named Pipe server or supported external Agent adapter exists yet.
+On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores that unsafe endpoint only for migration diagnostics. Native framing and a secured Named Pipe transport foundation exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, framed session, or supported external Agent adapter yet.
 
 The `NativeAgent` branch is migrating all front ends to one native `MemService` and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
 
@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_ipc_protocol` covers native frame bytes, request-id rules, partial input, immutable payload limits, and UTF-8 validation. `native_agent_catalog` verifies the 24 canonical names and include boundary; `native_agent_no_python_mcp` guards the removed runtime/config boundary; `native_agent_legacy_ipc_gate` guards the default-off HTTP endpoint. Provider, Named Pipe transport/security/approval, opt-in legacy IPC, real transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_ipc_protocol` covers frame validation; `native_ipc_transport` has five Windows groups for DACL contents, remote/name flags, local connection, single-instance reuse, status, cancellation, and joined shutdown. `native_agent_native_ipc_gate` keeps compilation opt-in and main startup absent; the catalog, no-Python-MCP, and legacy IPC gates retain their boundaries. Provider, native handshake/capability/approval, opt-in legacy IPC, real Android transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ## Dependencies
 
@@ -41,9 +41,9 @@ Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly i
 - **Optional**: Keystone — assembly-to-machine-code. Static `/MT`: `vcpkg install keystone:x64-windows-static` (or set `keystone_ROOT`). Linked into the exe.
 - **Static single-exe distribution**: the whole app links `/MT` (static CRT via `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` + CMP0091) plus static capstone/keystone/OpenSSL/LuaJIT. **This is a hard constraint**: the prebuilt `lua51.lib` and official `capstone.lib` are both `/MT` (LIBCMT), so the exe must be `/MT` to avoid CRT conflicts. Result: `bin/ImGuiProject.exe` (~34MB) is fully self-contained — no capstone/keystone/OpenSSL DLLs, no VC runtime DLLs, no VC++ Redistributable needed; only Windows 10/11 x64 system DLLs. Copy the exe alone to another machine and it runs.
 
-CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_LEGACY_HTTP_IPC` (default OFF), `LUAJIT_STATIC` (default ON).
+CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_LEGACY_HTTP_IPC` (default OFF), `ENABLE_NATIVE_IPC` (default OFF, compile-only), `LUAJIT_STATIC` (default ON).
 
-Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_LEGACY_HTTP_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
+Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_LEGACY_HTTP_IPC`, `HAVE_NATIVE_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
 
 ## Architecture
 
@@ -120,11 +120,13 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
   - Legacy migrations run once on startup: `ai_config.dat`→`ai_config.json`, `ai_session.json`→`ai_sessions/`.
 - **Provider trust**: `OpenAIProvider` currently defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS alone does not establish that the recipient is the provider the user intended.
 
-### Native IPC framing (`ipc/IpcProtocol.*`)
+### Native IPC foundation (`ipc/IpcProtocol.*`, `ipc/NamedPipeServer.*`)
 
 The transport-independent codec uses an explicit 24-byte little-endian header: `AMEM` magic, exact protocol version `1.0`, message type, zero flags, request id, and payload length. The message types are `Hello`, `HelloAck`, `Request`, `Response`, `Cancel`, and `Error`; handshake ids are zero and request/response/cancel ids are non-zero. Request payloads have an immutable 1 MiB ceiling, all other frames have a 4 MiB ceiling, payloads must be valid UTF-8, and incomplete frames do not consume input.
 
-This is framing only. It is not linked into `ImGuiProject`; Named Pipe creation, current-user/SYSTEM ACLs, remote-client rejection, handshake state, capability grants, deadlines, cancel routing, managed handler shutdown, and GUI approval are not implemented.
+`NativePipeSecurity` creates a protected DACL granting read/write only to the current process user SID and SYSTEM. `NamedPipeServer` creates one reusable `\\.\pipe\AMem.NativeAgent.v1` instance with remote clients rejected and first-instance ownership. Accept and the serial handler share one owned thread; stop signals an event, calls `CancelIoEx`, and joins. Status snapshots expose lifecycle state, accepted count, pipe name, and error.
+
+This remains compile-only infrastructure. `ENABLE_NATIVE_IPC` defaults OFF and `main.cpp` does not start it. There is no framed read/write loop, handshake/capability state, request deadline/cancel routing, GUI enable/status, or approval broker.
 
 ### Legacy IPC server (`ipc/IpcServer.cpp`)
 

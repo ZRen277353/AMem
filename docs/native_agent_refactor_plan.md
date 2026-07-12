@@ -1,16 +1,16 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate 与 native IPC framing contract 已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing 与安全 transport 基础已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
 最后更新：2026-07-13
 
-本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；若继续 Named Pipe 路线，其 framing contract 已先行固定。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；若继续 Named Pipe 路线，其 framing 与安全 transport 基础已先行固定，但产品尚不启动。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成二十二个纵向切片：
+截至 2026-07-13 已完成二十三个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -35,10 +35,11 @@
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
 - `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；标准构建不加入 `IpcServer.cpp`，`main.cpp` 的 include/start/stop 受 `HAVE_LEGACY_HTTP_IPC` 约束。显式 opt-in 会打印未鉴权端口警告，供迁移验证。
-- `IpcProtocol` 固定 24-byte little-endian header、精确 `1.0` 版本、六种 message type 与 request-id 规则；request payload 硬限制 1 MiB，其他帧硬限制 4 MiB，并验证 UTF-8，partial frame 不消费输入。当前只有 codec 和无设备测试，尚无 Named Pipe server。
-- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；`native_ipc_protocol` 的 5 组测试固定 framing contract，catalog、no-Python-MCP 与 legacy-IPC-gate 三项契约 CTest 固定其余边界。
+- `IpcProtocol` 固定 24-byte little-endian header、精确 `1.0` 版本、六种 message type 与 request-id 规则；request payload 硬限制 1 MiB，其他帧硬限制 4 MiB，并验证 UTF-8，partial frame 不消费输入。
+- `ENABLE_NATIVE_IPC` 默认 OFF；`NativePipeSecurity` 只允许当前进程用户 SID 与 SYSTEM read/write，`NamedPipeServer` 拒绝 remote client、固定 first/single instance 并复用同一 handle。overlapped accept 与串行 handler 共用 joinable thread，stop event + `CancelIoEx` 后 join；状态快照有 lifecycle/count/name/error。main 没有 start 路径。
+- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；protocol/transport 各 5 组，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 7 项 CTest。
 
-尚未完成：HTTP IPC transport 的最终删除/替换；Named Pipe server、ACL、remote-client 拒绝、handshake/capability、deadline/cancel、受管 handler 与 approval broker；opt-in IPC scan/symbol/breakpoint 调用迁移；以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC transport 的最终删除；Named Pipe framed I/O、handshake/capability、deadline/cancel、GUI enable/status 与 approval broker；IPC 到 `MemService` adapter；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -332,9 +333,10 @@ public:
 `NativeAgent` 不再自动启动 `127.0.0.1:28100` HTTP 服务。构建选项建议为：
 
 ```cmake
-option(ENABLE_NATIVE_IPC "Enable local Named Pipe automation" OFF)
+option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 ```
 
+- 该选项当前只把 codec/transport 编入产品，不能启动服务；运行时仍需独立的 GUI 显式开关和可见状态。
 - 没有明确外部调用方时：删除 IPC，架构停在 GUI/Agent -> `MemService`。
 - 仍需外部脚本或 IDE 自动化时：实现 Named Pipe，但它只是 `MemService` 的受限 adapter，不拥有业务逻辑。
 
@@ -469,7 +471,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 - [x] 关闭 HTTP server 的默认编译和启动。
 - [x] 固定显式小端 framing、版本/message/id/长度/UTF-8 校验和 partial decode 契约。
-- 有外部调用需求时继续实现 Named Pipe、ACL/remote rejection、handshake/capability、deadline/cancel、受管 handler 和 approval broker。
+- [x] 实现 compile-only、default-off 的单实例 Named Pipe、当前用户/SYSTEM DACL、remote rejection、受管串行 handler、stop/join 和状态快照。
+- 有外部调用需求时继续实现 framed I/O、handshake/capability、deadline/cancel、GUI enable/status、`MemService` adapter 和 approval broker。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
@@ -613,4 +616,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第二十二批固定 native IPC framing contract。`IpcProtocol` 使用显式 24-byte little-endian header，定义精确 `1.0` 版本、六种 message type、request-id/zero-flags 规则、request 1 MiB 与其他帧 4 MiB 硬上限和严格 UTF-8。decoder 在 payload 分配前拒绝错误 header，partial 输入不消费，连续输入一次只取一帧；5 组 `native_ipc_protocol` 测试固定 wire bytes 和所有边界。该切片没有实现或启用 Named Pipe server、ACL、handshake 状态机、cancel routing 或 approval broker。
 
-二十二个切片均已通过 Debug/Release 的 5 项 CTest；本批独立协议目标无警告构建。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing 与 GUI breakpoint/symbol/scan 迁移已完成。下一批需在 framing 基础上继续受限 Named Pipe transport，或明确删除 IPC。
+第二十三批加入安全 Named Pipe transport 基础。`ENABLE_NATIVE_IPC` 默认 OFF 且只控制编译，main 无 start；protected DACL 只含当前进程用户/SYSTEM read-write ACE，pipe 拒绝 remote、使用 first-instance + max-one 并在连接间复用同一 handle。overlapped accept 与 handler 串行运行在一个 owned thread，stop event + `CancelIoEx` 后 join；snapshot 暴露五态、连接数、名称和错误。5 组 `native_ipc_transport` 测试覆盖 ACL、flags/name、同用户连接、旧客户端未关闭时复用、名称独占和 shutdown；native gate 固定 default-off/no-main-start。Debug/Release 各 7/7 CTest 通过，transport 各连续 50 次无失败，独立 opt-in 配置/编译通过。
+
+二十三个切片已落地。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/安全 transport 与 GUI breakpoint/symbol/scan 迁移已完成。下一批应把 codec 接到受管 handler，先完成 Hello/capability 状态机与有界 framed I/O；在 approval broker 完成前仍不得建立产品 start 路径。

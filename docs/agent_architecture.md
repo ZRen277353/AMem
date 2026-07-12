@@ -3,9 +3,9 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、尚未接入 transport 的 native IPC framing codec，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、尚未进入产品运行时的 native IPC framing/transport 基础，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。`IpcProtocol` 只是经过测试的帧编解码基础，不等于 Named Pipe 服务可用。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。`IpcProtocol` 与 `NamedPipeServer` 已有无设备测试，但 `ENABLE_NATIVE_IPC` 默认 OFF，主程序没有 start 路径，也没有 framed session/审批，因此不等于 native IPC 可用。
 
 ## 1. 系统总览
 
@@ -47,7 +47,7 @@ Opt-in HTTP IPC :28100 ---------+
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
-| IPC | `IpcProtocol`, `IpcServer` | 独立 native frame codec；默认关闭的回环 HTTP JSON 入口 |
+| IPC | `IpcProtocol`, `NamedPipeServer`, `NativePipeSecurity`, `IpcServer` | native frame/安全 transport 基础；默认关闭的回环 HTTP JSON 入口 |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
@@ -168,7 +168,7 @@ HTTP 2xx 不等于 provider stream 完整：
 
 ## 5. 实际线程与生命周期模型
 
-内置工具执行已经收敛到一个受管 worker；HTTP 和 IPC client handler 的生命周期仍未闭环：
+内置工具执行已经收敛到一个受管 worker；legacy HTTP client handler 的生命周期仍未闭环。Native transport 基础使用一个可 join 的串行 server/handler thread，但产品当前不启动它：
 
 | 线程/任务 | 创建位置 | 所有权现状 | 主要行为 |
 |-----------|----------|------------|----------|
@@ -177,6 +177,7 @@ HTTP 2xx 不等于 provider stream 完整：
 | Agent 工具 worker | `AgentTaskExecutor` 构造 | 单个 joinable `std::thread` | 串行取队列、同步调用 `ToolExecutor`、投递 completion callback |
 | IPC accept thread | `IpcServer::Start()` | `serverThread_`，可 join | accept 客户端 |
 | IPC client handler | `IpcServer::ServerThread()` | 每连接 detached，未登记 | HTTP 解析、handler、发送响应 |
+| Native pipe server/handler | `NamedPipeServer::start()` | 单个 joinable `std::thread`；当前只由测试启动 | overlapped accept、串行 handler、stop event/`CancelIoEx`、实例复用 |
 
 ### 5.1 UI 线程边界
 
@@ -384,9 +385,9 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 ## 10. IPC 迁移状态
 
-### 10.1 Native framing contract
+### 10.1 Native framing 与 transport 基础
 
-`ipc/IpcProtocol.*` 定义与 transport 无关的帧编解码，当前只加入独立测试目标，没有链接进 `ImGuiProject`。header 固定 24 bytes，并逐字段按 little endian 编码，不发送 C++ struct 内存：
+`ipc/IpcProtocol.*` 定义与 transport 无关的帧编解码。默认测试构建独立验证它；显式 `ENABLE_NATIVE_IPC=ON` 时 codec 和 `NativeIpcTransport` 链入 `ImGuiProject`，但 `main.cpp` 不创建 server。header 固定 24 bytes，并逐字段按 little endian 编码，不发送 C++ struct 内存：
 
 | Offset | 字段 |
 |--------|------|
@@ -400,7 +401,9 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 消息类型为 `Hello`、`HelloAck`、`Request`、`Response`、`Cancel` 和 `Error`。handshake 的 request id 必须为 0；request/response/cancel 必须非零；error 可为 0 或非零。request payload 硬上限为 1 MiB，其余帧为 4 MiB，调用方传入更大配置也不能抬高协议上限。decoder 在读取 payload 前验证 magic、精确版本、type、flags、id 和 length；payload 必须是合法 UTF-8。partial header/payload 返回 `NeedMoreData` 且不消费输入，一次 decode 只消费一帧。
 
-尚未实现 `\\.\pipe\AMem.NativeAgent.v1` server、当前用户 SID + SYSTEM DACL、remote-client 拒绝、连接级 handshake/capability 状态、deadline/cancel 路由、受管 handler 生命周期和 GUI approval broker。因此 native IPC 当前不可用，也没有外部 target mutation 路径。
+`NativePipeSecurity` 生成 protected DACL，仅向当前进程用户 SID 和 SYSTEM 授予 pipe read/write，不授予 owner/DACL 修改权。`NamedPipeServer` 固定 `\\.\pipe\AMem.NativeAgent.v1`，使用 `PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE` 和 `nMaxInstances=1`；同一个 server handle 在连接间复用。overlapped accept 与 client handler 串行运行在一个 owned thread 上，`stop()` 先发 stop event、对活动 handle 调用 `CancelIoEx`，再 join。状态快照提供 stopped/listening/connected/stopping/failed、累计连接数、名称和错误。
+
+尚未实现 frame read/write loop、连接级 handshake/capability、request deadline/cancel 路由、GUI enable/status 和 approval broker。`ENABLE_NATIVE_IPC` 默认 OFF，`native_agent_native_ipc_gate` 还明确禁止 main 自动启动。因此 native IPC 当前不可用，也没有新的外部 target mutation 路径。
 
 ### 10.2 Legacy HTTP 协议
 
@@ -471,7 +474,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 6. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 7. provider `maxContextTokens` 会自动限制实际请求。
 8. 内置 Agent 与临时 IPC 暴露相同能力和结果契约。
-9. Native framing codec 已经提供 Named Pipe 身份校验、handshake 状态、capability、cancel 或审批。
+9. Native transport 基础已经提供 framed session、handshake 状态、capability、request cancel、GUI 状态或审批。
 
 ## 12. 扩展检查单
 
@@ -507,7 +510,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_ipc_protocol` 的 5 组测试固定 wire bytes、message/id 规则、partial/连续帧、header 早期拒绝、request 1 MiB/其他帧 4 MiB 硬上限和 UTF-8；`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令；`native_agent_legacy_ipc_gate` 固定 default-off option 与 main/source compile gate。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_ipc_protocol` 的 5 组测试固定 frame contract；`native_ipc_transport` 的 5 组 Windows 测试覆盖 DACL 精确主体/权限、remote/name flags、本用户连接、单实例复用、状态、stop cancellation 与 join，`native_agent_native_ipc_gate` 固定 default-off/no-main-start。catalog、no-Python-MCP 与 legacy-IPC-gate 保持原有边界。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
@@ -515,7 +518,8 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - legacy IPC HTTP parser/auth/sendAll
-- Named Pipe ACL/remote rejection、handshake/capability、deadline/cancel、handler shutdown 和 approval invalidation
+- Named Pipe framed read/write、handshake/capability、request deadline/cancel 和 approval invalidation
+- 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - fake transport partial I/O、迟到响应和三端口 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐
 
