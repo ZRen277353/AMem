@@ -127,11 +127,70 @@ DecodeResult invalidResult(const char* message) {
     return result;
 }
 
+HeaderDecodeResult invalidHeaderResult(const char* message) {
+    HeaderDecodeResult result;
+    result.status = DecodeStatus::Invalid;
+    result.error = message;
+    return result;
+}
+
 } // namespace
 
 bool IsKnownMessageType(uint16_t value) {
     return value >= static_cast<uint16_t>(MessageType::Hello) &&
            value <= static_cast<uint16_t>(MessageType::Error);
+}
+
+HeaderDecodeResult DecodeHeader(const uint8_t* data,
+                                size_t size,
+                                uint32_t maxPayloadBytes) {
+    if (data == nullptr && size != 0) {
+        return invalidHeaderResult("input pointer is null");
+    }
+    if (size < kHeaderSize) {
+        return {};
+    }
+
+    const uint32_t magic = readU32(data);
+    const uint16_t versionMajor = readU16(data + 4);
+    const uint16_t versionMinor = readU16(data + 6);
+    const uint16_t rawType = readU16(data + 8);
+    const uint16_t flags = readU16(data + 10);
+    const uint64_t requestId = readU64(data + 12);
+    const uint32_t payloadLength = readU32(data + 20);
+
+    if (magic != kMagic) {
+        return invalidHeaderResult("invalid frame magic");
+    }
+    if (versionMajor != kVersionMajor || versionMinor != kVersionMinor) {
+        return invalidHeaderResult("unsupported protocol version");
+    }
+    if (!IsKnownMessageType(rawType)) {
+        return invalidHeaderResult("unknown message type");
+    }
+    if (flags != 0) {
+        return invalidHeaderResult("unsupported frame flags");
+    }
+
+    const MessageType type = static_cast<MessageType>(rawType);
+    if (payloadLength > payloadLimitForType(type, maxPayloadBytes)) {
+        return invalidHeaderResult("payload exceeds configured frame limit");
+    }
+
+    std::string metadataError;
+    if (!validateFrameMetadata(type, requestId, metadataError)) {
+        HeaderDecodeResult result;
+        result.status = DecodeStatus::Invalid;
+        result.error = std::move(metadataError);
+        return result;
+    }
+
+    HeaderDecodeResult result;
+    result.status = DecodeStatus::Complete;
+    result.header.type = type;
+    result.header.requestId = requestId;
+    result.header.payloadLength = payloadLength;
+    return result;
 }
 
 bool EncodeFrame(const Frame& frame,
@@ -180,61 +239,33 @@ bool EncodeFrame(const Frame& frame,
 DecodeResult DecodeFrame(const uint8_t* data,
                          size_t size,
                          uint32_t maxPayloadBytes) {
-    if (data == nullptr && size != 0) {
-        return invalidResult("input pointer is null");
-    }
-    if (size < kHeaderSize) {
+    HeaderDecodeResult header =
+        DecodeHeader(data, size, maxPayloadBytes);
+    if (header.status == DecodeStatus::NeedMoreData) {
         return {};
     }
-
-    const uint32_t magic = readU32(data);
-    const uint16_t versionMajor = readU16(data + 4);
-    const uint16_t versionMinor = readU16(data + 6);
-    const uint16_t rawType = readU16(data + 8);
-    const uint16_t flags = readU16(data + 10);
-    const uint64_t requestId = readU64(data + 12);
-    const uint32_t payloadLength = readU32(data + 20);
-
-    if (magic != kMagic) {
-        return invalidResult("invalid frame magic");
-    }
-    if (versionMajor != kVersionMajor || versionMinor != kVersionMinor) {
-        return invalidResult("unsupported protocol version");
-    }
-    if (!IsKnownMessageType(rawType)) {
-        return invalidResult("unknown message type");
-    }
-    if (flags != 0) {
-        return invalidResult("unsupported frame flags");
-    }
-    const MessageType type = static_cast<MessageType>(rawType);
-    if (payloadLength > payloadLimitForType(type, maxPayloadBytes)) {
-        return invalidResult("payload exceeds configured frame limit");
-    }
-
-    std::string metadataError;
-    if (!validateFrameMetadata(type, requestId, metadataError)) {
+    if (header.status == DecodeStatus::Invalid) {
         DecodeResult result;
         result.status = DecodeStatus::Invalid;
-        result.error = std::move(metadataError);
+        result.error = std::move(header.error);
         return result;
     }
 
-    const size_t frameSize = kHeaderSize + payloadLength;
+    const size_t frameSize = kHeaderSize + header.header.payloadLength;
     if (size < frameSize) {
         return {};
     }
     const uint8_t* payload = data + kHeaderSize;
-    if (!isValidUtf8(payload, payloadLength)) {
+    if (!isValidUtf8(payload, header.header.payloadLength)) {
         return invalidResult("payload is not valid UTF-8");
     }
 
     DecodeResult result;
     result.status = DecodeStatus::Complete;
-    result.frame.type = type;
-    result.frame.requestId = requestId;
+    result.frame.type = header.header.type;
+    result.frame.requestId = header.header.requestId;
     result.frame.payload.assign(reinterpret_cast<const char*>(payload),
-                                payloadLength);
+                                header.header.payloadLength);
     result.consumed = frameSize;
     return result;
 }

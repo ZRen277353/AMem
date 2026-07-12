@@ -277,6 +277,8 @@ endif()
 
 if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
+        ipc/IpcFramedConnection.cpp
+        ipc/IpcProtocol.cpp
         ipc/NamedPipeServer.cpp
         ipc/NativePipeSecurity.cpp
     )
@@ -295,7 +297,6 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
 endif()
 
 if(ENABLE_NATIVE_IPC)
-    list(APPEND IPC_SOURCES ipc/IpcProtocol.cpp)
     message(STATUS
         "Native IPC transport compiled; runtime start remains disabled")
 else()
@@ -411,6 +412,22 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcFramedIoTests
+        tests/IpcFramedConnectionTests.cpp
+    )
+    target_link_libraries(NativeIpcFramedIoTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcFramedIoTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcFramedIoTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcFramedIoTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_framed_io COMMAND NativeIpcFramedIoTests)
+
     add_executable(NativeIpcTransportTests
         tests/NativeIpcTransportTests.cpp
     )

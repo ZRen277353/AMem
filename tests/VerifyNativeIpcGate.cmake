@@ -23,8 +23,8 @@ endfunction()
 
 require_text("${cmake_source}" "default-off native IPC option"
     "option(ENABLE_NATIVE_IPC \"Compile native Named Pipe transport\" OFF)")
-require_text("${cmake_source}" "conditional native IPC product source"
-    "if(ENABLE_NATIVE_IPC)\n    list(APPEND IPC_SOURCES ipc/IpcProtocol.cpp)")
+require_text("${cmake_source}" "native IPC framed transport sources"
+    "add_library(NativeIpcTransport STATIC\n        ipc/IpcFramedConnection.cpp\n        ipc/IpcProtocol.cpp\n        ipc/NamedPipeServer.cpp")
 require_text("${cmake_source}" "conditional native IPC product link"
     "if(ENABLE_NATIVE_IPC)\n    target_compile_definitions(ImGuiProject PRIVATE HAVE_NATIVE_IPC)\n    target_link_libraries(ImGuiProject NativeIpcTransport)")
 forbid_text("${main_source}" "native IPC automatic startup"

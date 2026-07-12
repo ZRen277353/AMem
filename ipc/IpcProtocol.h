@@ -36,6 +36,18 @@ struct Frame {
     std::string payload;
 };
 
+struct FrameHeader {
+    MessageType type = MessageType::Error;
+    uint64_t requestId = 0;
+    uint32_t payloadLength = 0;
+};
+
+struct HeaderDecodeResult {
+    DecodeStatus status = DecodeStatus::NeedMoreData;
+    FrameHeader header;
+    std::string error;
+};
+
 struct DecodeResult {
     DecodeStatus status = DecodeStatus::NeedMoreData;
     Frame frame;
@@ -44,6 +56,11 @@ struct DecodeResult {
 };
 
 bool IsKnownMessageType(uint16_t value);
+
+HeaderDecodeResult DecodeHeader(
+    const uint8_t* data,
+    size_t size,
+    uint32_t maxPayloadBytes = kMaxFramePayloadBytes);
 
 bool EncodeFrame(const Frame& frame,
                  std::vector<uint8_t>& output,
@@ -58,6 +75,12 @@ inline DecodeResult DecodeFrame(
     const std::vector<uint8_t>& data,
     uint32_t maxPayloadBytes = kMaxFramePayloadBytes) {
     return DecodeFrame(data.data(), data.size(), maxPayloadBytes);
+}
+
+inline HeaderDecodeResult DecodeHeader(
+    const std::vector<uint8_t>& data,
+    uint32_t maxPayloadBytes = kMaxFramePayloadBytes) {
+    return DecodeHeader(data.data(), data.size(), maxPayloadBytes);
 }
 
 } // namespace IpcProtocol

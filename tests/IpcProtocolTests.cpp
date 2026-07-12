@@ -50,6 +50,17 @@ void expectInvalid(const std::vector<uint8_t>& bytes,
            "invalid frame must not consume input");
 }
 
+void expectInvalidHeader(const std::vector<uint8_t>& bytes,
+                         const std::string& expectedError,
+                         uint32_t limit =
+                             IpcProtocol::kMaxFramePayloadBytes) {
+    const auto decoded = IpcProtocol::DecodeHeader(bytes, limit);
+    expect(decoded.status == IpcProtocol::DecodeStatus::Invalid,
+           "frame header should be invalid");
+    expect(decoded.error.find(expectedError) != std::string::npos,
+           "unexpected header error: " + decoded.error);
+}
+
 void testWireEncodingAndRoundTrip() {
     const IpcProtocol::Frame frame{
         IpcProtocol::MessageType::Request,
@@ -77,6 +88,14 @@ void testWireEncodingAndRoundTrip() {
            "frame round trip should preserve fields");
     expect(decoded.consumed == bytes.size(),
            "decoder should report exact frame size");
+
+    const auto header = IpcProtocol::DecodeHeader(
+        bytes.data(), IpcProtocol::kHeaderSize);
+    expect(header.status == IpcProtocol::DecodeStatus::Complete &&
+               header.header.type == frame.type &&
+               header.header.requestId == frame.requestId &&
+               header.header.payloadLength == frame.payload.size(),
+           "header decode should expose validated frame metadata");
 
     const auto empty = encode(
         {IpcProtocol::MessageType::Hello, 0, {}});
@@ -131,6 +150,15 @@ void testPartialAndMultipleFrames() {
         expect(decoded.consumed == 0,
                "partial frame must not consume input");
     }
+    for (size_t size = 0; size < IpcProtocol::kHeaderSize; ++size) {
+        const auto header = IpcProtocol::DecodeHeader(first.data(), size);
+        expect(header.status == IpcProtocol::DecodeStatus::NeedMoreData,
+               "partial header should request more data");
+    }
+    expect(IpcProtocol::DecodeHeader(first.data(),
+                                     IpcProtocol::kHeaderSize)
+               .status == IpcProtocol::DecodeStatus::Complete,
+           "complete header should not wait for payload bytes");
 
     const auto second = encode(
         {IpcProtocol::MessageType::Response, 7, "{\"success\":true}"});
@@ -156,10 +184,12 @@ void testHeaderValidationBeforePayloadRead() {
     auto bytes = valid;
     bytes[0] ^= 0xffu;
     expectInvalid(bytes, "magic");
+    expectInvalidHeader(bytes, "magic");
 
     bytes = valid;
     writeU16(bytes, 4, 2);
     expectInvalid(bytes, "version");
+    expectInvalidHeader(bytes, "version");
 
     bytes = valid;
     writeU16(bytes, 6, 1);
@@ -168,21 +198,26 @@ void testHeaderValidationBeforePayloadRead() {
     bytes = valid;
     writeU16(bytes, 8, 99);
     expectInvalid(bytes, "message type");
+    expectInvalidHeader(bytes, "message type");
 
     bytes = valid;
     writeU16(bytes, 10, 1);
     expectInvalid(bytes, "flags");
+    expectInvalidHeader(bytes, "flags");
 
     bytes = valid;
     for (size_t i = 12; i < 20; ++i) {
         bytes[i] = 0;
     }
     expectInvalid(bytes, "request id");
+    expectInvalidHeader(bytes, "request id");
 
     bytes = valid;
     writeU32(bytes, 20, IpcProtocol::kMaxRequestPayloadBytes + 1);
     bytes.resize(IpcProtocol::kHeaderSize);
     expectInvalid(bytes, "limit", IpcProtocol::kMaxRequestPayloadBytes);
+    expectInvalidHeader(bytes, "limit",
+                        IpcProtocol::kMaxRequestPayloadBytes);
 }
 
 void testPayloadLimitsAndUtf8() {
