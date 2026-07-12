@@ -132,6 +132,44 @@ struct PointerResolution {
     TargetSnapshot target;
 };
 
+struct SymbolResolveRequest {
+    std::string moduleName;
+    std::string symbolName;
+};
+
+struct SymbolListRequest {
+    std::string moduleName;
+    std::optional<uint64_t> expectedEpoch;
+    size_t offset = 0;
+    size_t limit = 100;
+};
+
+struct SymbolInfo {
+    uint64_t address = 0;
+    std::string name;
+};
+
+struct SymbolSessionSnapshot {
+    uint64_t epoch = 0;
+    ModuleInfo module;
+    size_t total = 0;
+    TargetSnapshot target;
+};
+
+struct ResolvedSymbol {
+    std::string name;
+    uint64_t address = 0;
+    SymbolSessionSnapshot session;
+};
+
+struct SymbolPage {
+    std::vector<SymbolInfo> items;
+    size_t total = 0;
+    size_t offset = 0;
+    std::optional<size_t> nextOffset;
+    SymbolSessionSnapshot session;
+};
+
 enum class ScanStartKind {
     Value,
     Unknown,
@@ -327,6 +365,10 @@ inline constexpr size_t kMaxModulePageSize = 1000;
 inline constexpr size_t kMaxModuleResultCount = 65536;
 inline constexpr size_t kMaxModuleNameBytesTotal = 16u * 1024u * 1024u;
 inline constexpr size_t kMaxPointerOffsetCount = 1024;
+inline constexpr size_t kMaxSymbolPageSize = 1000;
+inline constexpr size_t kMaxSymbolResultCount = 1000000;
+inline constexpr size_t kMaxSymbolNameBytes = 64u * 1024u;
+inline constexpr size_t kMaxSymbolPageNameBytes = 4u * 1024u * 1024u;
 inline constexpr size_t kMaxScanValueBytes = 4096;
 inline constexpr size_t kMaxScanResultPageSize = 1000;
 inline constexpr size_t kMaxScanResultCount = 5000000;

@@ -29,6 +29,12 @@ public:
     Result<PointerResolution> resolvePointer(
         const OperationContext& context,
         const PointerResolveRequest& request) override;
+    Result<ResolvedSymbol> resolveSymbol(
+        const OperationContext& context,
+        const SymbolResolveRequest& request) override;
+    Result<SymbolPage> listSymbols(
+        const OperationContext& context,
+        const SymbolListRequest& request) override;
     Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) override;
@@ -61,6 +67,7 @@ private:
                                          bool checkCancellation) const;
 
     IMemBackend& backend_;
+    std::mutex symbolMutex_;
     std::mutex scanMutex_;
     std::optional<ScanSessionSnapshot> scanSession_;
 };

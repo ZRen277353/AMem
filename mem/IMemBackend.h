@@ -38,6 +38,23 @@ public:
     virtual bool clearScan() = 0;
 };
 
+class IMemSymbolTransaction {
+public:
+    virtual ~IMemSymbolTransaction() = default;
+
+    virtual uint64_t symbolEpoch() const = 0;
+    virtual bool fetchModules(std::vector<ModuleInfo>& modules) = 0;
+    virtual bool initializeSymbols(uint64_t moduleBase,
+                                   int& totalCount) = 0;
+    virtual bool fetchSymbols(size_t offset,
+                              size_t limit,
+                              std::vector<SymbolInfo>& symbols,
+                              int& totalCount) = 0;
+    virtual bool findSymbol(uint64_t moduleBase,
+                            const std::string& name,
+                            uint64_t& address) = 0;
+};
+
 class IMemBackend {
 public:
     virtual ~IMemBackend() = default;
@@ -58,6 +75,9 @@ public:
         const OperationContext& context) = 0;
     virtual uint64_t scanEpoch() const = 0;
     virtual std::unique_ptr<IMemScanTransaction> beginScanTransaction(
+        const OperationContext& context) = 0;
+    virtual uint64_t symbolEpoch() const = 0;
+    virtual std::unique_ptr<IMemSymbolTransaction> beginSymbolTransaction(
         const OperationContext& context) = 0;
     virtual bool readMemory(uint64_t address,
                             uint32_t size,

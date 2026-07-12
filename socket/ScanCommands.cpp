@@ -82,9 +82,9 @@ ScanExecutionIoResult executeTrackedScan(
     ScanProgressCallback callback,
     void* userData) {
     ScanExecutionIoResult result;
-    GetSocketMgr().AdvanceScanEpoch();
     (void)SocketCommand::execute(
         port, [&](WindowsSocketClient* client, int handle) -> bool {
+            GetSocketMgr().AdvanceScanEpoch();
             result.requestStarted = true;
             if (!sendRequest(client, handle)) {
                 return false;
@@ -104,8 +104,8 @@ ScanExecutionIoResult executeTrackedScan(
 } // namespace
 
 bool ScanSetRange(int type, PortType port) {
-    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        GetSocketMgr().AdvanceScanEpoch();
         unsigned char command = CMD_SETRANGE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -170,8 +170,8 @@ bool RemoveScanResult(std::vector<uint64_t> address, PortType port) {
     if (address.empty() || address.size() > kMaxScanResultRemovalCount)
         return false;
 
-    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        GetSocketMgr().AdvanceScanEpoch();
         unsigned char command = CMD_REMOVESCANRESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -185,8 +185,8 @@ bool RemoveScanResult(std::vector<uint64_t> address, PortType port) {
 }
 
 bool ClearScanResult(PortType port) {
-    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        GetSocketMgr().AdvanceScanEpoch();
         unsigned char command = CMD_CLEARSCANRESULT;
         return SocketCommand::sendCommandWithHandle(client, command, handle);
     });
@@ -331,8 +331,8 @@ int ScanGroupValueWithProgress(
     if (!isValidScanRange(start, end) || !isValidGroupScanValues(Value))
         return -1;
 
-    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& SearchCount) -> bool {
+        GetSocketMgr().AdvanceScanEpoch();
         unsigned char command = CMD_SCANGROUPVALUE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -444,8 +444,8 @@ bool GetTypedScanResult(int offset, int count,
 }
 
 bool StopSearchScan(PortType port) {
-    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        GetSocketMgr().AdvanceScanEpoch();
         unsigned char command = CMD_STOPPROCESS;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;

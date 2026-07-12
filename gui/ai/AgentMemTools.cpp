@@ -223,6 +223,25 @@ uint64_t scanEpochArgument(const json& args) {
     throw std::runtime_error("scan_epoch must be a non-negative integer");
 }
 
+std::optional<uint64_t> optionalEpochArgument(const json& args,
+                                              const char* key) {
+    if (!args.contains(key) || args.at(key).is_null()) {
+        return std::nullopt;
+    }
+    const json& value = args.at(key);
+    if (value.is_number_unsigned()) {
+        return value.get<uint64_t>();
+    }
+    if (value.is_number_integer()) {
+        const long long epoch = value.get<long long>();
+        if (epoch >= 0) {
+            return static_cast<uint64_t>(epoch);
+        }
+    }
+    throw std::runtime_error(std::string(key) +
+                             " must be a non-negative integer");
+}
+
 Mem::ScanMode scanModeArgument(const json& args,
                                const char* fallback = "exact") {
     std::string mode = optionalString(args, "mode");
@@ -824,6 +843,94 @@ std::string AgentMemTools::pointerResolve(
         return exceptionResult(
             allowLegacyArguments ? "resolve_offset_chain" : "pointer_resolve",
             error);
+    }
+}
+
+std::string AgentMemTools::symbolResolve(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::SymbolResolveRequest request;
+        request.moduleName = moduleNameArgument(args, false);
+        request.symbolName = optionalString(args, "symbol_name");
+        if (request.symbolName.empty()) {
+            throw std::runtime_error(
+                "symbol_name must be a non-empty string");
+        }
+
+        const auto response = service_.resolveSymbol(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::ResolvedSymbol& value = response.value();
+        json output;
+        output["success"] = true;
+        output["module"] = value.session.module.name;
+        output["module_base"] =
+            Mem::formatAddress(value.session.module.base);
+        output["symbol"] = value.name;
+        output["address"] = Mem::formatAddress(value.address);
+        output["symbol_epoch"] = value.session.epoch;
+        output["symbol_count"] = value.session.total;
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            value.session.target.connectionGeneration,
+            &value.session.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("symbol_resolve", error);
+    }
+}
+
+std::string AgentMemTools::symbolList(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::SymbolListRequest request;
+        request.moduleName = moduleNameArgument(args, false);
+        request.expectedEpoch =
+            optionalEpochArgument(args, "symbol_epoch");
+        request.offset = optionalSize(
+            args, "offset", 0, (std::numeric_limits<int>::max)());
+        request.limit = optionalSize(
+            args, "count", 100, Mem::kMaxSymbolPageSize);
+
+        const auto response = service_.listSymbols(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json symbols = json::array();
+        for (const auto& symbol : response.value().items) {
+            symbols.push_back({
+                {"address", Mem::formatAddress(symbol.address)},
+                {"name", symbol.name},
+            });
+        }
+        json output;
+        output["success"] = true;
+        output["module"] = response.value().session.module.name;
+        output["module_base"] = Mem::formatAddress(
+            response.value().session.module.base);
+        output["symbol_epoch"] = response.value().session.epoch;
+        output["total"] = response.value().total;
+        output["offset"] = response.value().offset;
+        output["count"] = response.value().items.size();
+        output["symbols"] = std::move(symbols);
+        output["truncated"] = response.value().nextOffset.has_value();
+        output["next_cursor"] = response.value().nextOffset
+                                    ? json(*response.value().nextOffset)
+                                    : json(nullptr);
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            response.value().session.target.connectionGeneration,
+            &response.value().session.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("symbol_list", error);
     }
 }
 

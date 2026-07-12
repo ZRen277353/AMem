@@ -40,6 +40,7 @@ private:
   std::recursive_timed_mutex m_error_transaction_mutex;
 
   std::atomic<uint64_t> m_scan_epoch{0};
+  std::atomic<uint64_t> m_symbol_epoch{0};
 
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
@@ -94,6 +95,14 @@ public:
 
   uint64_t AdvanceScanEpoch() {
     return m_scan_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+  }
+
+  uint64_t GetSymbolEpoch() const {
+    return m_symbol_epoch.load(std::memory_order_acquire);
+  }
+
+  uint64_t AdvanceSymbolEpoch() {
+    return m_symbol_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
   }
 
 };

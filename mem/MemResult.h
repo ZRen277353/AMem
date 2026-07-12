@@ -20,6 +20,7 @@ enum class ErrorCode {
     CompletionUnknown,
     NoScanSession,
     ScanSessionChanged,
+    SymbolSessionChanged,
     ProtocolError,
     Unsupported,
     PermissionDenied,
@@ -39,6 +40,8 @@ inline const char* errorCodeName(ErrorCode code) {
         case ErrorCode::CompletionUnknown:   return "completion_unknown";
         case ErrorCode::NoScanSession:      return "no_scan_session";
         case ErrorCode::ScanSessionChanged: return "scan_session_changed";
+        case ErrorCode::SymbolSessionChanged:
+            return "symbol_session_changed";
         case ErrorCode::ProtocolError:       return "protocol_error";
         case ErrorCode::Unsupported:         return "unsupported";
         case ErrorCode::PermissionDenied:    return "permission_denied";

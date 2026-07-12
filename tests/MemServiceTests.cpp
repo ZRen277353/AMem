@@ -123,6 +123,22 @@ public:
     int scanClearCalls = 0;
     std::optional<Mem::ScanStartRequest> lastScanStart;
     std::optional<Mem::ScanRefineRequest> lastScanRefine;
+    uint64_t symbolEpochValue = 0;
+    uint64_t activeSymbolModuleBase = 0;
+    std::vector<Mem::SymbolInfo> symbolData = {
+        {0x5100, "GameInit"},
+        {0x5200, "GameUpdate"},
+        {0x5300, "GameRender"},
+    };
+    bool symbolInitializeSucceeds = true;
+    bool symbolFetchSucceeds = true;
+    bool symbolFindSucceeds = true;
+    bool changeTargetAfterSymbol = false;
+    bool changeGenerationAfterSymbol = false;
+    int beginSymbolTransactionCalls = 0;
+    int symbolInitializeCalls = 0;
+    int symbolFetchCalls = 0;
+    int symbolFindCalls = 0;
     uint64_t lastReadAddress = 0;
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
@@ -380,6 +396,109 @@ public:
             return nullptr;
         }
         return std::make_unique<ScanTransaction>(*this);
+    }
+
+    class SymbolTransaction final : public Mem::IMemSymbolTransaction {
+    public:
+        explicit SymbolTransaction(FakeBackend& backend)
+            : backend_(backend), lock_(backend.transactionMutex) {
+            backend_.transactionActive = true;
+        }
+
+        ~SymbolTransaction() override {
+            backend_.transactionActive = false;
+        }
+
+        uint64_t symbolEpoch() const override {
+            return backend_.symbolEpochValue;
+        }
+
+        bool fetchModules(std::vector<Mem::ModuleInfo>& output) override {
+            backend_.allTransactionOperationsGuarded =
+                backend_.allTransactionOperationsGuarded &&
+                backend_.transactionActive;
+            return backend_.fetchModules(output);
+        }
+
+        bool initializeSymbols(uint64_t moduleBase,
+                               int& totalCount) override {
+            ++backend_.symbolInitializeCalls;
+            ++backend_.symbolEpochValue;
+            backend_.activeSymbolModuleBase = moduleBase;
+            totalCount = static_cast<int>(backend_.symbolData.size());
+            backend_.applySymbolStateChanges();
+            return backend_.symbolInitializeSucceeds;
+        }
+
+        bool fetchSymbols(size_t offset,
+                          size_t limit,
+                          std::vector<Mem::SymbolInfo>& symbols,
+                          int& totalCount) override {
+            ++backend_.symbolFetchCalls;
+            backend_.allTransactionOperationsGuarded =
+                backend_.allTransactionOperationsGuarded &&
+                backend_.transactionActive;
+            if (!backend_.symbolFetchSucceeds) {
+                return false;
+            }
+            totalCount = static_cast<int>(backend_.symbolData.size());
+            const size_t begin = (std::min)(offset, backend_.symbolData.size());
+            const size_t end = begin + (std::min)(
+                limit, backend_.symbolData.size() - begin);
+            symbols.assign(backend_.symbolData.begin() + begin,
+                           backend_.symbolData.begin() + end);
+            return true;
+        }
+
+        bool findSymbol(uint64_t moduleBase,
+                        const std::string& name,
+                        uint64_t& address) override {
+            ++backend_.symbolFindCalls;
+            backend_.allTransactionOperationsGuarded =
+                backend_.allTransactionOperationsGuarded &&
+                backend_.transactionActive;
+            if (!backend_.symbolFindSucceeds ||
+                moduleBase != backend_.activeSymbolModuleBase) {
+                return false;
+            }
+            const auto found = std::find_if(
+                backend_.symbolData.begin(), backend_.symbolData.end(),
+                [&](const Mem::SymbolInfo& symbol) {
+                    return symbol.name == name;
+                });
+            if (found == backend_.symbolData.end()) {
+                return false;
+            }
+            address = found->address;
+            return true;
+        }
+
+    private:
+        FakeBackend& backend_;
+        std::unique_lock<std::timed_mutex> lock_;
+    };
+
+    void applySymbolStateChanges() {
+        if (changeTargetAfterSymbol) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterSymbol) {
+            ++generation;
+        }
+    }
+
+    uint64_t symbolEpoch() const override {
+        return symbolEpochValue;
+    }
+
+    std::unique_ptr<Mem::IMemSymbolTransaction> beginSymbolTransaction(
+        const Mem::OperationContext& context) override {
+        ++beginSymbolTransactionCalls;
+        if (!context.target || context.connectionGeneration != generation ||
+            targetSnapshot() != *context.target) {
+            return nullptr;
+        }
+        return std::make_unique<SymbolTransaction>(*this);
     }
 
     bool readMemory(uint64_t address,
@@ -1037,6 +1156,106 @@ void testPointerResolveTransaction() {
                cancelled.error().code == Mem::ErrorCode::CancelRequested &&
                cancelledBackend.transactionReadCalls == 1,
            "pointer transaction must observe cancellation between reads");
+}
+
+void testSymbolSessionService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+
+    Mem::SymbolListRequest listRequest;
+    listRequest.moduleName = "libgame.so";
+    listRequest.limit = 2;
+    const auto firstPage = service.listSymbols(
+        service.captureContext(true), listRequest);
+    expect(firstPage.ok() && firstPage.value().total == 3 &&
+               firstPage.value().items.size() == 2 &&
+               firstPage.value().items.front().name == "GameInit" &&
+               firstPage.value().nextOffset == 2 &&
+               firstPage.value().session.epoch == 1 &&
+               firstPage.value().session.module.base == 0x5000 &&
+               backend.beginSymbolTransactionCalls == 1 &&
+               backend.symbolInitializeCalls == 1 &&
+               backend.symbolFetchCalls == 1 &&
+               backend.allTransactionOperationsGuarded,
+           "symbol list must resolve, initialize, and fetch inside one transaction");
+
+    listRequest.offset = 2;
+    listRequest.expectedEpoch = firstPage.value().session.epoch;
+    const auto secondPage = service.listSymbols(
+        service.captureContext(true), listRequest);
+    expect(secondPage.ok() && secondPage.value().items.size() == 1 &&
+               secondPage.value().items.front().name == "GameRender" &&
+               !secondPage.value().nextOffset &&
+               secondPage.value().session.epoch == 2,
+           "symbol continuation must consume and advance the expected epoch");
+
+    ++backend.symbolEpochValue;
+    listRequest.expectedEpoch = secondPage.value().session.epoch;
+    const int initializationsBeforeStale = backend.symbolInitializeCalls;
+    const auto stale = service.listSymbols(
+        service.captureContext(true), listRequest);
+    expect(!stale.ok() &&
+               stale.error().code == Mem::ErrorCode::SymbolSessionChanged &&
+               backend.symbolInitializeCalls == initializationsBeforeStale,
+           "external symbol initialization must invalidate continuation pages");
+
+    Mem::SymbolListRequest unboundContinuation;
+    unboundContinuation.moduleName = "libgame.so";
+    unboundContinuation.offset = 1;
+    const int transactionsBeforeInvalid = backend.beginSymbolTransactionCalls;
+    const auto invalidContinuation = service.listSymbols(
+        service.captureContext(true), unboundContinuation);
+    expect(!invalidContinuation.ok() &&
+               invalidContinuation.error().code ==
+                   Mem::ErrorCode::InvalidArgument &&
+               backend.beginSymbolTransactionCalls == transactionsBeforeInvalid,
+           "symbol continuation must require an explicit epoch before backend access");
+
+    Mem::SymbolResolveRequest resolveRequest;
+    resolveRequest.moduleName = "libgame.so";
+    resolveRequest.symbolName = "GameUpdate";
+    const auto resolved = service.resolveSymbol(
+        service.captureContext(true), resolveRequest);
+    expect(resolved.ok() && resolved.value().address == 0x5200 &&
+               resolved.value().name == "GameUpdate" &&
+               resolved.value().session.module.name ==
+                   "/data/app/libgame.so" &&
+               resolved.value().session.epoch == backend.symbolEpochValue &&
+               backend.symbolFindCalls == 1,
+           "symbol resolve must bind module lookup, initialization, and find");
+
+    resolveRequest.moduleName = "libgame";
+    const int initializationsBeforeAmbiguous = backend.symbolInitializeCalls;
+    const auto ambiguous = service.resolveSymbol(
+        service.captureContext(true), resolveRequest);
+    expect(!ambiguous.ok() &&
+               ambiguous.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.symbolInitializeCalls == initializationsBeforeAmbiguous,
+           "symbol resolve must reject ambiguous modules before initialization");
+
+    FakeBackend changedTargetBackend;
+    Mem::MemService changedTargetService(changedTargetBackend);
+    changedTargetBackend.changeTargetAfterSymbol = true;
+    listRequest = {};
+    listRequest.moduleName = "libgame.so";
+    const auto changedTarget = changedTargetService.listSymbols(
+        changedTargetService.captureContext(true), listRequest);
+    expect(!changedTarget.ok() &&
+               changedTarget.error().code == Mem::ErrorCode::TargetChanged &&
+               changedTargetBackend.symbolFetchCalls == 1,
+           "symbol list must reject the fetched page after the transaction releases and the target changed");
+
+    FakeBackend changedGenerationBackend;
+    Mem::MemService changedGenerationService(changedGenerationBackend);
+    changedGenerationBackend.changeGenerationAfterSymbol = true;
+    resolveRequest.moduleName = "libgame.so";
+    const auto changedGeneration = changedGenerationService.resolveSymbol(
+        changedGenerationService.captureContext(true), resolveRequest);
+    expect(!changedGeneration.ok() &&
+               changedGeneration.error().code ==
+                   Mem::ErrorCode::ConnectionChanged &&
+               changedGenerationBackend.symbolFindCalls == 0,
+           "symbol resolve must stop after initialization changes generation");
 }
 
 void testScanSessionService() {
@@ -1738,6 +1957,50 @@ void testAgentAdapter() {
                legacyEmptyPointer.at("dereference_count") == 0,
            "hidden resolve_offset_chain should retain empty-chain behavior");
 
+    const json symbolPage = json::parse(
+        tools.symbolList(
+            R"({"module_name":"libgame.so","count":2})",
+            targetContext));
+    expect(symbolPage.at("success").get<bool>() &&
+               symbolPage.at("module") == "/data/app/libgame.so" &&
+               symbolPage.at("symbol_epoch") == 1 &&
+               symbolPage.at("total") == 3 &&
+               symbolPage.at("count") == 2 &&
+               symbolPage.at("truncated").get<bool>() &&
+               symbolPage.at("next_cursor") == 2 &&
+               symbolPage.at("symbols").at(0).at("address") == "0x5100",
+           "symbol_list adapter should expose a module-bound session page");
+
+    const json missingSymbolEpoch = json::parse(
+        tools.symbolList(
+            R"({"module_name":"libgame.so","offset":2,"count":2})",
+            targetContext));
+    expect(!missingSymbolEpoch.at("success").get<bool>() &&
+               missingSymbolEpoch.at("error").at("code") ==
+                   "invalid_argument",
+           "symbol_list continuation should require symbol_epoch");
+
+    const json symbolContinuation = json::parse(
+        tools.symbolList(
+            R"({"module_name":"libgame.so","symbol_epoch":1,"offset":2,"count":2})",
+            targetContext));
+    expect(symbolContinuation.at("success").get<bool>() &&
+               symbolContinuation.at("symbol_epoch") == 2 &&
+               symbolContinuation.at("count") == 1 &&
+               !symbolContinuation.at("truncated").get<bool>(),
+           "symbol_list adapter should advance the continuation epoch");
+
+    const json symbol = json::parse(
+        tools.symbolResolve(
+            R"({"module_name":"libgame.so","symbol_name":"GameUpdate"})",
+            targetContext));
+    expect(symbol.at("success").get<bool>() &&
+               symbol.at("module") == "/data/app/libgame.so" &&
+               symbol.at("symbol") == "GameUpdate" &&
+               symbol.at("address") == "0x5200" &&
+               symbol.at("symbol_epoch") == 3,
+           "symbol_resolve adapter should expose canonical module and address data");
+
     const json strictScanRange = json::parse(
         tools.scanStart(
             R"({"mode":"exact","data_type":"dword","value":42,"start":"1000"})",
@@ -2126,6 +2389,7 @@ int main() {
         {"typed memory service", &testTypedMemoryService},
         {"module list and resolve", &testModuleListAndResolve},
         {"pointer resolve transaction", &testPointerResolveTransaction},
+        {"symbol session service", &testSymbolSessionService},
         {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},

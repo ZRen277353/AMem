@@ -247,6 +247,69 @@ private:
     bool valid_ = false;
 };
 
+class SystemSymbolTransaction final : public IMemSymbolTransaction {
+public:
+    explicit SystemSymbolTransaction(const OperationContext& context)
+        : lease_(PORT_MAIN) {
+        valid_ = static_cast<bool>(lease_) && context.target &&
+                 lease_.generation() == context.connectionGeneration &&
+                 AppContext::Get().matchesStableTarget(
+                     *context.target, lease_.generation());
+    }
+
+    bool valid() const {
+        return valid_ && static_cast<bool>(lease_);
+    }
+
+    uint64_t symbolEpoch() const override {
+        return GetSocketMgr().GetSymbolEpoch();
+    }
+
+    bool fetchModules(std::vector<ModuleInfo>& modules) override {
+        return valid() && fetchSystemModules(modules);
+    }
+
+    bool initializeSymbols(uint64_t moduleBase,
+                           int& totalCount) override {
+        return valid() && SymbolInit(moduleBase, totalCount, PORT_MAIN);
+    }
+
+    bool fetchSymbols(size_t offset,
+                      size_t limit,
+                      std::vector<SymbolInfo>& symbols,
+                      int& totalCount) override {
+        if (!valid() ||
+            offset > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+            limit > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+            return false;
+        }
+        std::vector<std::pair<uint64_t, std::string>> raw;
+        if (!SymbolGetList(static_cast<int>(offset),
+                           static_cast<int>(limit),
+                           raw,
+                           &totalCount,
+                           PORT_MAIN)) {
+            return false;
+        }
+        symbols.clear();
+        symbols.reserve(raw.size());
+        for (auto& item : raw) {
+            symbols.push_back(SymbolInfo{item.first, std::move(item.second)});
+        }
+        return true;
+    }
+
+    bool findSymbol(uint64_t moduleBase,
+                    const std::string& name,
+                    uint64_t& address) override {
+        return valid() && SymbolFind(moduleBase, name, address, PORT_MAIN);
+    }
+
+private:
+    SocketCommand::TransactionLease lease_;
+    bool valid_ = false;
+};
+
 class SystemMemBackend final : public IMemBackend {
 public:
     bool isConnected() const override {
@@ -328,6 +391,19 @@ public:
     std::unique_ptr<IMemScanTransaction> beginScanTransaction(
         const OperationContext& context) override {
         auto transaction = std::make_unique<SystemScanTransaction>(context);
+        if (!transaction->valid()) {
+            return nullptr;
+        }
+        return transaction;
+    }
+
+    uint64_t symbolEpoch() const override {
+        return GetSocketMgr().GetSymbolEpoch();
+    }
+
+    std::unique_ptr<IMemSymbolTransaction> beginSymbolTransaction(
+        const OperationContext& context) override {
+        auto transaction = std::make_unique<SystemSymbolTransaction>(context);
         if (!transaction->valid()) {
             return nullptr;
         }

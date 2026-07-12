@@ -847,6 +847,284 @@ Result<PointerResolution> MemService::resolvePointer(
         std::move(resolution), elapsedMilliseconds(start));
 }
 
+Result<ResolvedSymbol> MemService::resolveSymbol(
+    const OperationContext& context,
+    const SymbolResolveRequest& request) {
+    const auto start = Clock::now();
+    if (request.moduleName.size() > kMaxTextParameterBytes ||
+        request.symbolName.size() > kMaxTextParameterBytes) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name and symbol_name must not exceed 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const std::string moduleQuery =
+        lowerAscii(trimAscii(request.moduleName));
+    const std::string symbolName = trimAscii(request.symbolName);
+    if (moduleQuery.empty() || symbolName.empty()) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name and symbol_name must not be empty",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> symbolLock(symbolMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+    auto transaction = backend_.beginSymbolTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ResolvedSymbol>(*error, start);
+        }
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    std::vector<ModuleInfo> modules;
+    if (!transaction->fetchModules(modules)) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch modules inside the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+    if (const auto error = validateModules(modules)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+    const ModuleInfo* matched = nullptr;
+    if (const auto error = findResolvedModule(modules, moduleQuery, matched)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+
+    int totalCount = 0;
+    if (!transaction->initializeSymbols(matched->base, totalCount)) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::ProtocolError,
+            "failed to initialize the module symbol table",
+            true,
+            elapsedMilliseconds(start));
+    }
+    const uint64_t completedEpoch = transaction->symbolEpoch();
+    if (totalCount < 0 ||
+        static_cast<size_t>(totalCount) > kMaxSymbolResultCount) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::ProtocolError,
+            "symbol table returned an invalid total count",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+
+    uint64_t address = 0;
+    if (!transaction->findSymbol(matched->base, symbolName, address) ||
+        address == 0) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::InvalidArgument,
+            "symbol_name did not resolve inside the selected module",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    ResolvedSymbol resolved;
+    resolved.name = symbolName;
+    resolved.address = address;
+    resolved.session.epoch = completedEpoch;
+    resolved.session.module = *matched;
+    resolved.session.total = static_cast<size_t>(totalCount);
+    resolved.session.target = *context.target;
+
+    transaction.reset();
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ResolvedSymbol>(*error, start);
+    }
+    if (backend_.symbolEpoch() != completedEpoch) {
+        return Result<ResolvedSymbol>::failure(
+            ErrorCode::SymbolSessionChanged,
+            "symbol table changed before the resolve result was committed",
+            false,
+            elapsedMilliseconds(start));
+    }
+    return Result<ResolvedSymbol>::success(
+        std::move(resolved), elapsedMilliseconds(start));
+}
+
+Result<SymbolPage> MemService::listSymbols(
+    const OperationContext& context,
+    const SymbolListRequest& request) {
+    const auto start = Clock::now();
+    if (request.moduleName.size() > kMaxTextParameterBytes) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const std::string moduleQuery =
+        lowerAscii(trimAscii(request.moduleName));
+    if (moduleQuery.empty()) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name must not be empty",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.limit == 0 || request.limit > kMaxSymbolPageSize ||
+        request.offset > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::InvalidArgument,
+            "symbol page must use offset <= INT_MAX and count from 1 to 1000",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.offset > 0 && !request.expectedEpoch) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::InvalidArgument,
+            "symbol_epoch is required when requesting a continuation page",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> symbolLock(symbolMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+    auto transaction = backend_.beginSymbolTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<SymbolPage>(*error, start);
+        }
+        return Result<SymbolPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (request.expectedEpoch &&
+        transaction->symbolEpoch() != *request.expectedEpoch) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::SymbolSessionChanged,
+            "symbol table changed before the requested continuation page",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::vector<ModuleInfo> modules;
+    if (!transaction->fetchModules(modules)) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch modules inside the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+    if (const auto error = validateModules(modules)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+    const ModuleInfo* matched = nullptr;
+    if (const auto error = findResolvedModule(modules, moduleQuery, matched)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+
+    int initializedTotal = 0;
+    if (!transaction->initializeSymbols(matched->base, initializedTotal)) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to initialize the module symbol table",
+            true,
+            elapsedMilliseconds(start));
+    }
+    const uint64_t completedEpoch = transaction->symbolEpoch();
+    if (initializedTotal < 0 ||
+        static_cast<size_t>(initializedTotal) > kMaxSymbolResultCount) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::ProtocolError,
+            "symbol table returned an invalid total count",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+
+    const size_t total = static_cast<size_t>(initializedTotal);
+    const size_t pageOffset = (std::min)(request.offset, total);
+    std::vector<SymbolInfo> symbols;
+    if (pageOffset < total) {
+        int fetchedTotal = 0;
+        if (!transaction->fetchSymbols(pageOffset,
+                                       request.limit,
+                                       symbols,
+                                       fetchedTotal)) {
+            return Result<SymbolPage>::failure(
+                ErrorCode::ProtocolError,
+                "failed to fetch the symbol page",
+                true,
+                elapsedMilliseconds(start));
+        }
+        if (fetchedTotal != initializedTotal ||
+            symbols.size() > request.limit || symbols.empty()) {
+            return Result<SymbolPage>::failure(
+                ErrorCode::ProtocolError,
+                "symbol page is inconsistent with the initialized table",
+                false,
+                elapsedMilliseconds(start));
+        }
+    }
+
+    size_t totalNameBytes = 0;
+    for (const auto& symbol : symbols) {
+        if (symbol.name.size() > kMaxSymbolNameBytes ||
+            totalNameBytes > kMaxSymbolPageNameBytes - symbol.name.size()) {
+            return Result<SymbolPage>::failure(
+                ErrorCode::ProtocolError,
+                "symbol page exceeds the name-size limit",
+                false,
+                elapsedMilliseconds(start));
+        }
+        totalNameBytes += symbol.name.size();
+    }
+
+    SymbolPage page;
+    page.items = std::move(symbols);
+    page.total = total;
+    page.offset = pageOffset;
+    const size_t end = page.offset + page.items.size();
+    if (end < page.total) {
+        page.nextOffset = end;
+    }
+    page.session.epoch = completedEpoch;
+    page.session.module = *matched;
+    page.session.total = total;
+    page.session.target = *context.target;
+
+    transaction.reset();
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<SymbolPage>(*error, start);
+    }
+    if (backend_.symbolEpoch() != completedEpoch) {
+        return Result<SymbolPage>::failure(
+            ErrorCode::SymbolSessionChanged,
+            "symbol table changed before the page result was committed",
+            false,
+            elapsedMilliseconds(start));
+    }
+    return Result<SymbolPage>::success(
+        std::move(page), elapsedMilliseconds(start));
+}
+
 Result<ScanSummary> MemService::startScan(
     const OperationContext& context,
     const ScanStartRequest& request) {

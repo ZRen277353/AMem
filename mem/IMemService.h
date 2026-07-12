@@ -26,6 +26,12 @@ public:
     virtual Result<PointerResolution> resolvePointer(
         const OperationContext& context,
         const PointerResolveRequest& request) = 0;
+    virtual Result<ResolvedSymbol> resolveSymbol(
+        const OperationContext& context,
+        const SymbolResolveRequest& request) = 0;
+    virtual Result<SymbolPage> listSymbols(
+        const OperationContext& context,
+        const SymbolListRequest& request) = 0;
     virtual Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) = 0;

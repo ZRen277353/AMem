@@ -15,6 +15,7 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
     outTotalCount = 0;
 
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        GetSocketMgr().AdvanceSymbolEpoch();
         unsigned char command = CMD_SYMBOL_INIT;
         if (!client->Send(&command, sizeof(command)))
             return false;

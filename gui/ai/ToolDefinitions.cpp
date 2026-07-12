@@ -1459,8 +1459,20 @@ std::string execReadBreakpointInfo(const std::string& argsJson) {
     }
 }
 
-// resolve_symbol
-std::string execResolveSymbol(const std::string& argsJson) {
+std::string execSymbolResolve(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().symbolResolve(argsJson, context);
+}
+
+std::string execSymbolList(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().symbolList(argsJson, context);
+}
+
+// Hidden compatibility implementation for resolve_symbol.
+std::string execResolveSymbolLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const std::string moduleName = requiredStringArg(
@@ -1505,43 +1517,6 @@ std::string execSymbolInit(const std::string& argsJson) {
         return makeOk(result);
     } catch (const std::exception& e) {
         return makeError(std::string("symbol_init: ") + e.what());
-    }
-}
-
-// symbol_list
-std::string execSymbolList(const std::string& argsJson) {
-    try {
-        const json args = argsJson.empty() ? json::object() : json::parse(argsJson);
-        if (args.contains("module_base") && !args["module_base"].is_null() &&
-            !(args["module_base"].is_string() &&
-              isBlankString(args["module_base"].get<std::string>()))) {
-            int totalCount = 0;
-            const uint64_t moduleBase = parseAddressJson(args["module_base"]);
-            if (!SymbolInit(moduleBase, totalCount, PORT_MAIN)) {
-                return makeError("socket communication error: symbol_list/symbol_init");
-            }
-        }
-
-        const int offset = optionalIntArg(
-            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
-        const int count = optionalIntArg(args, "count", 100, 1, 1000);
-
-        int totalCount = 0;
-        std::vector<std::pair<uint64_t, std::string>> symbols;
-        if (!SymbolGetList(offset, count, symbols, &totalCount, PORT_MAIN)) {
-            return makeError("socket communication error: symbol_list");
-        }
-        json arr = json::array();
-        for (const auto& [address, name] : symbols) {
-            arr.push_back({{"address", toHexAddress(address)}, {"name", name}});
-        }
-        json result;
-        result["total"] = totalCount;
-        result["offset"] = offset;
-        result["symbols"] = std::move(arr);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("symbol_list: ") + e.what());
     }
 }
 
@@ -2339,6 +2314,25 @@ constexpr const char* kSchemaRemoveBreakpoint = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaSymbolResolve = R"JSON({
+  "type": "object",
+  "required": ["module_name", "symbol_name"],
+  "properties": {
+    "module_name": {
+      "type": "string",
+      "description": "Exact module name, basename, or unique substring",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "symbol_name": {
+      "type": "string",
+      "description": "Symbol name to resolve inside the module",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaResolveSymbol = R"JSON({
   "type": "object",
   "anyOf": [
@@ -2387,13 +2381,23 @@ constexpr const char* kSchemaSymbolInit = R"JSON({
 
 constexpr const char* kSchemaSymbolList = R"JSON({
   "type": "object",
+  "required": ["module_name"],
   "properties": {
-    "module_base": {
-      "description": "Optional module base address; initializes symbols for that module first"
+    "module_name": {
+      "type": "string",
+      "description": "Exact module name, basename, or unique substring",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "symbol_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Required with offset > 0; use the previous page's symbol_epoch"
     },
     "offset": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 2147483647
     },
     "count": {
       "type": "integer",
@@ -2871,12 +2875,20 @@ void ToolExecutor::initBuiltinTools() {
         ToolTargetPolicy::Bound);
 
     registerTool(
+        "symbol_resolve",
+        "Resolve a symbol by module name in one target-bound symbol transaction.",
+        kSchemaSymbolResolve,
+        ToolSafety::ReadOnly,
+        &execSymbolResolve,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "resolve_symbol",
-        "Resolve a symbol name to its absolute address inside a loaded module.",
+        "Compatibility alias for symbol_resolve.",
         kSchemaResolveSymbol,
         ToolSafety::ReadOnly,
-        &execResolveSymbol,
-        true,
+        &execResolveSymbolLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
@@ -2885,16 +2897,15 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaSymbolInit,
         ToolSafety::ReadOnly,
         &execSymbolInit,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "symbol_list",
-        "List symbols from the active symbol table, optionally initializing a module first.",
+        "List one page of symbols by module name in a target-bound symbol session.",
         kSchemaSymbolList,
         ToolSafety::ReadOnly,
         &execSymbolList,
-        true,
         ToolTargetPolicy::Bound);
 
     registerTool(
@@ -2903,7 +2914,7 @@ void ToolExecutor::initBuiltinTools() {
         kSchemaSymbolFind,
         ToolSafety::ReadOnly,
         &execSymbolFind,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
