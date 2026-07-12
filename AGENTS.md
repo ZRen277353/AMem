@@ -13,7 +13,7 @@ Read the relevant documents before changing `gui/ai/`, `ipc/`, `tools/protocol_r
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android server over sockets and provides memory scanning, memory read/write, hardware breakpoints, a hex viewer, value freezing, ELF symbols, and Lua scripting. Dear ImGui (docking branch) is rendered through DirectX 12.
 
-The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics. Native framing, bounded pipe I/O, an Observe-only Hello handshake, and secured transport now exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, request session/dispatch, or supported external Agent adapter yet.
+The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics. Native framing, bounded pipe I/O, an Observe-only Hello handshake, a strict request/session state machine, and secured transport now exist under `ipc/`, but `ENABLE_NATIVE_IPC` defaults OFF and there is no product runtime start, `MemService` dispatch/approval, or supported external Agent adapter yet.
 
 Language: C++17 for the app. Platform: Windows 10/11 x64. The optional protocol probe in `tools/protocol_reference/` uses Python's standard library but is not a build or runtime dependency.
 
@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 5 protocol, 5 transport, 7 framed-I/O, and 8 handshake groups. They cover early header validation, exact/fragmented I/O, immutable limits, UTF-8, timeout/Stop cancellation, DACL/name ownership, Hello schema/version, structured rejection, and Observe-only negotiation. Nine CTests include those four binaries plus catalog, no-Python-MCP, legacy/native IPC gates, and the service suite. Provider, persistent native request/deadline/cancel/approval, opt-in legacy IPC, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 5 protocol, 5 transport, 7 framed-I/O, 8 handshake, 6 request-contract, and 8 request-session groups. They cover early header validation, exact/fragmented I/O, immutable limits, UTF-8, DACL/name ownership, Hello negotiation, strict request/cancel JSON, lifetime request-id deduplication, server-owned capability enforcement, deadline/client/Stop cancellation, and joined dispatch shutdown. Eleven CTests include those six native IPC binaries plus catalog, no-Python-MCP, legacy/native IPC gates, and the service suite. Provider, native `MemService` dispatch/approval, opt-in legacy IPC, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -251,7 +251,11 @@ The current session format also stores `systemPrompt` and `tokenLimit`, even tho
 
 `IpcHandshakeSession` requires the first frame to be a maximum 16 KiB `Hello` JSON. `client_name` is required and bounded, `client_version` is optional and bounded, and `requested_capabilities` accepts each known capability once. `HelloAck` grants only requested `Observe`; requested `TargetSelection`, `TargetMutation`, and `HostExecution` capabilities are denied. Unsupported header versions/oversized frames close without a response; wrong first types or invalid JSON/schema receive a bounded structured `Error` before close. An established caller must keep the handler alive for the next session stage.
 
-`ENABLE_NATIVE_IPC` only compiles and links this foundation; it defaults OFF and `main.cpp` has no native start path. Persistent request handling, request JSON/deadline/cancel routing, capability enforcement, `MemService` dispatch, GUI enable/status, target/generation invalidation, and the approval broker are unimplemented. Do not describe native IPC as available until those boundaries exist and are tested.
+`IpcRequestProtocol` requires Request JSON `{ "method": string, "params": object, "timeout_ms"?: uint }`, rejects unknown fields, bounds method names to 128 bytes, defaults timeout to 30 seconds, and caps it at 5 minutes. Cancel payload is exactly `{}`. Response payloads use stable `ok`, `completion`, and `result`/`error` fields and are validated before bounded serialization.
+
+`IpcRequestSession` persists after `HelloAck`, permits one active request, remembers at most 1024 unique request ids for the connection lifetime, and requires reconnect after that limit. A server-owned dispatcher resolves each method's required capability; the client cannot self-assert it. The caller thread keeps reading Request/Cancel frames while one owned joinable worker dispatches, so client Cancel, absolute server deadline, pipe Stop, invalid/duplicate ids, and session shutdown have explicit outcomes. Cancellation remains cooperative; dispatchers must observe the supplied context, and a sent device operation is not thereby retracted.
+
+`ENABLE_NATIVE_IPC` only compiles and links this foundation; it defaults OFF and `main.cpp` has no native start path. `MemService` dispatch, GUI enable/status, target/generation invalidation, privileged capability approval, and the approval broker are unimplemented. Do not describe native IPC as available until those boundaries exist and are tested.
 
 ### Legacy HTTP Server (`ipc/IpcServer.*`)
 
@@ -321,8 +325,8 @@ The only in-app Lua name is `lua_execute`, registered only with `HAVE_LUAJIT`; r
 16. Keep a generated capability matrix for in-app tools, temporary IPC methods, and feature gates.
 17. Reserve provider context for tool schemas and output; do not rely only on UTF-8 bytes/4.
 18. Encode IPC headers field-by-field; keep version, flags, request-id, UTF-8, and immutable payload-limit validation at the codec boundary.
-19. Keep native IPC compile-only and default-off until persistent request sessions, capability enforcement, GUI status, cancellation, and approval are complete; handlers stay owned and joinable.
-20. Validate native frame headers before allocation; handshake grants only Observe, and established handlers remain alive until a managed request session takes ownership.
+19. Keep native IPC compile-only and default-off until `MemService` dispatch, privileged capability approval, GUI status, and target/generation invalidation are complete; handlers and dispatch workers stay owned and joinable.
+20. Validate native frame headers before allocation; handshake grants only Observe, request capabilities come from server metadata, request ids are lifetime-deduplicated, and cancellation remains cooperative.
 
 ## Branches
 

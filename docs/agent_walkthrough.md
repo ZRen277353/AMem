@@ -442,7 +442,7 @@ read -> parse temporary -> validate all fields -> commit memory
 
 ## 9. IPC 迁移路径
 
-### 9.1 Native framing、Hello 与 transport 基础
+### 9.1 Native framing、Hello、request session 与 transport 基础
 
 `ipc/IpcProtocol.*` 是 transport-independent codec。默认测试构建单独验证它；`ENABLE_NATIVE_IPC=ON` 时 codec 和 native transport 会编入应用，但 `main.cpp` 仍无 start 路径。固定 24-byte header 按 little endian 逐字段编码 `AMEM` magic、精确 `1.0` 版本、message type、零 flags、request id 和 payload length。
 
@@ -450,7 +450,20 @@ decoder 先用完整 header 验证版本/type/flags/id/长度，再等待或复�
 
 `IpcFramedConnection::readFrame()` 先精确读取 header，调用 `DecodeHeader()` 后才按合法长度分配 payload；同一个绝对 deadline 覆盖 header 与 payload。overlapped exact transfer 会处理 fragmented read/short write，Stop event 通过 `CancelIoEx` 中断等待；partial header/payload 后断开被报告为 protocol error，而不是正常 EOF。
 
-`IpcHandshakeSession::run()` 消费首帧并要求 request id 0 的 `Hello`。Hello JSON 上限为 16 KiB，校验必填的 `client_name`、可选 `client_version` 和最多四项且无重复的 `requested_capabilities`。当前状态机只授予客户端请求的 `Observe`，把请求到的 `TargetSelection`、`TargetMutation`、`HostExecution` 放入 denied list。invalid first type/JSON/schema/capability 返回 structured `Error` 并做最长 1 秒 bounded drain；unsupported frame version 或 oversized header 直接关闭。
+`IpcHandshakeSession::perform()` 消费首帧并要求 request id 0 的 `Hello`。Hello JSON 上限为 16 KiB，校验必填的 `client_name`、可选 `client_version` 和最多四项且无重复的 `requested_capabilities`。当前状态机只授予客户端请求的 `Observe`，把请求到的 `TargetSelection`、`TargetMutation`、`HostExecution` 放入 denied list。invalid first type/JSON/schema/capability 返回 structured `Error` 并做最长 1 秒 bounded drain；unsupported frame version 或 oversized header 直接关闭。
+
+Hello 建立后的测试调用链是：
+
+```text
+handler reader -> IpcRequestSession::run()
+  -> strict Request {method, params, timeout_ms?}
+  -> lifetime request-id dedupe / one-active / capability check
+  -> owned dispatch worker -> IIpcRequestDispatcher::execute(context)
+  -> validated Response {ok, completion, result|error}
+Cancel/deadline/Stop -> same cooperative cancellation context
+```
+
+`timeout_ms` 默认 30 秒、最大 5 分钟，接收 Request 时转换成 server `steady_clock` absolute deadline。client 不能在 payload 中声明 capability；dispatcher registry 决定 method 需要 Observe、TargetSelection、TargetMutation 或 HostExecution。当前 handshake 只 grant Observe，所以 privileged fake methods 在 worker 前被拒绝。每个连接最多接纳 1024 个 unique request id；id 终身不复用，达到上限后返回 Error 并断开要求重连。Cancel 只接受 `{}`，不单独返回成功 ack；active request 的最终 Response 给出 completion。
 
 直接测试 `NamedPipeServer::start()` 时的调用链是：
 
@@ -463,7 +476,7 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。handler 与 accept 共用同一 owned thread，必须响应 stop event 并使用可取消 I/O。framed I/O 与 Hello 已能被测试 handler 调用，但当前没有代码从产品运行时调用 `start()`，也没有 handshake 后的持久 request loop、Request DTO/schema、request-id/deadline/cancel、capability operation enforcement、`MemService` dispatch、GUI enable/status、target invalidation 或 approval broker。`run()` 返回 `Established` 后，caller 必须接管并保持 handler 存活；立即返回可能让 client 收不到已写入的 `HelloAck`。调试正常应用时看不到 pipe 是预期现状。
+`snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前没有代码从产品运行时调用 `start()`，也没有 `MemService` method adapter、GUI enable/status、target/generation invalidation、privileged approval 或 approval broker。调试正常应用时看不到 pipe 是预期现状。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -574,13 +587,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 5 组 protocol、5 组 transport、7 组 framed-I/O 和 8 组 handshake 测试：包括 2 MiB response/128 KiB request、碎片化输入、payload 分配前的超限 header 拒绝、UTF-8、truncated header、绝对 deadline、Stop cancellation、完整 capability negotiation、错误 JSON/schema/capability、bounded rejection drain、version/Hello limit/timeout。连同 catalog、no-Python-MCP、legacy/native IPC gate，Debug/Release 当前各有 9 项 CTest。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract 和 8 组 request-session 测试；新增覆盖 strict Request/Cancel schema、timeout/response bounds、persistent sequential use、duplicate/busy/count limit、server-owned capability denial、deadline/client/Stop cancellation、invalid dispatcher normalization、idle timeout 和 joined worker。连同 catalog、no-Python-MCP、legacy/native IPC gate，Debug/Release 当前各有 11 项 CTest。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Named Pipe 持久 request session、Request DTO/schema、duplicate id、request deadline/cancel、capability enforcement 和 approval invalidation 建立状态机/transport 测试。
+5. 为 Native IPC `MemService` adapter、target/generation invalidation、privileged approval broker 和 GUI enable/teardown 建立状态机/集成测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 

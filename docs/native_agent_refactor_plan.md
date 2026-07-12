@@ -1,16 +1,16 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing、有界 I/O、Observe-only Hello 与安全 transport 基础已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport 基础已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
 最后更新：2026-07-13
 
-本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；若继续 Named Pipe 路线，其 framing、有界 I/O、Observe-only Hello 与安全 transport 基础已先行固定，但产品尚不启动。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；若继续 Named Pipe 路线，其 framing、有界 I/O、Observe-only Hello、严格 request session 与安全 transport 基础已先行固定，但产品尚不启动。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成二十四个纵向切片：
+截至 2026-07-13 已完成二十五个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -39,9 +39,11 @@
 - `ENABLE_NATIVE_IPC` 默认 OFF；`NativePipeSecurity` 只允许当前进程用户 SID 与 SYSTEM read/write，`NamedPipeServer` 拒绝 remote client、固定 first/single instance 并复用同一 handle。overlapped accept 与串行 handler 共用 joinable thread，stop event + `CancelIoEx` 后 join；状态快照有 lifecycle/count/name/error。main 没有 start 路径。
 - `IpcFramedConnection` 在 payload 分配前调用 `DecodeHeader()`，用 overlapped exact read/write、绝对 deadline 和 stop event 处理 fragmented input、short write 与取消；partial frame close 是 protocol error。
 - `IpcHandshakeSession` 把首帧限制为 16 KiB `Hello` JSON，校验 identity/capability schema，精确匹配 header `1.0`，仅授予请求的 `Observe`，拒绝任何请求的 privileged capability；错误 Hello 返回 structured `Error`，unsupported version/oversized header 直接关闭，拒绝 drain 最长 1 秒。
-- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；native IPC 有 5 组 protocol、5 组 transport、7 组 framed-I/O 和 8 组 handshake 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 9 项 CTest。
+- `IpcRequestProtocol` 固定 strict `{method, params, timeout_ms?}`、空 object Cancel、30 秒默认/5 分钟最大 timeout、统一 completion/response envelope 和 output validation。
+- `IpcRequestSession` 在 Hello 后维持 one-active reader/worker 状态机；request id 连接内终身去重并以 1024 项封顶，dispatcher server metadata 决定 required capability，相对 timeout 固定为 absolute deadline，client Cancel/deadline/Stop 共用 cooperative cancellation，worker owned/joinable。
+- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；native IPC 有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract 和 8 组 request-session 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 11 项 CTest。
 
-尚未完成：HTTP IPC transport 的最终删除；Named Pipe 持久 request session、Request DTO/schema、request-id/deadline/cancel、capability operation enforcement、GUI enable/status 与 approval broker；IPC 到 `MemService` adapter；target/generation-bound external approval；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC transport 的最终删除；Native IPC `MemService` method adapter、GUI enable/status、真实 target/generation invalidation 与 privileged approval broker；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -476,7 +478,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] 实现 compile-only、default-off 的单实例 Named Pipe、当前用户/SYSTEM DACL、remote rejection、受管串行 handler、stop/join 和状态快照。
 - [x] 实现有界 framed read/write、payload 分配前 header 校验、绝对 deadline 和 Stop cancellation。
 - [x] 实现 exact-version Hello、16 KiB schema 边界与 Observe-only capability negotiation。
-- 有外部调用需求时继续实现持久 request session、Request DTO/schema、request-id/deadline/cancel、capability enforcement、GUI enable/status、`MemService` adapter、target invalidation 和 approval broker。
+- [x] 实现严格 Request/Cancel DTO、bounded response、persistent one-active session、lifetime ID dedupe、deadline/client/Stop cancellation 和 server-owned capability enforcement。
+- 有外部调用需求时继续实现 GUI enable/status、`MemService` method adapter、target/generation invalidation 和 privileged approval broker。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
@@ -624,4 +627,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第二十四批加入 bounded frame I/O 与 Observe-only Hello 状态机。`IpcFramedConnection` 先读/验 24-byte header 再分配 payload，用 overlapped exact transfer、绝对 deadline 和 stop event 处理碎片、short write、timeout 与 cancellation。`IpcHandshakeSession` 要求首帧为最大 16 KiB 的 request-id 0 `Hello`，校验 identity/capability JSON，只 grant 请求的 `Observe`，拒绝 privileged capability；invalid Hello 返回 structured `Error`，unsupported version/oversized header 直接关闭，拒绝 drain 有 1 秒上限。7 组 framed-I/O 与 8 组 handshake 测试在 Debug/Release 各连续 50 次通过；完整 9/9 CTest 和 fresh `ENABLE_NATIVE_IPC=ON` 编译验证通过。产品仍无 start 路径。
 
-二十四个切片已落地。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/安全 transport 与 GUI breakpoint/symbol/scan 迁移已完成。下一批应实现 handshake 后的 request/session DTO、request-id/deadline/cancel lifecycle 和 capability enforcement；在 approval broker 完成前仍不得建立 privileged product start 路径。
+第二十五批固定 Request contract 与 persistent session。`IpcRequestProtocol` 严格解析 `{method, params, timeout_ms?}`，拒绝 client capability/unknown fields，限制 method/timeout，并验证 Cancel、completion/result/error 与 response size。`IpcRequestSession` 使用 caller reader + owned serial worker，同一连接 one-active、1024 unique-id lifetime bound；server dispatcher metadata 在执行前拒绝 unknown/privileged method，relative timeout 变为 absolute deadline，client Cancel/deadline/Stop 发同一 cooperative token，invalid/duplicate/busy/count limit 都有 stable Error。6 组 contract 与 8 组 session 测试落地；Debug/Release 完整 11/11、session 各连续 50 次、fresh `ENABLE_NATIVE_IPC=ON` 静态库编译通过。产品仍无 start 路径或真实业务 dispatch。
+
+二十五个切片已落地。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/有界 I/O/Observe-only Hello/严格 request session/安全 transport 与 GUI breakpoint/symbol/scan 迁移已完成。下一批应实现只读 `MemService` adapter 与 method catalog，并在连接/target generation 变化时使外部 session 状态失效；在 GUI approval broker 完成前仍不得 grant privileged capability 或建立 product start 路径。
