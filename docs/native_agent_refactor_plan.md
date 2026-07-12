@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol、Lua host boundary、独立 mutation audit、连接生命周期、run target 与受管工具 worker 已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成十七个纵向切片：
+截至 2026-07-12 已完成十八个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -22,6 +22,7 @@
 - 每端口新增可重入 transaction gate；普通 socket 命令短暂持有，pointer chain 跨 module list 和全部 8-byte read 持有。`pointer_resolve` 固定 generation/target，逐跳检查取消、deadline 和 uint64 overflow，释放事务后再复核完整 snapshot。
 - scan mutation 统一推进单调 epoch；`scan_start` 在一个事务内执行 range+scan，refine/results/clear 要求最新 epoch，results 绑定 count+page，clear 用 count=0 确认。长扫描通过 DEBUG stop 响应 cancellation，sent-without-terminal 保留 `completion_unknown`。
 - symbol init 在取得 transaction gate 后推进单调 epoch；`symbol_resolve`/`symbol_list` 在一个 MAIN transaction 内完成 module 唯一匹配、init 与 find/page，续页要求最新 epoch。GUI `loadSymbolTable` 一次 init 并在同一 transaction 读取全表；旧 IPC/隐藏 alias init 会使 native session 失效。
+- GUI `ScanWindow` 显式注入 `IMemService`；start/refine/results/clear/remove 均携带 target context 与最新 epoch。进度和 cancellation 共用一个 callback，GUI Stop 只设置 token；确认完成、Stop 后确认完成和 `completion_unknown` 不再混淆。删除地址去重并在一个 scan transaction 内确认前后计数与新 epoch。
 - breakpoint set/remove/suspend/resume 使用统一 tracked receipt，区分未发送、server reject、发送后未知和确认后 cancel/deadline；设备确认与 cleanup tracker 在同一 MAIN transaction 更新，disconnect 清本地 tracker。hits 使用无 cursor 的最新批次；Agent 上限 100 并把 64 位值转为字符串。
 - `disassemble` 统一校验 ARM64 固定宽度 `count * 4`、拒绝短读，返回 little-endian encoding 和明确的 `decoded=false`；旧 `read_disassembly` 仅作隐藏 alias。
 - `driver_initialize` 在 service/send 边界绑定 connection generation，区分未发送、server reject、`completion_unknown` 与确认后 cancel/deadline；`card`/`card_name` 在审批、审计和会话 JSON 中统一脱敏，原值仅瞬时用于执行/provider 连续性。
@@ -34,7 +35,7 @@
 - 旧名称仍可执行但不再向 provider 广告。LuaJIT 构建当前有 57 个可执行名称、33 个隐藏 alias、24 个广告定义；无 LuaJIT 时为 55/32/23。
 - `NativeAgentMemTests` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：GUI/IPC scan、IPC symbol/breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录、Stop 后 mutation 独立审计和 GUI breakpoint/symbol 迁移已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 仍只能视为部分修复；A-03 与 A-07 已由 joinable worker、shutdown 和 mutation-audit 测试关闭。
+尚未完成：IPC scan/symbol/breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 仍只能视为部分修复；A-03 与 A-07 已由 joinable worker、shutdown 和 mutation-audit 测试关闭。
 
 ## 1. 结论
 
@@ -597,4 +598,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十七批完成 GUI symbol cache 迁移。`loadSymbolTable` 在一个 symbol domain/MAIN transaction 内完成 module 唯一匹配、一次 init 和全部 1000-item page，限制 1,000,000 项与 64 MiB 名称；释放 transaction 后复核 target/epoch。`MemoryViewerWindow` 与 `BreakpointWindow` 显式传入 service，cache 安装时在 mutex 内再次复核 target/module，旧结果不能在进程切换 invalidate 后写回。
 
-十七个切片均已通过 Debug/Release 应用构建和 22 组无设备测试，模型可见规范目录、Stop 后 mutation 审计与 GUI breakpoint/symbol 迁移已完成。下一批应推进 GUI scan、隐藏 alias 删除以及 IPC/MCP 收敛。
+第十八批完成 GUI scan session 迁移。`ScanWindow` 由 `CEWindow` 显式注入系统 `IMemService`；首次扫描把内存区组合、数据类型、模式和值一次提交，refine/results/clear/remove 都携带最新 epoch 和 target context。结果页在一个 transaction 内绑定 count+page；选中删除先去重，再在一个 transaction 内读取前后 count 并要求 epoch 前进。GUI Stop 仅设置共享 cancellation token，system backend 在进度 callback 中发送一次 DEBUG stop；收到 terminal count 时保留 confirmed-after-cancel，未确认时保留结构化错误。同步旧扫描实现和 GUI 直连扫描命令已删除。
+
+十八个切片均已通过 Debug/Release 应用构建和 22 组无设备测试。模型可见规范目录、Stop 后 mutation 审计与 GUI breakpoint/symbol/scan 迁移已完成。下一批应推进隐藏 alias 删除以及 IPC/MCP 收敛。

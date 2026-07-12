@@ -289,7 +289,7 @@ connect/disconnect/reconnect 持有 exclusive lifecycle lease；I/O 错误、EOF
 
 普通命令只短暂持有 transaction gate。`pointer_resolve`/旧 `ResolveModuleOffsetChain()` 会把同一个 gate 保持到模块查询和全部 pointer read 结束，因此其他 caller 不能插入；规范 service 在 gate 外做完整 target snapshot 校验，在 gate 内只做稳定 revision 和无 target-lock 的 generation/cancel 检查。
 
-canonical scan 另持有 scan domain mutex 和 MAIN transaction gate：start 覆盖 set-range+scan，results 覆盖 count+page，clear 用后续 count=0 确认。长扫描的 progress callback 观察 cancellation token，并经 DEBUG 端口请求 stop；若主命令仍返回 terminal count，结果标为 `completed_after_cancel_request`，否则 sent request 保留 `completion_unknown`。
+canonical scan 另持有 scan domain mutex 和 MAIN transaction gate：start 覆盖 set-range+scan，results 覆盖 count+page，clear 用后续 count=0 确认。GUI `ScanWindow` 使用注入的同一 `IMemService`：首次/再次扫描捕获 target context，结果分页与 clear 携带最新 epoch，选中删除在单个 transaction 内确认 count 与新 epoch。长扫描的 progress callback 同时转发 GUI 进度并观察 cancellation token；GUI Stop 只设置 token，backend 经 DEBUG 端口请求一次 stop。若主命令仍返回 terminal count，结果标为 `completed_after_cancel_request`，否则 sent request 保留 `completion_unknown`。
 
 canonical symbol 另持有 symbol domain mutex 和 MAIN transaction gate。`symbol_resolve`/`symbol_list` 都在 gate 内完成 module 唯一匹配、`SymbolInit` 和 find/page；init 取得 gate 后才推进 epoch，保证 epoch 顺序与实际 mutation 顺序一致。offset > 0 的 list 必须携带上一页 epoch，跨前端 init 会返回 `symbol_session_changed`。
 
@@ -297,7 +297,7 @@ canonical breakpoint mutation 在同一个 MAIN transaction 内接收设备确�
 
 以下序列仍不是事务：
 
-- `ScanSetRange` -> scan command
+- 旧 IPC/隐藏 alias 的 `ScanSetRange` -> scan command
 - `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的多步清理/open/set PID
 

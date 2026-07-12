@@ -71,11 +71,12 @@
 - 审批框显示预期 connection generation、PID 和 process revision。
 - `status`、`process_list`、`process_open`、module/pointer resolution、四个 canonical scan 工具、raw/typed memory read/write 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
 - GUI `BreakpointWindow` 的 set/remove/enable/suspend/resume 与 hit refresh 已显式注入 `IMemService`，每次调用捕获 target context；命中 batch 保留完整 GPR/FPSIMD，按最新 50,000 条有界。
+- GUI `ScanWindow` 的 start/refine/results/clear/remove 已显式注入 `IMemService`，每次调用捕获 target context 并携带最新 scan epoch；Stop 通过共享 cancellation token 进入同一 service/backend 调用。
 - 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint 与 symbol cache、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint/scan 与 symbol cache、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
@@ -164,7 +165,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 - 端口锁只覆盖单个 request-response。
 - 每条 `SocketCommand` 现会经过可重入 per-port transaction gate；canonical pointer、scan 与 symbol 已长期持有相应 transaction，process selection 尚未完成同等级的业务事务/revision。
-- canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；旧 GUI/IPC/隐藏 alias 仍可能分步调用，但会推进 epoch 并使 native session 失效。
+- canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；GUI start/refine/results/clear/remove 已迁入同一 `IMemService` session。旧 IPC/隐藏 alias 仍可能分步调用，但会推进 epoch 并使 native/GUI session 失效。
 - GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC/隐藏 alias 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
 - GUI、内置 Agent、IPC/MCP 共用进程、扫描结果和服务端 active symbol table。
@@ -175,7 +176,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 **建议**
 
-- 继续把旧 GUI/IPC scan 和 IPC/隐藏 symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
+- 继续把旧 IPC/隐藏 scan 与 IPC/隐藏 symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
 - 最可靠的方式是让服务端提供单命令复合操作或显式 session id。
 - 工具执行前后校验 process/scan/symbol revision；冲突时失败而不是继续使用混合状态。
 
@@ -310,7 +311,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。但隐藏 legacy 工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。但隐藏 legacy 工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 

@@ -318,7 +318,7 @@ Idle
 
 `pointer_resolve` 已使用该高层 gate：system backend 在稳定 generation/PID/handle/revision 上获得事务，`MemService` 在事务内完成 module list、唯一匹配和每次 8-byte pointer read，释放后再做完整 target 校验。旧 GUI/Lua/IPC 使用的 `ResolveModuleOffsetChain()` 也持有同一 gate，但仍保留旧的首个子串匹配和结果契约。
 
-canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 GUI/IPC 旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。
+canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 IPC/隐藏旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。GUI `ScanWindow` 注入同一个 `IMemService`，start/refine/results/clear/remove 均绑定 target 与 epoch；remove 在一个 transaction 内去重地址、确认前后 count 并要求 epoch 前进。Stop 只设置共享 token，由 system backend 的 progress callback 发送一次 DEBUG stop。
 
 canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，IPC/隐藏 alias 的 init 会使其失效。GUI 的 `loadSymbolTable` 在同一个 transaction 内只 init 一次，并循环读取全部 1000-item protocol page；总量限制为 1,000,000 项和 64 MiB 名称。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
 
@@ -328,11 +328,11 @@ canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确�
 
 当前复合序列包括：
 
-- 旧 GUI/IPC/隐藏 alias 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
+- 旧 IPC/隐藏 alias 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
 - 旧 IPC/隐藏 alias 的 `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的清理/open/set PID/cache 流程
 
-canonical pointer/scan/symbol 与 GUI symbol cache 已迁移；旧 GUI/IPC scan、IPC/隐藏 symbol 和 process selection 分步流程仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
+canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC/隐藏 scan、IPC/隐藏 symbol 和 process selection 分步流程仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
 
 ### 8.3 地址语义
 
