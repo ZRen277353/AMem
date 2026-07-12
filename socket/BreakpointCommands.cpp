@@ -7,6 +7,7 @@
 
 namespace {
 constexpr int kMaxBreakpointHitCount = 100000;
+constexpr size_t kBreakpointHitReadChunk = 64;
 
 std::mutex g_trackedBreakpointMutex;
 std::vector<uint64_t> g_trackedBreakpointAddresses;
@@ -45,11 +46,14 @@ void clearTrackedBreakpointAddresses() {
 }
 } // namespace
 
-bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
+BreakpointMutationIoResult SetKernelBreakpointTracked(
+    uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
+    BreakpointMutationIoResult result;
     if (!isValidBreakpointType(bpType) || !isValidBreakpointSize(bpSize))
-        return false;
+        return result;
 
-    const bool success = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_KERNEL_SETBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -60,65 +64,120 @@ bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, Por
         memcpy(buf + sizeof(address) + sizeof(bpType), &bpSize, sizeof(bpSize));
         if (!client->Send(buf, sizeof(buf)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        if (result.applied) {
+            trackBreakpointAddress(address);
+        }
+        return true;
     });
-    if (success) {
-        trackBreakpointAddress(address);
-    }
-    return success;
+    return result;
 }
 
-bool RemoveKernelBreakpoint(uint64_t address, PortType port) {
-    const bool success = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+BreakpointMutationIoResult RemoveKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    BreakpointMutationIoResult result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_KERNEL_REMOVEBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
         if (!client->Send(&address, sizeof(address)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        if (result.applied) {
+            untrackBreakpointAddress(address);
+        }
+        return true;
     });
-    if (success) {
-        untrackBreakpointAddress(address);
-    }
-    return success;
+    return result;
 }
 
-bool SuspendKernelBreakpoint(uint64_t address, PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+BreakpointMutationIoResult SuspendKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    BreakpointMutationIoResult result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_KERNEL_SUSPENDBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
         if (!client->Send(&address, sizeof(address)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
 }
 
-bool ResumeKernelBreakpoint(uint64_t address, PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+BreakpointMutationIoResult ResumeKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    BreakpointMutationIoResult result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_KERNEL_RESUMEBREAKPOINT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
         if (!client->Send(&address, sizeof(address)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
+}
+
+bool SetKernelBreakpoint(uint64_t address, uint32_t bpType,
+                         uint32_t bpSize, PortType port) {
+    const auto result = SetKernelBreakpointTracked(
+        address, bpType, bpSize, port);
+    return result.responseReceived && result.applied;
+}
+
+bool RemoveKernelBreakpoint(uint64_t address, PortType port) {
+    const auto result = RemoveKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
+}
+
+bool SuspendKernelBreakpoint(uint64_t address, PortType port) {
+    const auto result = SuspendKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
+}
+
+bool ResumeKernelBreakpoint(uint64_t address, PortType port) {
+    const auto result = ResumeKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
 }
 
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos, PortType port) {
+    size_t total = 0;
+    return ReadKernelBreakpointInfoPage(
+        address, 0, static_cast<size_t>(kMaxBreakpointHitCount),
+        infos, total, port);
+}
+
+bool ReadKernelBreakpointInfoPage(
+    uint64_t address, size_t offset, size_t limit,
+    std::vector<HW_HIT_INFO> &infos, size_t &total, PortType port) {
     infos.clear();
+    total = 0;
+    if (offset > static_cast<size_t>(kMaxBreakpointHitCount) ||
+        limit == 0 || limit > static_cast<size_t>(kMaxBreakpointHitCount)) {
+        return false;
+    }
 
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_READHWBPINFO;
@@ -137,17 +196,44 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
             TotalCount > static_cast<uint64_t>(kMaxBreakpointHitCount) ||
             static_cast<uint64_t>(result) > TotalCount)
             return false;
-        if (result > 0) {
-            std::vector<HW_HIT_INFO> receivedInfos(static_cast<size_t>(result));
-            if (!client->Receive(receivedInfos.data(), static_cast<size_t>(result) * sizeof(HW_HIT_INFO)))
+        const size_t resultCount = static_cast<size_t>(result);
+        const size_t pageBegin = (std::min)(offset, resultCount);
+        const size_t pageEnd = pageBegin + (std::min)(limit, resultCount - pageBegin);
+        std::vector<HW_HIT_INFO> receivedInfos;
+        receivedInfos.reserve(pageEnd - pageBegin);
+        std::vector<HW_HIT_INFO> chunk(
+            (std::min)(kBreakpointHitReadChunk, resultCount));
+        for (size_t chunkBegin = 0; chunkBegin < resultCount;) {
+            const size_t chunkCount = (std::min)(
+                chunk.size(), resultCount - chunkBegin);
+            if (!client->Receive(
+                    chunk.data(), chunkCount * sizeof(HW_HIT_INFO))) {
                 return false;
-            infos.swap(receivedInfos);
+            }
+            for (size_t index = 0; index < chunkCount; ++index) {
+                const size_t absoluteIndex = chunkBegin + index;
+                if (absoluteIndex >= pageBegin &&
+                    absoluteIndex < pageEnd) {
+                    receivedInfos.push_back(chunk[index]);
+                }
+            }
+            chunkBegin += chunkCount;
         }
+        // The protocol has no offset parameter. Only `result` entries follow
+        // this response, so pagination is bounded to the retrievable entries
+        // rather than advertising an unreachable cumulative TotalCount.
+        total = resultCount;
+        infos.swap(receivedInfos);
         return true;
     });
 }
 
 bool ClearTrackedKernelBreakpoints(PortType port) {
+    SocketCommand::TransactionLease transaction(port);
+    if (!transaction) {
+        clearTrackedBreakpointAddresses();
+        return false;
+    }
     auto addresses = snapshotTrackedBreakpointAddresses();
     bool allRemoved = true;
     for (uint64_t address : addresses) {
@@ -157,4 +243,8 @@ bool ClearTrackedKernelBreakpoints(PortType port) {
     }
     clearTrackedBreakpointAddresses();
     return allRemoved;
+}
+
+void ResetTrackedKernelBreakpoints() {
+    clearTrackedBreakpointAddresses();
 }

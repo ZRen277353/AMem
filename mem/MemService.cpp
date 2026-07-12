@@ -136,6 +136,32 @@ bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& result) {
     return true;
 }
 
+const char* breakpointActionName(BreakpointAction action) {
+    switch (action) {
+        case BreakpointAction::Set:     return "set";
+        case BreakpointAction::Remove:  return "remove";
+        case BreakpointAction::Suspend: return "suspend";
+        case BreakpointAction::Resume:  return "resume";
+        default:                        return "mutate";
+    }
+}
+
+bool isValidBreakpointAccess(BreakpointAccess access) {
+    switch (access) {
+        case BreakpointAccess::Read:
+        case BreakpointAccess::Write:
+        case BreakpointAccess::ReadWrite:
+        case BreakpointAccess::Execute:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidBreakpointSize(uint32_t size) {
+    return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
 std::optional<uint64_t> decodePointer(
     const std::vector<unsigned char>& bytes) {
     if (bytes.size() != sizeof(uint64_t)) {
@@ -1122,6 +1148,210 @@ Result<SymbolPage> MemService::listSymbols(
             elapsedMilliseconds(start));
     }
     return Result<SymbolPage>::success(
+        std::move(page), elapsedMilliseconds(start));
+}
+
+Result<BreakpointMutationReceipt> MemService::mutateBreakpoint(
+    const OperationContext& context,
+    uint64_t address,
+    BreakpointAction action,
+    const std::function<BreakpointMutationBackendResult()>& operation,
+    std::optional<BreakpointAccess> access,
+    std::optional<uint32_t> size) {
+    const auto start = Clock::now();
+    if (address == 0) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint address must not be zero",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> breakpointLock(breakpointMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointMutationReceipt>(*error, start);
+    }
+
+    const BreakpointMutationBackendResult backendResult = operation();
+    if (!backendResult.responseReceived) {
+        if (backendResult.requestStarted) {
+            return Result<BreakpointMutationReceipt>::failure(
+                ErrorCode::CompletionUnknown,
+                std::string("breakpoint ") + breakpointActionName(action) +
+                    " was sent but its completion could not be confirmed; reconnect before continuing and do not retry automatically",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<BreakpointMutationReceipt>(*error, start);
+        }
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            std::string("breakpoint ") + breakpointActionName(action) +
+                " could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (!backendResult.applied) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            std::string("Android server rejected breakpoint ") +
+                breakpointActionName(action),
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            std::string("server confirmed breakpoint ") +
+                breakpointActionName(action) +
+                ", but the original target context is no longer current: " +
+                error->message,
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    BreakpointMutationReceipt receipt;
+    receipt.address = address;
+    receipt.action = action;
+    receipt.access = access;
+    receipt.size = size;
+    receipt.completedAfterCancelRequest =
+        context.cancellation &&
+        context.cancellation->load(std::memory_order_acquire);
+    receipt.completedAfterDeadline = Clock::now() >= context.deadline;
+    receipt.target = *context.target;
+    return Result<BreakpointMutationReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
+Result<BreakpointMutationReceipt> MemService::setBreakpoint(
+    const OperationContext& context,
+    const BreakpointSetRequest& request) {
+    if (!isValidBreakpointAccess(request.access)) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint access must be read, write, read_write, or execute");
+    }
+    if (!isValidBreakpointSize(request.size)) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint size must be 1, 2, 4, or 8 bytes");
+    }
+    if (request.access == BreakpointAccess::Execute && request.size != 4) {
+        return Result<BreakpointMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "execute breakpoints require size 4");
+    }
+    return mutateBreakpoint(
+        context,
+        request.address,
+        BreakpointAction::Set,
+        [&] {
+            return backend_.setBreakpoint(
+                request.address, request.access, request.size);
+        },
+        request.access,
+        request.size);
+}
+
+Result<BreakpointMutationReceipt> MemService::removeBreakpoint(
+    const OperationContext& context,
+    const BreakpointAddressRequest& request) {
+    return mutateBreakpoint(
+        context,
+        request.address,
+        BreakpointAction::Remove,
+        [&] { return backend_.removeBreakpoint(request.address); });
+}
+
+Result<BreakpointMutationReceipt> MemService::suspendBreakpoint(
+    const OperationContext& context,
+    const BreakpointAddressRequest& request) {
+    return mutateBreakpoint(
+        context,
+        request.address,
+        BreakpointAction::Suspend,
+        [&] { return backend_.suspendBreakpoint(request.address); });
+}
+
+Result<BreakpointMutationReceipt> MemService::resumeBreakpoint(
+    const OperationContext& context,
+    const BreakpointAddressRequest& request) {
+    return mutateBreakpoint(
+        context,
+        request.address,
+        BreakpointAction::Resume,
+        [&] { return backend_.resumeBreakpoint(request.address); });
+}
+
+Result<BreakpointHitPage> MemService::breakpointHits(
+    const OperationContext& context,
+    const BreakpointHitsRequest& request) {
+    const auto start = Clock::now();
+    if (request.address == 0) {
+        return Result<BreakpointHitPage>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint address must not be zero",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.limit == 0 || request.limit > kMaxBreakpointHitPageSize ||
+        request.offset > kMaxBreakpointHitCount) {
+        return Result<BreakpointHitPage>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint hits require offset <= 100000 and count from 1 to 100",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> breakpointLock(breakpointMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointHitPage>(*error, start);
+    }
+
+    std::vector<BreakpointHit> hits;
+    size_t total = 0;
+    if (!backend_.fetchBreakpointHits(
+            request.address, request.offset, request.limit, hits, total)) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<BreakpointHitPage>(*error, start);
+        }
+        return Result<BreakpointHitPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to read breakpoint hits from the Android server",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointHitPage>(*error, start);
+    }
+    if (total > kMaxBreakpointHitCount || hits.size() > request.limit) {
+        return Result<BreakpointHitPage>::failure(
+            ErrorCode::ProtocolError,
+            "breakpoint hit response exceeds service limits",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    BreakpointHitPage page;
+    page.address = request.address;
+    page.items = std::move(hits);
+    page.total = total;
+    page.offset = (std::min)(request.offset, total);
+    const size_t end = page.offset + page.items.size();
+    if (end < page.total) {
+        if (page.items.empty()) {
+            return Result<BreakpointHitPage>::failure(
+                ErrorCode::ProtocolError,
+                "breakpoint hit page is empty before the reported end",
+                false,
+                elapsedMilliseconds(start));
+        }
+        page.nextOffset = end;
+    }
+    page.target = *context.target;
+    return Result<BreakpointHitPage>::success(
         std::move(page), elapsedMilliseconds(start));
 }
 

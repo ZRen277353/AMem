@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -168,6 +169,70 @@ struct SymbolPage {
     size_t offset = 0;
     std::optional<size_t> nextOffset;
     SymbolSessionSnapshot session;
+};
+
+enum class BreakpointAccess : uint32_t {
+    Read = 1,
+    Write = 2,
+    ReadWrite = 3,
+    Execute = 4,
+};
+
+enum class BreakpointAction {
+    Set,
+    Remove,
+    Suspend,
+    Resume,
+};
+
+struct BreakpointSetRequest {
+    uint64_t address = 0;
+    BreakpointAccess access = BreakpointAccess::Write;
+    uint32_t size = 4;
+};
+
+struct BreakpointAddressRequest {
+    uint64_t address = 0;
+};
+
+struct BreakpointHitsRequest {
+    uint64_t address = 0;
+    size_t offset = 0;
+    size_t limit = 100;
+};
+
+struct BreakpointMutationReceipt {
+    uint64_t address = 0;
+    BreakpointAction action = BreakpointAction::Set;
+    std::optional<BreakpointAccess> access;
+    std::optional<uint32_t> size;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+    TargetSnapshot target;
+};
+
+struct BreakpointHit {
+    uint64_t hitAddress = 0;
+    uint64_t hitTime = 0;
+    std::array<uint64_t, 31> registers{};
+    uint64_t stackPointer = 0;
+    uint64_t programCounter = 0;
+    uint64_t pstate = 0;
+};
+
+struct BreakpointHitPage {
+    uint64_t address = 0;
+    std::vector<BreakpointHit> items;
+    size_t total = 0;
+    size_t offset = 0;
+    std::optional<size_t> nextOffset;
+    TargetSnapshot target;
+};
+
+struct BreakpointMutationBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    bool applied = false;
 };
 
 enum class ScanStartKind {
@@ -369,6 +434,8 @@ inline constexpr size_t kMaxSymbolPageSize = 1000;
 inline constexpr size_t kMaxSymbolResultCount = 1000000;
 inline constexpr size_t kMaxSymbolNameBytes = 64u * 1024u;
 inline constexpr size_t kMaxSymbolPageNameBytes = 4u * 1024u * 1024u;
+inline constexpr size_t kMaxBreakpointHitPageSize = 100;
+inline constexpr size_t kMaxBreakpointHitCount = 100000;
 inline constexpr size_t kMaxScanValueBytes = 4096;
 inline constexpr size_t kMaxScanResultPageSize = 1000;
 inline constexpr size_t kMaxScanResultCount = 5000000;

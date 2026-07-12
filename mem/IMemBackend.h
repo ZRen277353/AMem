@@ -79,6 +79,20 @@ public:
     virtual uint64_t symbolEpoch() const = 0;
     virtual std::unique_ptr<IMemSymbolTransaction> beginSymbolTransaction(
         const OperationContext& context) = 0;
+    virtual BreakpointMutationBackendResult setBreakpoint(
+        uint64_t address, BreakpointAccess access, uint32_t size) = 0;
+    virtual BreakpointMutationBackendResult removeBreakpoint(
+        uint64_t address) = 0;
+    virtual BreakpointMutationBackendResult suspendBreakpoint(
+        uint64_t address) = 0;
+    virtual BreakpointMutationBackendResult resumeBreakpoint(
+        uint64_t address) = 0;
+    virtual bool fetchBreakpointHits(
+        uint64_t address,
+        size_t offset,
+        size_t limit,
+        std::vector<BreakpointHit>& hits,
+        size_t& total) = 0;
     virtual bool readMemory(uint64_t address,
                             uint32_t size,
                             std::vector<unsigned char>& bytes) = 0;

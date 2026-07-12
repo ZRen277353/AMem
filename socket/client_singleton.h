@@ -290,6 +290,21 @@ bool GetTypedScanResult(
     PortType type = PORT_MAIN);
 
 // 内核断点相关
+struct BreakpointMutationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool applied = false;
+};
+
+BreakpointMutationIoResult SetKernelBreakpointTracked(
+    uint64_t address, uint32_t bpType, uint32_t bpSize,
+    PortType type = PORT_MAIN);
+BreakpointMutationIoResult RemoveKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+BreakpointMutationIoResult SuspendKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+BreakpointMutationIoResult ResumeKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
 bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize,
                          PortType type = PORT_MAIN);
 bool RemoveKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
@@ -297,7 +312,12 @@ bool SuspendKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool ResumeKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
                               PortType type = PORT_MAIN);
+bool ReadKernelBreakpointInfoPage(
+    uint64_t address, size_t offset, size_t limit,
+    std::vector<HW_HIT_INFO> &infos, size_t &total,
+    PortType type = PORT_MAIN);
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
+void ResetTrackedKernelBreakpoints();
 
 // 停止扫描
 bool StopSearchScan(PortType type = PORT_DEBUG);

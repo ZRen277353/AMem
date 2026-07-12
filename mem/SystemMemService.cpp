@@ -134,6 +134,15 @@ ScanExecutionBackendResult toBackendScanResult(
     return result;
 }
 
+BreakpointMutationBackendResult toBreakpointBackendResult(
+    const BreakpointMutationIoResult& io) {
+    BreakpointMutationBackendResult result;
+    result.requestStarted = io.requestStarted;
+    result.responseReceived = io.responseReceived;
+    result.applied = io.applied;
+    return result;
+}
+
 class SystemScanTransaction final : public IMemScanTransaction {
 public:
     explicit SystemScanTransaction(const OperationContext& context)
@@ -408,6 +417,63 @@ public:
             return nullptr;
         }
         return transaction;
+    }
+
+    BreakpointMutationBackendResult setBreakpoint(
+        uint64_t address,
+        BreakpointAccess access,
+        uint32_t size) override {
+        return toBreakpointBackendResult(SetKernelBreakpointTracked(
+            address, static_cast<uint32_t>(access), size, PORT_MAIN));
+    }
+
+    BreakpointMutationBackendResult removeBreakpoint(
+        uint64_t address) override {
+        return toBreakpointBackendResult(
+            RemoveKernelBreakpointTracked(address, PORT_MAIN));
+    }
+
+    BreakpointMutationBackendResult suspendBreakpoint(
+        uint64_t address) override {
+        return toBreakpointBackendResult(
+            SuspendKernelBreakpointTracked(address, PORT_MAIN));
+    }
+
+    BreakpointMutationBackendResult resumeBreakpoint(
+        uint64_t address) override {
+        return toBreakpointBackendResult(
+            ResumeKernelBreakpointTracked(address, PORT_MAIN));
+    }
+
+    bool fetchBreakpointHits(
+        uint64_t address,
+        size_t offset,
+        size_t limit,
+        std::vector<BreakpointHit>& hits,
+        size_t& total) override {
+        std::vector<HW_HIT_INFO> raw;
+        if (!ReadKernelBreakpointInfoPage(
+                address, offset, limit, raw, total, PORT_MAIN)) {
+            return false;
+        }
+        if (total > kMaxBreakpointHitCount || raw.size() > limit) {
+            return false;
+        }
+        hits.clear();
+        hits.reserve(raw.size());
+        for (const auto& item : raw) {
+            BreakpointHit hit;
+            hit.hitAddress = item.hit_addr;
+            hit.hitTime = item.hit_time;
+            for (size_t index = 0; index < hit.registers.size(); ++index) {
+                hit.registers[index] = item.regs_info.regs[index];
+            }
+            hit.stackPointer = item.regs_info.sp;
+            hit.programCounter = item.regs_info.pc;
+            hit.pstate = item.regs_info.pstate;
+            hits.push_back(std::move(hit));
+        }
+        return true;
     }
 
     bool readMemory(uint64_t address,

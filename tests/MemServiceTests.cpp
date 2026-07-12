@@ -139,6 +139,44 @@ public:
     int symbolInitializeCalls = 0;
     int symbolFetchCalls = 0;
     int symbolFindCalls = 0;
+    bool breakpointRequestStarted = true;
+    bool breakpointResponseReceived = true;
+    bool breakpointApplied = true;
+    bool breakpointHitsSucceed = true;
+    bool changeTargetAfterBreakpoint = false;
+    bool changeGenerationAfterBreakpoint = false;
+    bool changeTargetAfterBreakpointHits = false;
+    bool changeGenerationAfterBreakpointHits = false;
+    int breakpointDelayMs = 0;
+    Mem::CancellationToken cancelDuringBreakpoint;
+    int breakpointSetCalls = 0;
+    int breakpointRemoveCalls = 0;
+    int breakpointSuspendCalls = 0;
+    int breakpointResumeCalls = 0;
+    int breakpointHitsCalls = 0;
+    uint64_t lastBreakpointAddress = 0;
+    Mem::BreakpointAccess lastBreakpointAccess =
+        Mem::BreakpointAccess::Write;
+    uint32_t lastBreakpointSize = 0;
+    std::vector<Mem::BreakpointHit> breakpointHitsData = [] {
+        std::vector<Mem::BreakpointHit> hits(3);
+        hits[0].hitAddress = 0x7000;
+        hits[0].hitTime = 100;
+        hits[0].registers[0] = 0xA0;
+        hits[0].programCounter = 0x7100;
+        hits[0].stackPointer = 0x7200;
+        hits[1].hitAddress = 0x7004;
+        hits[1].hitTime = 200;
+        hits[1].registers[1] = 0xB1;
+        hits[1].programCounter = 0x7104;
+        hits[1].stackPointer = 0x7204;
+        hits[2].hitAddress = 0x7008;
+        hits[2].hitTime = 300;
+        hits[2].registers[2] = 0xC2;
+        hits[2].programCounter = 0x7108;
+        hits[2].stackPointer = 0x7208;
+        return hits;
+    }();
     uint64_t lastReadAddress = 0;
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
@@ -499,6 +537,82 @@ public:
             return nullptr;
         }
         return std::make_unique<SymbolTransaction>(*this);
+    }
+
+    Mem::BreakpointMutationBackendResult breakpointMutation(
+        uint64_t address) {
+        lastBreakpointAddress = address;
+        if (breakpointDelayMs > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(breakpointDelayMs));
+        }
+        if (cancelDuringBreakpoint) {
+            cancelDuringBreakpoint->store(true, std::memory_order_release);
+        }
+        if (changeTargetAfterBreakpoint) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterBreakpoint) {
+            ++generation;
+        }
+        return Mem::BreakpointMutationBackendResult{
+            breakpointRequestStarted,
+            breakpointResponseReceived,
+            breakpointApplied,
+        };
+    }
+
+    Mem::BreakpointMutationBackendResult setBreakpoint(
+        uint64_t address,
+        Mem::BreakpointAccess access,
+        uint32_t size) override {
+        ++breakpointSetCalls;
+        lastBreakpointAccess = access;
+        lastBreakpointSize = size;
+        return breakpointMutation(address);
+    }
+
+    Mem::BreakpointMutationBackendResult removeBreakpoint(
+        uint64_t address) override {
+        ++breakpointRemoveCalls;
+        return breakpointMutation(address);
+    }
+
+    Mem::BreakpointMutationBackendResult suspendBreakpoint(
+        uint64_t address) override {
+        ++breakpointSuspendCalls;
+        return breakpointMutation(address);
+    }
+
+    Mem::BreakpointMutationBackendResult resumeBreakpoint(
+        uint64_t address) override {
+        ++breakpointResumeCalls;
+        return breakpointMutation(address);
+    }
+
+    bool fetchBreakpointHits(
+        uint64_t address,
+        size_t offset,
+        size_t limit,
+        std::vector<Mem::BreakpointHit>& hits,
+        size_t& total) override {
+        ++breakpointHitsCalls;
+        lastBreakpointAddress = address;
+        if (!breakpointHitsSucceed) {
+            return false;
+        }
+        total = breakpointHitsData.size();
+        const size_t begin = (std::min)(offset, total);
+        const size_t end = begin + (std::min)(limit, total - begin);
+        hits.assign(breakpointHitsData.begin() + begin,
+                    breakpointHitsData.begin() + end);
+        if (changeTargetAfterBreakpointHits) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterBreakpointHits) {
+            ++generation;
+        }
+        return true;
     }
 
     bool readMemory(uint64_t address,
@@ -1256,6 +1370,157 @@ void testSymbolSessionService() {
                    Mem::ErrorCode::ConnectionChanged &&
                changedGenerationBackend.symbolFindCalls == 0,
            "symbol resolve must stop after initialization changes generation");
+}
+
+void testBreakpointService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+
+    Mem::BreakpointSetRequest setRequest;
+    setRequest.address = 0x7000;
+    setRequest.access = Mem::BreakpointAccess::ReadWrite;
+    setRequest.size = 8;
+    const auto set = service.setBreakpoint(
+        service.captureContext(true), setRequest);
+    expect(set.ok() && set.value().address == 0x7000 &&
+               set.value().action == Mem::BreakpointAction::Set &&
+               set.value().access == Mem::BreakpointAccess::ReadWrite &&
+               set.value().size == 8 &&
+               backend.breakpointSetCalls == 1 &&
+               backend.lastBreakpointAccess ==
+                   Mem::BreakpointAccess::ReadWrite &&
+               backend.lastBreakpointSize == 8,
+           "breakpoint set should return a target-bound confirmed receipt");
+
+    setRequest.access = Mem::BreakpointAccess::Execute;
+    setRequest.size = 8;
+    const int setCallsBeforeInvalid = backend.breakpointSetCalls;
+    const auto invalidExecute = service.setBreakpoint(
+        service.captureContext(true), setRequest);
+    expect(!invalidExecute.ok() &&
+               invalidExecute.error().code ==
+                   Mem::ErrorCode::InvalidArgument &&
+               backend.breakpointSetCalls == setCallsBeforeInvalid,
+           "execute breakpoint size must be rejected before backend access");
+
+    setRequest.access = Mem::BreakpointAccess::Execute;
+    setRequest.size = 4;
+    backend.breakpointRequestStarted = true;
+    backend.breakpointResponseReceived = false;
+    const auto unknown = service.setBreakpoint(
+        service.captureContext(true), setRequest);
+    expect(!unknown.ok() &&
+               unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
+               !unknown.error().retryable,
+           "sent breakpoint mutation without a response must be completion_unknown");
+
+    backend.breakpointRequestStarted = false;
+    const auto unsent = service.setBreakpoint(
+        service.captureContext(true), setRequest);
+    expect(!unsent.ok() &&
+               unsent.error().code == Mem::ErrorCode::ProtocolError &&
+               unsent.error().retryable,
+           "unsent breakpoint mutation should remain retryable");
+
+    backend.breakpointRequestStarted = true;
+    backend.breakpointResponseReceived = true;
+    backend.breakpointApplied = false;
+    const auto rejected = service.setBreakpoint(
+        service.captureContext(true), setRequest);
+    expect(!rejected.ok() &&
+               rejected.error().code == Mem::ErrorCode::ProtocolError &&
+               !rejected.error().retryable,
+           "server-rejected breakpoint mutation must not retry automatically");
+
+    backend.breakpointApplied = true;
+    Mem::OperationContext cancelledContext = service.captureContext(true);
+    cancelledContext.cancellation =
+        std::make_shared<std::atomic<bool>>(false);
+    backend.cancelDuringBreakpoint = cancelledContext.cancellation;
+    const auto completedAfterCancel = service.setBreakpoint(
+        cancelledContext, setRequest);
+    expect(completedAfterCancel.ok() &&
+               completedAfterCancel.value().completedAfterCancelRequest,
+           "confirmed breakpoint set must preserve late cancellation state");
+    backend.cancelDuringBreakpoint.reset();
+
+    Mem::OperationContext deadlineContext = service.captureContext(true);
+    deadlineContext.deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+    backend.breakpointDelayMs = 15;
+    const auto completedAfterDeadline = service.setBreakpoint(
+        deadlineContext, setRequest);
+    expect(completedAfterDeadline.ok() &&
+               completedAfterDeadline.value().completedAfterDeadline,
+           "confirmed breakpoint set must preserve late deadline completion");
+    backend.breakpointDelayMs = 0;
+
+    FakeBackend changedTargetBackend;
+    Mem::MemService changedTargetService(changedTargetBackend);
+    changedTargetBackend.changeTargetAfterBreakpoint = true;
+    const auto changedTarget = changedTargetService.setBreakpoint(
+        changedTargetService.captureContext(true), setRequest);
+    expect(!changedTarget.ok() &&
+               changedTarget.error().code ==
+                   Mem::ErrorCode::CompletionUnknown,
+           "confirmed breakpoint mutation on a replaced target must be completion_unknown");
+
+    Mem::BreakpointAddressRequest addressRequest;
+    addressRequest.address = 0x7000;
+    const auto removed = service.removeBreakpoint(
+        service.captureContext(true), addressRequest);
+    const auto suspended = service.suspendBreakpoint(
+        service.captureContext(true), addressRequest);
+    const auto resumed = service.resumeBreakpoint(
+        service.captureContext(true), addressRequest);
+    expect(removed.ok() && suspended.ok() && resumed.ok() &&
+               removed.value().action == Mem::BreakpointAction::Remove &&
+               suspended.value().action == Mem::BreakpointAction::Suspend &&
+               resumed.value().action == Mem::BreakpointAction::Resume &&
+               backend.breakpointRemoveCalls == 1 &&
+               backend.breakpointSuspendCalls == 1 &&
+               backend.breakpointResumeCalls == 1,
+           "all breakpoint mutations should share the receipt contract");
+
+    Mem::BreakpointHitsRequest hitsRequest;
+    hitsRequest.address = 0x7000;
+    hitsRequest.limit = 2;
+    const auto firstPage = service.breakpointHits(
+        service.captureContext(true), hitsRequest);
+    expect(firstPage.ok() && firstPage.value().total == 3 &&
+               firstPage.value().items.size() == 2 &&
+               firstPage.value().nextOffset == 2 &&
+               firstPage.value().items.front().registers[0] == 0xA0 &&
+               firstPage.value().items.front().programCounter == 0x7100,
+           "breakpoint hits should return a bounded structured page");
+
+    hitsRequest.offset = 2;
+    const auto secondPage = service.breakpointHits(
+        service.captureContext(true), hitsRequest);
+    expect(secondPage.ok() && secondPage.value().items.size() == 1 &&
+               !secondPage.value().nextOffset &&
+               secondPage.value().items.front().hitAddress == 0x7008,
+           "breakpoint hit continuation should terminate at the available total");
+
+    hitsRequest.limit = Mem::kMaxBreakpointHitPageSize + 1;
+    const int hitCallsBeforeInvalid = backend.breakpointHitsCalls;
+    const auto invalidPage = service.breakpointHits(
+        service.captureContext(true), hitsRequest);
+    expect(!invalidPage.ok() &&
+               invalidPage.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.breakpointHitsCalls == hitCallsBeforeInvalid,
+           "oversized breakpoint pages must fail before backend access");
+
+    FakeBackend changedHitsTargetBackend;
+    Mem::MemService changedHitsTargetService(changedHitsTargetBackend);
+    changedHitsTargetBackend.changeTargetAfterBreakpointHits = true;
+    hitsRequest = {};
+    hitsRequest.address = 0x7000;
+    const auto changedHitsTarget = changedHitsTargetService.breakpointHits(
+        changedHitsTargetService.captureContext(true), hitsRequest);
+    expect(!changedHitsTarget.ok() &&
+               changedHitsTarget.error().code == Mem::ErrorCode::TargetChanged,
+           "breakpoint hit pages must be rejected after target replacement");
 }
 
 void testScanSessionService() {
@@ -2390,6 +2655,7 @@ int main() {
         {"module list and resolve", &testModuleListAndResolve},
         {"pointer resolve transaction", &testPointerResolveTransaction},
         {"symbol session service", &testSymbolSessionService},
+        {"breakpoint service", &testBreakpointService},
         {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},

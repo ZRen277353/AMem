@@ -5,6 +5,7 @@
 
 #include <mutex>
 #include <optional>
+#include <functional>
 
 namespace Mem {
 
@@ -35,6 +36,21 @@ public:
     Result<SymbolPage> listSymbols(
         const OperationContext& context,
         const SymbolListRequest& request) override;
+    Result<BreakpointMutationReceipt> setBreakpoint(
+        const OperationContext& context,
+        const BreakpointSetRequest& request) override;
+    Result<BreakpointMutationReceipt> removeBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) override;
+    Result<BreakpointMutationReceipt> suspendBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) override;
+    Result<BreakpointMutationReceipt> resumeBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) override;
+    Result<BreakpointHitPage> breakpointHits(
+        const OperationContext& context,
+        const BreakpointHitsRequest& request) override;
     Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) override;
@@ -65,8 +81,16 @@ private:
                                          bool requireConnected,
                                          bool requireTarget,
                                          bool checkCancellation) const;
+    Result<BreakpointMutationReceipt> mutateBreakpoint(
+        const OperationContext& context,
+        uint64_t address,
+        BreakpointAction action,
+        const std::function<BreakpointMutationBackendResult()>& operation,
+        std::optional<BreakpointAccess> access = std::nullopt,
+        std::optional<uint32_t> size = std::nullopt);
 
     IMemBackend& backend_;
+    std::mutex breakpointMutex_;
     std::mutex symbolMutex_;
     std::mutex scanMutex_;
     std::optional<ScanSessionSnapshot> scanSession_;

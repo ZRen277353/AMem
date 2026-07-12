@@ -32,6 +32,21 @@ public:
     virtual Result<SymbolPage> listSymbols(
         const OperationContext& context,
         const SymbolListRequest& request) = 0;
+    virtual Result<BreakpointMutationReceipt> setBreakpoint(
+        const OperationContext& context,
+        const BreakpointSetRequest& request) = 0;
+    virtual Result<BreakpointMutationReceipt> removeBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) = 0;
+    virtual Result<BreakpointMutationReceipt> suspendBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) = 0;
+    virtual Result<BreakpointMutationReceipt> resumeBreakpoint(
+        const OperationContext& context,
+        const BreakpointAddressRequest& request) = 0;
+    virtual Result<BreakpointHitPage> breakpointHits(
+        const OperationContext& context,
+        const BreakpointHitsRequest& request) = 0;
     virtual Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) = 0;

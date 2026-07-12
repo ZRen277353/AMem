@@ -85,6 +85,8 @@ void AppContext::clearProcessInternal(bool cleanupRemote) {
 
     if (cleanupRemote) {
         cleanupCurrentProcessServices();
+    } else {
+        ResetTrackedKernelBreakpoints();
     }
     selectedPid.store(0, std::memory_order_relaxed);
     processHandle.store(0, std::memory_order_relaxed);
