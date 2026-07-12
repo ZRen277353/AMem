@@ -43,6 +43,9 @@ public:
         PipeDeadline deadline = (PipeDeadline::max)(),
         uint32_t maxPayloadBytes = IpcProtocol::kMaxFramePayloadBytes);
 
+    // Wakes another thread blocked in overlapped I/O on this connection.
+    void cancelPendingIo() const;
+
 private:
     FrameIoResult transferExact(bool write,
                                 uint8_t* buffer,

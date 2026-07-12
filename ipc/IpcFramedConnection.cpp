@@ -118,6 +118,12 @@ FrameIoResult IpcFramedConnection::writeFrame(
     return transferExact(true, encoded.data(), encoded.size(), deadline);
 }
 
+void IpcFramedConnection::cancelPendingIo() const {
+    if (pipe_ != INVALID_HANDLE_VALUE && pipe_ != nullptr) {
+        ::CancelIoEx(pipe_, nullptr);
+    }
+}
+
 FrameIoResult IpcFramedConnection::transferExact(bool write,
                                                  uint8_t* buffer,
                                                  size_t size,
