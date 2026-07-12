@@ -18,7 +18,7 @@
 | ID | 优先级 | 状态 | 问题 |
 |----|--------|------|------|
 | A-01 | P0 | 未修复 | IPC 无鉴权且允许任意 CORS，回环监听不是完整安全边界 |
-| A-02 | P0 | 部分修复 | run/审批/结果已绑定目标；未迁移工具尚未在 socket send 边界消费快照 |
+| A-02 | P0 | 已修复 | 当前内置工具均在 service/host send 边界消费 run target；退役 executor 已删除 |
 | A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
 | A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
@@ -62,25 +62,26 @@
 3. 校验 `Origin`/`Host`，但不要把它们当作 token 的替代品。
 4. 对写内存、进程切换、断点和 Lua 增加 capability 或 GUI 审批策略。
 
-### A-02：Agent 目标绑定尚未覆盖所有实际 send 边界
+### A-02：Agent 目标绑定已覆盖当前所有实际 send 边界（已修复）
 
 **证据**
 
 - `AgentRunContext` 在 `resetForNewRun()` 时保存 connection generation 和 target snapshot，并绑定当前 cancellation token。
 - `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
 - 审批框显示预期 connection generation、PID 和 process revision。
-- `status`、`process_list`、`process_open`、module/pointer resolution、四个 canonical scan 工具、raw/typed memory read/write 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- 23 个非 Lua canonical 工具的 adapter 均消费显式 `OperationContext` 并在 `MemService` 边界复核；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- `lua_execute` 在 host 执行前复核 target/generation；`ToolDefinitions.cpp` 已删除全部 33 个 hidden alias 和 direct-socket executor，并由 `native_agent_catalog` CTest 阻止重新依赖 `client_singleton.h`/`AppContext.h`。
 - GUI `BreakpointWindow` 的 set/remove/enable/suspend/resume 与 hit refresh 已显式注入 `IMemService`，每次调用捕获 target context；命中 batch 保留完整 GPR/FPSIMD，按最新 50,000 条有界。
 - GUI `ScanWindow` 的 start/refine/results/clear/remove 已显式注入 `IMemService`，每次调用捕获 target context 并携带最新 scan epoch；Stop 通过共享 cancellation token 进入同一 service/backend 调用。
 - 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint/scan 与 symbol cache、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+当前注册表只包含 canonical 工具。所有 process-bound 工具在 Controller 校验后，还会在实际 service/host 边界再次验证 snapshot；scan/symbol session 绑定 target+epoch，breakpoint/driver 保留确认/未知回执。退役名称不再可执行，旧会话中的调用组只会在 provider 边界降级为不可执行的 assistant 历史文本。因此原先“legacy executor 在校验后读取新共享状态并向错误目标发送”的路径已关闭。
 
 **建议**
 
-- 下一步迁移/删除隐藏 legacy executor，使每个实际 service/host/socket 边界使用传入的 `OperationContext`；规范目录已完成，不再新增第二套模型可见名称。
+- 保持 `native_agent_catalog` 的名称和依赖检查，不重新引入第二套模型可见名称或 direct-socket executor。
 - 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
 - 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
 
@@ -153,7 +154,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 **影响**
 
-已发送副作用仍不能撤回，迟到结果也不会重新写入已结束的聊天 session；这是刻意的隔离。最终 completion、approval、effect/resource domain、run/tool-call id 和预期 target 改由独立审计承担。未迁移 legacy executor 仍可能只在 socket deadline 处响应取消，但 worker ownership 和最终 outcome 不再丢失。
+已发送副作用仍不能撤回，迟到结果也不会重新写入已结束的聊天 session；这是刻意的隔离。最终 completion、approval、effect/resource domain、run/tool-call id 和预期 target 改由独立审计承担。当前 service/host executor 都消费 context，但阻塞中的设备或 Lua 调用仍可能只在检查点、socket deadline 或返回时响应取消；worker ownership 和最终 outcome 不会丢失。
 
 **建议**
 
@@ -165,8 +166,8 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 - 端口锁只覆盖单个 request-response。
 - 每条 `SocketCommand` 现会经过可重入 per-port transaction gate；canonical pointer、scan 与 symbol 已长期持有相应 transaction，process selection 尚未完成同等级的业务事务/revision。
-- canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；GUI start/refine/results/clear/remove 已迁入同一 `IMemService` session。旧 IPC/隐藏 alias 仍可能分步调用，但会推进 epoch 并使 native/GUI session 失效。
-- GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC/隐藏 alias 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
+- canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；GUI start/refine/results/clear/remove 已迁入同一 `IMemService` session。旧 IPC 仍可能分步调用，但会推进 epoch 并使 native/GUI session 失效。
+- GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
 - GUI、内置 Agent、IPC/MCP 共用进程、扫描结果和服务端 active symbol table。
 
@@ -176,7 +177,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 **建议**
 
-- 继续把旧 IPC/隐藏 scan 与 IPC/隐藏 symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
+- 继续把旧 IPC scan/symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
 - 最可靠的方式是让服务端提供单命令复合操作或显式 session id。
 - 工具执行前后校验 process/scan/symbol revision；冲突时失败而不是继续使用混合状态。
 
@@ -257,7 +258,7 @@ driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sess
 
 ### A-13：`symbol_*` 分类、共享状态和默认 prompt 漂移（已按当前二元模型解决）
 
-当前二元 `ToolSafety` 明确定义为：`Write` 表示需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，保持 ReadOnly；active table 的内部 session mutation 由 MAIN transaction 和 symbol epoch 约束。`symbol_init`、`symbol_find`、`resolve_symbol` 已隐藏，默认 prompt 只列规范名称且不再把 symbol list 写成需要写审批。
+当前二元 `ToolSafety` 明确定义为：`Write` 表示需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，保持 ReadOnly；active table 的内部 session mutation 由 MAIN transaction 和 symbol epoch 约束。`symbol_init`、`symbol_find`、`resolve_symbol` 已从注册表删除，默认 prompt 只列规范名称且不再把 symbol list 写成需要写审批。
 
 剩余改进是引入设计文档中的 richer effect/resource metadata，把 symbol 操作标为 `SessionMutation` 并记录资源域审计。该扩展不能重新引入模型可见的 init 前置步骤，也不能把“可安全自动重试”与 ReadOnly 自动等同。
 
@@ -265,12 +266,12 @@ driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sess
 
 **证据**
 
-- 规范 raw/typed memory、pointer offsets 和 breakpoint 地址已要求显式 `0x`；隐藏旧名称和尚未迁移的内置工具仍会把 `"1234"` 按十六进制解析。
+- 内置 Agent 的 raw/typed memory、scan ranges、disassembly、pointer offsets 和 breakpoint 地址均要求显式 `0x`；退役名称不可执行。
 - IPC `ParseAddress()` 和 MCP `helpers.parse_int()` 对 `"1234"` 按十进制解析，只有 `0x1234` 才是十六进制。
 
 **影响**
 
-同一个工具参数在两条 Agent 路径中可能指向不同地址，尤其危险于写内存和断点操作。
+无前缀字符串在内置 Agent 中被拒绝，在 IPC/MCP 中却会被接受为十进制。调用方跨入口复用参数时会得到不同结果；若再自行按十六进制理解该文本，写内存和断点操作尤其危险。
 
 **建议**
 
@@ -302,16 +303,16 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 当前静态提取结果：
 
-- 内置 Agent（LuaJIT）：57 个可执行名称，其中 33 个隐藏兼容 alias，向 provider 广告 24 个定义；无 LuaJIT 时为 55/32/23。
+- 内置 Agent（LuaJIT）：24 个 canonical 名称，24 个可执行、24 个向 provider 广告、0 个 hidden alias；无 LuaJIT 时为 23/23/0。
 - IPC：29 个方法。
 - MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
 - 内置 Agent 独有 canonical `disassemble`、`symbol_resolve` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
-- 无 LuaJIT 时，内置 `lua_execute`/`execute_lua` 均不注册；IPC 不注册该方法，而 MCP 仍对模型暴露工具。
-- 名称别名包括 `get_server_version`/`get_version`、`read_breakpoint_info`/`read_bp_info`。
+- 无 LuaJIT 时，内置 `lua_execute` 不注册；IPC 不注册该方法，而 MCP 仍可能对模型暴露工具。
+- IPC/MCP 之间仍存在 `get_server_version`/`get_version`、`read_breakpoint_info`/`read_bp_info` 等名称映射；这些不是内置 Agent alias。
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。但隐藏 legacy 工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。内置 legacy 工具已删除，但 IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 
@@ -393,10 +394,10 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 22 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_agent_catalog` 还会精确验证 24 个 canonical 名称及 catalog 的 include 边界。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
-- `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
+- `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
 - config/index 损坏与错误字段类型。
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
 - IPC HTTP parser、partial send、auth 和 capability。
@@ -416,7 +417,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
 | pointer chain 的 module/read 可被其他前端插入 | 可重入 per-port transaction gate 覆盖所有普通命令；`pointer_resolve` 和旧 GUI/Lua/IPC helper 在 module list 到最后一次 read 期间持续持有 |
 | module 列表/解析直连 socket 且子串取首项 | `MemService::listModules/resolveModule` 统一分页、target 校验和完整名/basename/唯一子串匹配；歧义与异常范围会失败 |
-| typed read/write 重复解析和直连 socket | `ValueCodec` + `MemService::readValue/writeValue` 统一 scalar 范围/字节序；规范工具要求 `0x`，旧名称仅 hidden compatibility |
+| typed read/write 重复解析和直连 socket | `ValueCodec` + `MemService::readValue/writeValue` 统一 scalar 范围/字节序；规范工具要求 `0x`，旧名称已退役且不可执行 |
 | 工具路径两层 detached worker | `AgentTaskExecutor` 独占 joinable worker；`ToolExecutor` 同步执行，shutdown 测试证明 active/queued task 排空后 join |
 | executor 返回顶层 `{"error": ...}` 却标成功 | `ToolExecutor::extractToolError()` 会转为 `success=false`，`AgentRunner` 保留 details |
 | Claude 结构化错误丢失 | `ChatWindow::pollMessages()` 能统一处理 `CompletionResponse.error` |

@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。LuaJIT 构建的工具注册表包含 57 个可执行名称，其中 33 个为隐藏兼容 alias，provider 实际收到 24 个定义；无 LuaJIT 时分别为 55/32/23，两个 Lua 名称均不注册。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。LuaJIT 构建的工具注册表包含 24 个 canonical 名称，全部可执行且全部发送给 provider，没有 hidden alias；无 LuaJIT 时不注册 `lua_execute`，其余 23 个名称保持一致。
 
 ### 1.2 加载 provider 配置
 
@@ -83,7 +83,7 @@ SessionManager::init("ai_sessions", "ai_session.json")
 4. 调用 `ChatSession::getMessagesForRequest()`。
 5. 进入 `ChatWindow::dispatchAgentRequest()`。
 
-`getMessagesForRequest()` 是 provider 协议正确性的关键边界。它只输出完整匹配的 assistant tool calls 和 tool results，过滤孤儿/重复 id 和运行时 system notice。
+`getMessagesForRequest()` 是 provider 协议正确性的关键边界。它只输出完整匹配的 assistant tool calls 和 tool results，过滤孤儿/重复 id 和运行时 system notice。若完整调用组包含 33 个已退役名称中的任意一个，整组会转为普通 assistant 文本，保留脱敏参数和已记录结果，但不再发送 tool protocol，也不会重新执行。
 
 ### 2.2 构造 provider 请求
 
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 返回最新最多 100 项以及 `available/dropped`，没有 continuation cursor。旧 scan/symbol/breakpoint 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。`lua_execute` 在 host 边界复核 target，使用 Agent absolute deadline，并只把开始后的取消作为回执标记。
+driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 返回最新最多 100 项以及 `available/dropped`，没有 continuation cursor。旧名称已经从注册表和 JSON adapter 中删除。`lua_execute` 在 host 边界复核 target，使用 Agent absolute deadline，并只把开始后的取消作为回执标记。
 
 GUI 的 `BreakpointWindow` 已完成 breakpoint 域迁移：窗口构造时注入 `IMemService`，添加、删除、启用、暂停、恢复和命中刷新均捕获当前 target/generation。命中读取在 DEBUG 端口排空一次无 cursor 响应，只保留最新 50,000 条；`BreakpointHit` 保存详情页所需的 GPR、`orig_x0`、syscall、FPSR/FPCR 和全部向量寄存器。超过上限时 GUI 显示丢弃较早命中的日志。
 
@@ -260,7 +260,7 @@ ChatWindow
        -> synchronous ToolExecutor::execute(call, runOperationContext)
             -> parse JSON and validate schema
             -> SocketIoTimeout::ScopedTimeout(deadline)
-            -> MemService or legacy socket executor
+            -> MemService or Lua host boundary
        -> AgentMutationAuditLog(write/session effect, before callback)
        -> completion callback
   -> UIMessageQueue(ToolResult)
@@ -270,7 +270,7 @@ ChatWindow
 
 排队取消或超时不会进入 executor，分别返回 `cancelled_before_start` 或 `timed_out_before_start`。活动任务使用同一个 cancellation token 和绝对 deadline；已迁移 service 会在 send 前、I/O 期间和结果规范化时观察它们。
 
-worker 不会强杀正在运行的 C++ 调用。只读操作在 deadline 后才返回时会归一为 `timed_out`；写操作保留 `completed_after_deadline`、`completed_after_cancel_request` 或 `completion_unknown`，避免把已经发送的副作用误报为未执行。write-classified 和 symbol-session outcome 在 callback 前写独立审计，因此 callback 被 stale run gate 丢弃或抛异常也不会删除最终状态。legacy executor 若不主动检查 context，仍可能直到 socket deadline 或函数返回才响应取消，但不会脱离 worker 生命周期。
+worker 不会强杀正在运行的 C++ 调用。只读操作在 deadline 后才返回时会归一为 `timed_out`；写操作保留 `completed_after_deadline`、`completed_after_cancel_request` 或 `completion_unknown`，避免把已经发送的副作用误报为未执行。write-classified 和 symbol-session outcome 在 callback 前写独立审计，因此 callback 被 stale run gate 丢弃或抛异常也不会删除最终状态。当前注册的 service/host executor 都消费 context，但阻塞中的设备或 Lua 调用仍可能直到自身检查点、socket deadline 或函数返回才响应取消。
 
 ### 5.4 socket 层
 
@@ -297,7 +297,7 @@ canonical breakpoint mutation 在同一个 MAIN transaction 内接收设备确�
 
 以下序列仍不是事务：
 
-- 旧 IPC/隐藏 alias 的 `ScanSetRange` -> scan command
+- 旧 IPC 的 `ScanSetRange` -> scan command
 - `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的多步清理/open/set PID
 
@@ -365,7 +365,7 @@ tool(result for call 2)
 
 deadline 在入队时固定，因此队列等待也消耗预算。任务到队首前超时不会执行；活动任务把剩余预算传给 socket lock/I/O。
 
-deadline 不能抢占不合作的 legacy C++ executor。唯一 worker 会继续拥有它直到返回，后续队列和 shutdown 也会等待；不会出现未登记的后台 executor，但响应速度仍取决于具体命令是否消费 context。
+deadline 不能强行抢占已经阻塞的 C++/Lua 调用。唯一 worker 会继续拥有它直到返回，后续队列和 shutdown 也会等待；不会出现未登记的后台 executor，但响应速度仍取决于底层命令何时到达 cancellation/deadline 检查点。
 
 `WindowsSocketClient` 现在把 timeout、EOF 和其他 I/O 失败视为协议可能失步：
 
@@ -460,9 +460,9 @@ MCP client
 |------|------------|---------|
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
-| 地址字符串 `"1234"` | 规范 raw/typed memory、pointer offsets 和 breakpoint 地址拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
+| 地址字符串 `"1234"` | 所有地址字段拒绝；退役工具不可执行 | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | LuaJIT: 24 广告 / 57 可执行 / 33 隐藏；无 LuaJIT: 23/55/32 | 独立 MCP tool 集合 |
+| 工具集合 | LuaJIT: 24 广告 / 24 可执行 / 0 隐藏；无 LuaJIT: 23/23/0 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
@@ -535,7 +535,7 @@ IPC 监听 loopback，但当前：
 | 现象 | 首先检查 |
 |------|----------|
 | 一直 `WaitingModel` | endpoint/API key、HTTP timeout、worker 是否仍在、队列 run id |
-| 工具 timeout 后后续也卡 | active legacy executor 是否尚未返回、session 是否 poisoned |
+| 工具 timeout 后后续也卡 | active service/host 调用是否尚未返回、session 是否 poisoned |
 | timeout 后结果完全不相关 | session 是否已 poisoned、是否错误复用了旧 generation |
 | 点 Stop 后仍写入 | 写命令是否已发送；取消请求不能撤回已发送副作用 |
 | 写到了意外进程 | 审批期间 `processRevision` 是否变化 |
@@ -551,7 +551,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 22 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_agent_catalog` 另行校验 canonical 名称与 catalog 依赖边界。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

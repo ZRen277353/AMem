@@ -42,7 +42,7 @@ MCP (Python) -> IPC :28100 -----+
 | Provider | `AIProvider`, `ClaudeProvider`, `OpenAIProvider`, `DeepSeekProvider` | provider 请求/响应适配和流式 tool call 拼装 |
 | HTTP | `HttpClient` | cpp-httplib + OpenSSL、代理、SSE、协作式取消 |
 | 工具调度 | `AgentTaskExecutor` | 有界串行队列、绝对 deadline、run cancellation 和 joinable worker 生命周期 |
-| 工具注册 | `ToolExecutor`, `ToolDefinitions.cpp` | schema 校验、安全分类、同步执行、结果规范化、广告/隐藏兼容名称 |
+| 工具注册 | `ToolExecutor`, `ToolDefinitions.cpp` | canonical schema、安全分类、同步执行、结果规范化和 provider 广告 |
 | 原生内存服务 | `mem/`, `AgentMemTools` | 强类型结果、地址/分页校验、target/generation 校验和 Agent JSON adapter |
 | 会话 | `ChatSession`, `SessionManager` | 历史清洗、token/条数裁剪、会话文件和索引 |
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
@@ -143,6 +143,7 @@ User send
 - 只输出完整的 assistant tool calls + 对应 tool results。
 - 丢弃孤儿 tool result。
 - 对不完整工具组降级为安全的纯文本历史。
+- 对 33 个已退役工具名所在的完整调用组降级为普通 assistant 文本，保留脱敏参数和已记录结果，但不再发送 provider tool protocol，也不能重新执行。
 
 这条边界用于满足 Anthropic/OpenAI 风格 API 对 tool use/result 配对的要求。
 
@@ -196,7 +197,7 @@ HTTP 2xx 不等于 provider stream 完整：
 | Stop/`cancelRequest()` | 设置 HTTP token，调用 `AgentTaskExecutor::cancelRun()`，清 active id 并结束当前编排；mutation 最终状态在 UI callback 前写独立审计 | 撤回已发送写操作、让迟到回执进入原会话/trace |
 | HTTP cancellation token | content receiver 在数据块边界中止 | 阻塞 read 立刻结束、worker 已 join |
 | 排队任务取消/deadline | worker 在执行前返回 `cancelled_before_start`/`timed_out_before_start` | 已开始操作被抢占 |
-| 活动工具取消/deadline | 同一 `OperationContext` 传到 service 和 socket I/O；worker 始终受管 | legacy executor 立即响应、已发送设备命令被撤回 |
+| 活动工具取消/deadline | 同一 `OperationContext` 传到 service/host 和 socket I/O；worker 始终受管 | 阻塞设备命令被抢占、已发送设备命令被撤回 |
 | deadline 后完成 | 只读结果归一为 `timed_out`；写结果保留 `completed_after_deadline` 或底层不确定状态，并写 mutation audit | 原会话接收已过期结果 |
 | runId 过滤 | 迟到结果不污染新 UI run；mutation/session-effect 结果仍进入独立 Audit 表 | 迟到操作没有设备副作用 |
 | `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
@@ -259,20 +260,20 @@ Idle
 6. mutation 和 symbol-session effect 先写入有界 `AgentMutationAuditLog`；该步骤发生在 completion callback 之前。
 7. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`；旧 run 结果仍可被 UI 过滤，不影响独立审计。
 
-当前 LuaJIT 构建的注册表有 **57 个可执行名称**。其中 33 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 24 个定义。无 `HAVE_LUAJIT` 时 canonical/alias Lua 均不注册，目录为 55 个可执行、32 个隐藏、23 个广告定义。当前 LuaJIT 目录如下（H=hidden）：
+当前 LuaJIT 构建的注册表有 **24 个 canonical 名称**，全部可执行且全部向 provider 广告，没有内置 hidden alias。无 `HAVE_LUAJIT` 时不注册 `lua_execute`，目录为 23 个可执行/广告定义。`native_agent_catalog` CTest 精确校验这组名称，并拒绝 `ToolDefinitions.cpp` 重新依赖 `client_singleton.h` 或 `AppContext.h`。当前 LuaJIT 目录如下：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
-| 状态/驱动 | `status` R, `get_status` H, `get_server_version` H, `get_architecture` H, `driver_initialize` W, `init_driver` H |
-| 内存读 | `memory_read` R, `read_memory` H, `memory_read_value` R, `read_value` H, `disassemble` R, `read_disassembly` H |
-| 内存写 | `memory_write` W, `write_bytes` H, `memory_write_value` W, `write_value` H |
-| 扫描 | `scan_start` W, `scan_refine` W, `scan_results` R, `scan_clear` W, `scan_set_range` H, `scan_value` H, `scan_next` H, `scan_fuzzy` H, `scan_hex` H, `get_scan_count` H, `get_scan_results` H, `clear_scan` H |
-| 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `pointer_resolve` R, `resolve_offset_chain` H |
-| 断点 | `breakpoint_set` W, `breakpoint_remove` W, `breakpoint_hits` R, `breakpoint_suspend` W, `breakpoint_resume` W, `set_breakpoint` H, `remove_breakpoint` H, `read_breakpoint_info` H, `suspend_breakpoint` H, `resume_breakpoint` H |
-| 符号 | `symbol_resolve` R, `symbol_list` R, `resolve_symbol` H, `symbol_init` H, `symbol_find` H |
-| 脚本 | `lua_execute` W, `execute_lua` H（两者均受 `HAVE_LUAJIT` 约束） |
+| 状态/驱动 | `status` R, `driver_initialize` W |
+| 内存读 | `memory_read` R, `memory_read_value` R, `disassemble` R |
+| 内存写 | `memory_write` W, `memory_write_value` W |
+| 扫描 | `scan_start` W, `scan_refine` W, `scan_results` R, `scan_clear` W |
+| 进程/模块 | `process_list` R, `process_open` W, `module_list` R, `module_resolve` R, `pointer_resolve` R |
+| 断点 | `breakpoint_set` W, `breakpoint_remove` W, `breakpoint_hits` R, `breakpoint_suspend` W, `breakpoint_resume` W |
+| 符号 | `symbol_resolve` R, `symbol_list` R |
+| 脚本 | `lua_execute` W（受 `HAVE_LUAJIT` 约束） |
 
-当前二元安全模型把 `Write` 定义为需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称需要写审批。未来扩展 effect 元数据时应把它们标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
+当前二元安全模型把 `Write` 定义为需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称需要写审批。33 个旧名称已经退役，不在注册表中；旧会话中的完整调用组由 `getMessagesForRequest()` 转为不可执行的 assistant 历史文本。未来扩展 effect 元数据时应把 symbol 操作标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
 
 ### 7.2 审批边界
 
@@ -290,7 +291,7 @@ Idle
 - catalog-owned effect/resource metadata（当前独立审计按 canonical/alias 名称归类）
 - endpoint/provider 数据去向
 
-二十三个 canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
+二十三个非 Lua canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。内置目录已无 legacy executor，新增 process-bound 工具仍必须在实际 service/host/send 边界消费相同 context。
 
 ### 7.3 独立 mutation audit
 
@@ -318,9 +319,9 @@ Idle
 
 `pointer_resolve` 已使用该高层 gate：system backend 在稳定 generation/PID/handle/revision 上获得事务，`MemService` 在事务内完成 module list、唯一匹配和每次 8-byte pointer read，释放后再做完整 target 校验。旧 GUI/Lua/IPC 使用的 `ResolveModuleOffsetChain()` 也持有同一 gate，但仍保留旧的首个子串匹配和结果契约。
 
-canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 IPC/隐藏旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。GUI `ScanWindow` 注入同一个 `IMemService`，start/refine/results/clear/remove 均绑定 target 与 epoch；remove 在一个 transaction 内去重地址、确认前后 count 并要求 epoch 前进。Stop 只设置共享 token，由 system backend 的 progress callback 发送一次 DEBUG stop。
+canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 IPC 旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。GUI `ScanWindow` 注入同一个 `IMemService`，start/refine/results/clear/remove 均绑定 target 与 epoch；remove 在一个 transaction 内去重地址、确认前后 count 并要求 epoch 前进。Stop 只设置共享 token，由 system backend 的 progress callback 发送一次 DEBUG stop。
 
-canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，IPC/隐藏 alias 的 init 会使其失效。GUI 的 `loadSymbolTable` 在同一个 transaction 内只 init 一次，并循环读取全部 1000-item protocol page；总量限制为 1,000,000 项和 64 MiB 名称。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
+canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，IPC 的 init 会使其失效。GUI 的 `loadSymbolTable` 在同一个 transaction 内只 init 一次，并循环读取全部 1000-item protocol page；总量限制为 1,000,000 项和 64 MiB 名称。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
 
 `AppContext::ModuleCache` 只保留 GUI presentation cache 职责。`MemoryViewerWindow`/`BreakpointWindow` 显式传入注入的 `IMemService`；cache miss 不持 cache mutex 做网络 I/O，返回后在 cache mutex 内复核完整 target 与当前 module，再原子安装排序后的 symbol list。这样进程切换先 invalidate 后不会被旧加载结果重新污染。
 
@@ -328,15 +329,15 @@ canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确�
 
 当前复合序列包括：
 
-- 旧 IPC/隐藏 alias 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
-- 旧 IPC/隐藏 alias 的 `SymbolInit` -> `SymbolGetList`
+- 旧 IPC 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
+- 旧 IPC 的 `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的清理/open/set PID/cache 流程
 
-canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC/隐藏 scan、IPC/隐藏 symbol 和 process selection 分步流程仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
+canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC scan/symbol 和 process selection 分步流程仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
 
 ### 8.3 地址语义
 
-规范 raw/typed memory read/write 地址、`pointer_resolve` offsets 和 breakpoint 地址均拒绝无 `0x` 前缀的字符串；隐藏兼容 alias 和尚未迁移的内置工具仍保留旧十六进制解析，IPC/MCP 对无前缀字符串仍按十进制解析。跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
+内置 Agent 的 raw/typed memory、scan ranges、disassembly、`pointer_resolve` offsets 和 breakpoint 地址均只接受带 `0x` 前缀的字符串；退役 alias 不可执行。IPC/MCP 对无前缀字符串仍按十进制解析，因此跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
@@ -425,12 +426,12 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent（LuaJIT） | 24 个广告定义 / 57 个可执行名称 | 33 个旧名称仅作隐藏兼容 |
-| 内置 Agent（无 LuaJIT） | 23 个广告定义 / 55 个可执行名称 | 32 个旧名称仅作隐藏兼容；Lua 不注册 |
+| 内置 Agent（LuaJIT） | 24 个广告定义 / 24 个可执行名称 | 0 个 hidden alias；退役调用仅保留为历史文本 |
+| 内置 Agent（无 LuaJIT） | 23 个广告定义 / 23 个可执行名称 | 0 个 hidden alias；`lua_execute` 不注册 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
-内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`/`execute_lua`，而 IPC/MCP 的行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
+内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 IPC/MCP 的行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
 ### 10.3 当前 IPC 安全边界
 
@@ -455,14 +456,13 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 ### 尚未满足、不能假定成立的目标
 
 1. 应用 shutdown 返回时 HTTP/IPC 后台任务均已退出。
-2. 所有 legacy process-bound executor 都在实际 send 边界消费 run snapshot。
-3. 端口锁能让复合业务操作成为事务。
-4. loopback IPC 等同于已鉴权。
-5. 所有 AI 持久化文件都严格原子且损坏时不覆盖。
-6. ReadOnly 一定没有共享状态变化。
-8. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
-9. provider `maxContextTokens` 会自动限制实际请求。
-10. 内置 Agent、IPC 和 MCP 暴露相同能力。
+2. 端口锁能让复合业务操作成为事务。
+3. loopback IPC 等同于已鉴权。
+4. 所有 AI 持久化文件都严格原子且损坏时不覆盖。
+5. ReadOnly 一定没有共享状态变化。
+6. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
+7. provider `maxContextTokens` 会自动限制实际请求。
+8. 内置 Agent、IPC 和 MCP 暴露相同能力。
 
 ## 12. 扩展检查单
 
@@ -498,10 +498,10 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 另行精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
-- ChatSession 工具配对与裁剪
+- ChatSession 通用工具配对与预算裁剪
 - config/index 损坏恢复
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
