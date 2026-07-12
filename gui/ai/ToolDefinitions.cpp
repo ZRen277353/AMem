@@ -1204,58 +1204,22 @@ std::string execClearScan(const std::string& /*argsJson*/) {
     }
 }
 
-// get_module_list
-std::string execGetModuleList(const std::string& argsJson) {
-    try {
-        const json args = argsJson.empty() ? json::object() : json::parse(argsJson);
-        std::vector<ModuleInfoItem> modules;
-        if (!FetchModuleList(modules, PORT_MAIN)) {
-            return makeError("socket communication error: get_module_list");
-        }
-
-        const std::string filter = lowerCopy(
-            optionalStringArg(args, "filter", "", kMaxToolStringParamBytes));
-        std::vector<ModuleInfoItem> filtered;
-        filtered.reserve(modules.size());
-        for (const auto& m : modules) {
-            if (!filter.empty()) {
-                const std::string name = lowerCopy(m.name);
-                if (name.find(filter) == std::string::npos) continue;
-            }
-            filtered.push_back(m);
-        }
-
-        int offset = optionalIntArg(
-            args, "offset", 0, 0, (std::numeric_limits<int>::max)());
-        const int count = optionalIntArg(args, "count", 1000, 1, 1000);
-        const int total = static_cast<int>(filtered.size());
-        if (offset > total) offset = total;
-        const int end = (std::min)(offset + count, total);
-
-        json arr = json::array();
-        for (int i = offset; i < end; ++i) {
-            const auto& m = filtered[static_cast<size_t>(i)];
-            json item;
-            item["name"] = m.name;
-            item["base"] = toHexAddress(m.base);
-            item["size"] = m.size;
-            item["type"] = m.type;
-            item["flag"] = m.flag;
-            arr.push_back(std::move(item));
-        }
-        json result;
-        result["total"] = total;
-        result["offset"] = offset;
-        result["modules"] = std::move(arr);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_module_list: ") + e.what());
-    }
+// canonical module_list
+std::string execModuleList(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().moduleList(argsJson, false, context);
 }
 
-// list_modules
-std::string execListModules(const std::string& argsJson) {
-    return execGetModuleList(argsJson);
+// hidden get_module_list compatibility alias
+std::string execGetModuleList(const std::string& argsJson,
+                              const Mem::OperationContext& context) {
+    return getAgentMemTools().moduleList(argsJson, true, context);
+}
+
+// hidden list_modules compatibility alias
+std::string execListModules(const std::string& argsJson,
+                            const Mem::OperationContext& context) {
+    return getAgentMemTools().moduleList(argsJson, true, context);
 }
 
 // process_list / get_process_list compatibility alias
@@ -1277,23 +1241,16 @@ std::string execOpenProcess(const std::string& argsJson,
     return getAgentMemTools().processOpen(argsJson, context);
 }
 
-// get_module_base
-std::string execGetModuleBase(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string moduleName = requiredStringArg(
-            args, {"module_name", "name"}, "module_name", kMaxToolStringParamBytes);
-        uint64_t base = 0;
-        if (!GetModuleBaseByName(moduleName, base, PORT_MAIN)) {
-            return makeError("socket communication error: get_module_base");
-        }
-        json result;
-        result["module"] = moduleName;
-        result["base"] = toHexAddress(base);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("get_module_base: ") + e.what());
-    }
+// canonical module_resolve
+std::string execModuleResolve(const std::string& argsJson,
+                              const Mem::OperationContext& context) {
+    return getAgentMemTools().moduleResolve(argsJson, false, context);
+}
+
+// hidden get_module_base compatibility alias
+std::string execGetModuleBase(const std::string& argsJson,
+                              const Mem::OperationContext& context) {
+    return getAgentMemTools().moduleResolve(argsJson, true, context);
 }
 
 // resolve_offset_chain
@@ -2132,6 +2089,19 @@ constexpr const char* kSchemaListModules = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaModuleResolve = R"JSON({
+  "type": "object",
+  "required": ["module_name"],
+  "properties": {
+    "module_name": {
+      "type": "string",
+      "description": "Exact module name, basename, or unique substring",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaGetModuleBase = R"JSON({
   "type": "object",
   "anyOf": [
@@ -2596,31 +2566,47 @@ void ToolExecutor::initBuiltinTools() {
         ToolTargetPolicy::Bound);
 
     registerTool(
-        "get_module_list",
-        "List modules loaded in the currently attached target process.",
+        "module_list",
+        "List and page modules loaded in the attached target process.",
         kSchemaListModules,
         ToolSafety::ReadOnly,
-        &execGetModuleList,
-        true,
+        &execModuleList,
         ToolTargetPolicy::Bound);
 
     registerTool(
+        "get_module_list",
+        "Compatibility alias for module_list.",
+        kSchemaListModules,
+        ToolSafety::ReadOnly,
+        &execGetModuleList,
+        ToolTargetPolicy::Bound,
+        false);
+
+    registerTool(
         "list_modules",
-        "List modules loaded in the currently attached target process.",
+        "Compatibility alias for module_list.",
         kSchemaListModules,
         ToolSafety::ReadOnly,
         &execListModules,
-        true,
+        ToolTargetPolicy::Bound,
+        false);
+
+    registerTool(
+        "module_resolve",
+        "Resolve an exact module name, basename, or unique substring.",
+        kSchemaModuleResolve,
+        ToolSafety::ReadOnly,
+        &execModuleResolve,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "get_module_base",
-        "Resolve a module name/substr to its base address.",
+        "Compatibility alias for module_resolve.",
         kSchemaGetModuleBase,
         ToolSafety::ReadOnly,
         &execGetModuleBase,
-        true,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Bound,
+        false);
 
     registerTool(
         "process_list",

@@ -61,13 +61,21 @@ public:
         {42, "com.example.game"},
         {84, "com.example.game.helper"},
     };
+    std::vector<Mem::ModuleInfo> modules = {
+        {0x1000, 0x2000, 1, 5, "/system/lib64/libc.so"},
+        {0x5000, 0x3000, 2, 3, "/data/app/libgame.so"},
+        {0x9000, 0x1000, 2, 1, "/data/app/libgame_helper.so"},
+    };
     std::vector<unsigned char> memory = {0xDE, 0xAD, 0xBE, 0xEF};
     bool fetchProcessesSucceeds = true;
+    bool fetchModulesSucceeds = true;
     bool openProcessSucceeds = true;
     bool readMemorySucceeds = true;
     bool changeTargetAfterRead = false;
     bool changeGenerationAfterRead = false;
     bool changeGenerationDuringOpen = false;
+    bool changeTargetAfterModuleFetch = false;
+    bool changeGenerationAfterModuleFetch = false;
     bool writeRequestStarted = true;
     bool writeResponseReceived = true;
     int32_t writeReportedBytes = -1;
@@ -77,6 +85,7 @@ public:
     Mem::CancellationToken cancelDuringWrite;
     int writeCalls = 0;
     int readCalls = 0;
+    int fetchModuleCalls = 0;
     uint64_t lastReadAddress = 0;
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
@@ -135,6 +144,21 @@ public:
         target.connectionGeneration = generation;
         selectedName = name;
         if (changeGenerationDuringOpen) {
+            ++generation;
+        }
+        return true;
+    }
+
+    bool fetchModules(std::vector<Mem::ModuleInfo>& output) override {
+        ++fetchModuleCalls;
+        if (!fetchModulesSucceeds) {
+            return false;
+        }
+        output = modules;
+        if (changeTargetAfterModuleFetch) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterModuleFetch) {
             ++generation;
         }
         return true;
@@ -558,6 +582,96 @@ void testTypedMemoryService() {
                unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
                !unknown.error().retryable,
            "typed write must preserve raw completion_unknown semantics");
+}
+
+void testModuleListAndResolve() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+
+    Mem::ModuleListRequest listRequest;
+    listRequest.filter = "GAME";
+    listRequest.limit = 1;
+    const auto page = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(page.ok() && page.value().total == 2 &&
+               page.value().items.size() == 1 &&
+               page.value().items.front().name ==
+                   "/data/app/libgame.so" &&
+               page.value().nextOffset == 1 &&
+               page.value().target.pid == backend.target.pid,
+           "module list should filter case-insensitively and paginate");
+
+    Mem::ModuleResolveRequest resolveRequest;
+    resolveRequest.name = "libgame.so";
+    const auto resolved = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(resolved.ok() && resolved.value().module.base == 0x5000 &&
+               resolved.value().module.size == 0x3000 &&
+               resolved.value().module.name == "/data/app/libgame.so",
+           "module resolve should prefer a unique basename match");
+
+    resolveRequest.name = "/SYSTEM/LIB64/LIBC.SO";
+    const auto fullName = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(fullName.ok() && fullName.value().module.base == 0x1000,
+           "module resolve should match full names case-insensitively");
+
+    resolveRequest.name = "libgame";
+    const auto ambiguous = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(!ambiguous.ok() &&
+               ambiguous.error().code == Mem::ErrorCode::InvalidArgument &&
+               ambiguous.error().message.find("ambiguous") !=
+                   std::string::npos,
+           "module resolve must reject ambiguous substrings");
+
+    resolveRequest.name = "libmissing.so";
+    const auto missing = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(!missing.ok() &&
+               missing.error().code == Mem::ErrorCode::InvalidArgument,
+           "module resolve must reject a missing module");
+
+    const int fetchCallsBeforeInvalidPage = backend.fetchModuleCalls;
+    listRequest.limit = 0;
+    const auto invalidPage = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(!invalidPage.ok() &&
+               invalidPage.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.fetchModuleCalls == fetchCallsBeforeInvalidPage,
+           "invalid module page limits must fail before backend access");
+
+    listRequest = {};
+    backend.modules.front().size = 0;
+    const auto invalidModule = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(!invalidModule.ok() &&
+               invalidModule.error().code == Mem::ErrorCode::ProtocolError,
+           "module service must reject invalid backend ranges");
+    backend.modules.front().size = 0x2000;
+
+    backend.changeTargetAfterModuleFetch = true;
+    const auto changed = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(!changed.ok() &&
+               changed.error().code == Mem::ErrorCode::TargetChanged,
+           "module list must reject results from a changed target");
+    backend.changeTargetAfterModuleFetch = false;
+
+    backend.changeGenerationAfterModuleFetch = true;
+    const auto reconnected = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(!reconnected.ok() &&
+               reconnected.error().code == Mem::ErrorCode::ConnectionChanged,
+           "module list must reject results from a replaced connection");
+    backend.changeGenerationAfterModuleFetch = false;
+
+    backend.fetchModulesSucceeds = false;
+    const auto failed = service.listModules(
+        service.captureContext(true), listRequest);
+    expect(!failed.ok() && failed.error().retryable &&
+               failed.error().code == Mem::ErrorCode::ProtocolError,
+           "module transport failure should be structured and retryable");
 }
 
 void testHiddenToolRegistration() {
@@ -1008,6 +1122,49 @@ void testAgentAdapter() {
                legacyTypedWrite.at("hex") == "7F",
            "hidden write_value alias should retain integer addresses");
 
+    const json modulePage = json::parse(
+        tools.moduleList(
+            R"({"filter":"game","count":1})",
+            false,
+            targetContext));
+    expect(modulePage.at("success").get<bool>() &&
+               modulePage.at("total") == 2 &&
+               modulePage.at("count") == 1 &&
+               modulePage.at("truncated").get<bool>() &&
+               modulePage.at("next_cursor") == 1 &&
+               modulePage.at("modules").at(0).at("base") == "0x5000",
+           "module_list adapter should expose structured pagination");
+
+    const json module = json::parse(
+        tools.moduleResolve(
+            R"({"module_name":"libgame.so"})",
+            false,
+            targetContext));
+    expect(module.at("success").get<bool>() &&
+               module.at("module") == "/data/app/libgame.so" &&
+               module.at("base") == "0x5000" &&
+               module.at("size") == 0x3000,
+           "module_resolve adapter should return canonical module metadata");
+
+    const json legacyModule = json::parse(
+        tools.moduleResolve(
+            R"({"name":"libc.so"})",
+            true,
+            targetContext));
+    expect(legacyModule.at("success").get<bool>() &&
+               legacyModule.at("base") == "0x1000",
+           "hidden get_module_base alias should retain name arguments");
+
+    const json ambiguousModule = json::parse(
+        tools.moduleResolve(
+            R"({"module_name":"libgame"})",
+            false,
+            targetContext));
+    expect(!ambiguousModule.at("success").get<bool>() &&
+               ambiguousModule.at("error").at("code") ==
+                   "invalid_argument",
+           "module_resolve adapter should preserve ambiguity errors");
+
     backend.connected = false;
     const json disconnected = json::parse(
         tools.processList("{}", connectionContext));
@@ -1317,6 +1474,7 @@ int main() {
         {"memory target validation", &testMemoryReadTargetValidation},
         {"memory write completion contract", &testMemoryWriteCompletionContract},
         {"typed memory service", &testTypedMemoryService},
+        {"module list and resolve", &testModuleListAndResolve},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},

@@ -17,6 +17,12 @@ public:
     virtual Result<OpenProcessResult> openProcess(
         const OperationContext& context,
         const OpenProcessRequest& request) = 0;
+    virtual Result<ModulePage> listModules(
+        const OperationContext& context,
+        const ModuleListRequest& request) = 0;
+    virtual Result<ResolvedModule> resolveModule(
+        const OperationContext& context,
+        const ModuleResolveRequest& request) = 0;
     virtual Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) = 0;

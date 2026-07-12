@@ -8,7 +8,8 @@ namespace {
 constexpr int kMaxProcessCount = 65536;
 constexpr int kMaxProcessNameSize = 64 * 1024;
 constexpr int kMaxModuleCount = 65536;
-constexpr int kMaxModuleNameSize = 64 * 1024;
+constexpr int kMaxModuleNameSize = 4096;
+constexpr size_t kMaxModuleNameBytesTotal = 16u * 1024u * 1024u;
 constexpr int kMaxDriverCardSize = 4096;
 constexpr int kMaxDriverResponseSize = 64 * 1024;
 
@@ -190,6 +191,7 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
         CeModuleListEntry entry{};
         outList.clear();
         outList.reserve(static_cast<size_t>(len));
+        size_t totalNameBytes = 0;
         for (int i = 0; i < len; ++i) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
@@ -197,6 +199,12 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             if (!isValidModuleSize(entry.modulesize) ||
                 !isValidCount(entry.modulenamesize, kMaxModuleNameSize))
                 return false;
+            const size_t moduleNameBytes =
+                static_cast<size_t>(entry.modulenamesize);
+            if (totalNameBytes >
+                kMaxModuleNameBytesTotal - moduleNameBytes)
+                return false;
+            totalNameBytes += moduleNameBytes;
             std::vector<char> name;
             if (entry.modulenamesize > 0) {
                 name.resize(static_cast<size_t>(entry.modulenamesize));

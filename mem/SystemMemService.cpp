@@ -82,6 +82,28 @@ public:
         return target.isAttached() && target.pid == pid;
     }
 
+    bool fetchModules(std::vector<ModuleInfo>& modules) override {
+        std::vector<ModuleInfoItem> items;
+        if (!FetchModuleList(items, PORT_MAIN)) {
+            return false;
+        }
+
+        modules.clear();
+        modules.reserve(items.size());
+        for (auto& item : items) {
+            ModuleInfo module;
+            module.base = item.base;
+            module.size = item.size > 0
+                ? static_cast<uint64_t>(item.size)
+                : 0;
+            module.type = item.type;
+            module.flag = item.flag;
+            module.name = std::move(item.name);
+            modules.push_back(std::move(module));
+        }
+        return true;
+    }
+
     bool readMemory(uint64_t address,
                     uint32_t size,
                     std::vector<unsigned char>& bytes) override {

@@ -32,6 +32,60 @@ std::string lowerAscii(std::string value) {
     return value;
 }
 
+std::string trimAscii(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() &&
+           (value[begin] == ' ' || value[begin] == '\t' ||
+            value[begin] == '\r' || value[begin] == '\n')) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin &&
+           (value[end - 1] == ' ' || value[end - 1] == '\t' ||
+            value[end - 1] == '\r' || value[end - 1] == '\n')) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::string moduleBaseName(const std::string& name) {
+    const size_t separator = name.find_last_of("/\\");
+    return separator == std::string::npos
+        ? name
+        : name.substr(separator + 1);
+}
+
+std::optional<Error> validateModules(
+    const std::vector<ModuleInfo>& modules) {
+    if (modules.size() > kMaxModuleResultCount) {
+        return Error{ErrorCode::ProtocolError,
+                     "module list exceeds the maximum item count", false};
+    }
+
+    size_t totalNameBytes = 0;
+    for (const auto& module : modules) {
+        if (module.size == 0 ||
+            module.base >
+                (std::numeric_limits<uint64_t>::max)() - module.size) {
+            return Error{ErrorCode::ProtocolError,
+                         "module list contains an invalid address range",
+                         false};
+        }
+        if (module.name.size() > kMaxTextParameterBytes) {
+            return Error{ErrorCode::ProtocolError,
+                         "module list contains an overlong name", false};
+        }
+        if (totalNameBytes >
+            kMaxModuleNameBytesTotal - module.name.size()) {
+            return Error{ErrorCode::ProtocolError,
+                         "module list exceeds the total name-size limit",
+                         false};
+        }
+        totalNameBytes += module.name.size();
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 MemService::MemService(IMemBackend& backend) : backend_(backend) {}
@@ -312,6 +366,160 @@ Result<OpenProcessResult> MemService::openProcess(
             elapsedMilliseconds(start));
     }
     return Result<OpenProcessResult>::success(
+        std::move(result), elapsedMilliseconds(start));
+}
+
+Result<ModulePage> MemService::listModules(
+    const OperationContext& context,
+    const ModuleListRequest& request) {
+    const auto start = Clock::now();
+    if (request.limit == 0 || request.limit > kMaxModulePageSize) {
+        return Result<ModulePage>::failure(
+            ErrorCode::InvalidArgument,
+            "module page limit must be between 1 and 1000",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.filter.size() > kMaxTextParameterBytes) {
+        return Result<ModulePage>::failure(
+            ErrorCode::InvalidArgument,
+            "module filter exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ModulePage>(*error, start);
+    }
+
+    std::vector<ModuleInfo> allModules;
+    if (!backend_.fetchModules(allModules)) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ModulePage>(*error, start);
+        }
+        return Result<ModulePage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch the module list from the Android server",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ModulePage>(*error, start);
+    }
+    if (const auto error = validateModules(allModules)) {
+        return failureFrom<ModulePage>(*error, start);
+    }
+
+    const std::string filter = lowerAscii(request.filter);
+    std::vector<ModuleInfo> filtered;
+    filtered.reserve(allModules.size());
+    for (auto& module : allModules) {
+        if (filter.empty() ||
+            lowerAscii(module.name).find(filter) != std::string::npos) {
+            filtered.push_back(std::move(module));
+        }
+    }
+
+    ModulePage page;
+    page.total = filtered.size();
+    page.offset = std::min(request.offset, page.total);
+    const size_t end = page.offset +
+                       std::min(request.limit, page.total - page.offset);
+    page.items.reserve(end - page.offset);
+    for (size_t i = page.offset; i < end; ++i) {
+        page.items.push_back(std::move(filtered[i]));
+    }
+    if (end < page.total) {
+        page.nextOffset = end;
+    }
+    page.target = *context.target;
+    return Result<ModulePage>::success(
+        std::move(page), elapsedMilliseconds(start));
+}
+
+Result<ResolvedModule> MemService::resolveModule(
+    const OperationContext& context,
+    const ModuleResolveRequest& request) {
+    const auto start = Clock::now();
+    if (request.name.size() > kMaxTextParameterBytes) {
+        return Result<ResolvedModule>::failure(
+            ErrorCode::InvalidArgument,
+            "module name exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const std::string query = lowerAscii(trimAscii(request.name));
+    if (query.empty()) {
+        return Result<ResolvedModule>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name must not be empty",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ResolvedModule>(*error, start);
+    }
+
+    std::vector<ModuleInfo> modules;
+    if (!backend_.fetchModules(modules)) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ResolvedModule>(*error, start);
+        }
+        return Result<ResolvedModule>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch modules while resolving module_name",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ResolvedModule>(*error, start);
+    }
+    if (const auto error = validateModules(modules)) {
+        return failureFrom<ResolvedModule>(*error, start);
+    }
+
+    std::vector<const ModuleInfo*> fullMatches;
+    std::vector<const ModuleInfo*> baseNameMatches;
+    std::vector<const ModuleInfo*> substringMatches;
+    for (const auto& module : modules) {
+        const std::string fullName = lowerAscii(module.name);
+        if (fullName == query) {
+            fullMatches.push_back(&module);
+        }
+        if (lowerAscii(moduleBaseName(module.name)) == query) {
+            baseNameMatches.push_back(&module);
+        }
+        if (fullName.find(query) != std::string::npos) {
+            substringMatches.push_back(&module);
+        }
+    }
+
+    const std::vector<const ModuleInfo*>* matches = nullptr;
+    if (!fullMatches.empty()) {
+        matches = &fullMatches;
+    } else if (!baseNameMatches.empty()) {
+        matches = &baseNameMatches;
+    } else {
+        matches = &substringMatches;
+    }
+    if (matches->empty()) {
+        return Result<ResolvedModule>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name did not match a loaded module",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (matches->size() != 1) {
+        return Result<ResolvedModule>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name is ambiguous; use module_list with a narrower filter",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    ResolvedModule result;
+    result.module = *matches->front();
+    result.target = *context.target;
+    return Result<ResolvedModule>::success(
         std::move(result), elapsedMilliseconds(start));
 }
 

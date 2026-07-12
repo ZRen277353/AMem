@@ -131,6 +131,23 @@ Mem::Result<Mem::ScalarType> scalarTypeArgument(
     return Mem::parseScalarType(type);
 }
 
+std::string moduleNameArgument(const json& args,
+                               bool allowLegacyArguments) {
+    const char* key = "module_name";
+    if (allowLegacyArguments && !args.contains(key) &&
+        args.contains("name")) {
+        key = "name";
+    }
+    const std::string name = optionalString(args, key);
+    if (name.empty()) {
+        throw std::runtime_error(
+            allowLegacyArguments
+                ? "module_name or name must be a non-empty string"
+                : "module_name must be a non-empty string");
+    }
+    return name;
+}
+
 Mem::Result<uint64_t> parseAddressArgument(const json& value,
                                            bool allowLegacyAddress) {
     if (value.is_string()) {
@@ -413,6 +430,93 @@ std::string AgentMemTools::processOpen(
         return output.dump();
     } catch (const std::exception& error) {
         return exceptionResult("process_open", error);
+    }
+}
+
+std::string AgentMemTools::moduleList(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ModuleListRequest request;
+        request.filter = optionalString(args, "filter");
+        request.offset = optionalSize(args, "offset", 0,
+                                      (std::numeric_limits<int>::max)());
+        request.limit = optionalSize(
+            args,
+            "count",
+            allowLegacyArguments ? 1000 : 200,
+            Mem::kMaxModulePageSize);
+
+        const auto response = service_.listModules(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json modules = json::array();
+        for (const auto& module : response.value().items) {
+            modules.push_back({
+                {"name", module.name},
+                {"base", Mem::formatAddress(module.base)},
+                {"size", module.size},
+                {"type", module.type},
+                {"flag", module.flag},
+            });
+        }
+
+        json output;
+        output["success"] = true;
+        output["modules"] = std::move(modules);
+        output["total"] = response.value().total;
+        output["offset"] = response.value().offset;
+        output["count"] = response.value().items.size();
+        output["truncated"] = response.value().nextOffset.has_value();
+        output["next_cursor"] = response.value().nextOffset
+                                    ? json(*response.value().nextOffset)
+                                    : json(nullptr);
+        output["meta"] = resultMeta(response.durationMs(),
+                                    response.value().target.connectionGeneration,
+                                    &response.value().target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "legacy module list" : "module_list",
+            error);
+    }
+}
+
+std::string AgentMemTools::moduleResolve(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ModuleResolveRequest request;
+        request.name = moduleNameArgument(args, allowLegacyArguments);
+
+        const auto response = service_.resolveModule(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::ModuleInfo& module = response.value().module;
+        json output;
+        output["success"] = true;
+        output["query"] = request.name;
+        output["module"] = module.name;
+        output["base"] = Mem::formatAddress(module.base);
+        output["size"] = module.size;
+        output["type"] = module.type;
+        output["flag"] = module.flag;
+        output["meta"] = resultMeta(response.durationMs(),
+                                    response.value().target.connectionGeneration,
+                                    &response.value().target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "get_module_base" : "module_resolve",
+            error);
     }
 }
 
