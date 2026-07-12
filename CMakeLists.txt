@@ -393,6 +393,12 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_agent_mem_service COMMAND NativeAgentMemTests)
+    add_test(
+        NAME native_agent_catalog
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyAgentCatalog.cmake
+    )
 endif()
 
 # ==================== 分发说明 ====================
