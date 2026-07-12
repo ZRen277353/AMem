@@ -479,7 +479,9 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。其线程安全 snapshot 另提供 idle/handshaking/serving/stopping/failed phase、established/completed count、活动 client identity/capability、最后 handshake/session 状态和 request/response/cancel 计数；不会保存 params/result，session 结束后清活动身份。`SystemNativeAgentRuntime` 只在用户打开控制窗口时延迟构造；`NativeAgentIpcWindow` 显示这些状态并提供“启用/停止”。编译选项和运行状态都默认关闭，`main.cpp` 不调用 `start()`，只在设备断连前 shutdown。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前仍没有 privileged approval broker，因而 GUI 明确显示 Observe-only，调试默认应用时看不到 pipe 是预期现状。
+`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。其线程安全 snapshot 另提供 idle/handshaking/serving/stopping/failed phase、established/completed count、活动 client identity/capability、最后 handshake/session 状态和 request/response/cancel 计数；不会保存 params/result，session 结束后清活动身份。`SystemNativeAgentRuntime` 只在用户打开控制窗口时延迟构造；`NativeAgentIpcWindow` 显示这些状态并提供“启用/停止”。编译选项和运行状态都默认关闭，`main.cpp` 不调用 `start()`，只在设备断连前 shutdown。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前 runtime 尚未接入 privileged broker，因而 GUI 明确显示 Observe-only，调试默认应用时看不到 pipe 是预期现状。
+
+privileged broker 当前是隔离的 `IpcApprovalBroker`，不在这条调用链上。它从 catalog 推导 capability/target policy，以 `{sessionId, requestId}` 去重，把 connection/target/deadline 固定在不含 params/result 的 bounded record 中。UI decision 只能把 pending 变为 approved 或 denied；approved 不是执行证明，未来 executor 必须调用一次 `consume()`，在 send 前再次复核 generation/target，随后 grant 不可重用。session close、目标变化、重连和 deadline 分别走 cancel/invalidate/expire。当前没有 GUI approval queue、持久化 sink 或 dispatcher adapter，Hello 仍只 grant Observe。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -590,13 +592,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 7 组 runtime 测试。新增 runtime 覆盖真实 Observe dispatch、privileged denial、顺序 client、错误 Hello、target invalidation、握手/active request Stop、restart 和 snapshot 数据边界。Debug/Release 当前各有 14 项 CTest。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 6 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 7 组 runtime 测试。broker 新增 catalog-owned metadata、有界 queue/history、单向 decision、one-shot consume、target/generation/session/deadline invalidation、audit re-entry 和并发覆盖。Debug/Release 当前各有 15 项 CTest。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Native IPC GUI 交互、privileged approval broker 和 target-bound approval invalidation 建立状态机/集成测试；runtime composition 与 compile/default-stop/shutdown gate 已有无设备测试。
+5. 为 Native IPC GUI approval queue、broker/runtime/dispatcher、持久化审计和真实 send-boundary consume 建立集成测试；broker core 与 runtime/default-stop/shutdown gate 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 
