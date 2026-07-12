@@ -26,6 +26,8 @@ struct UIMessage {
     ToolCall toolCall;
     AI::ToolResult toolResult;
     long long durationMs = 0;
+    bool auditPersisted = true;
+    std::string auditError;
 };
 
 class UIMessageQueue {

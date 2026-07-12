@@ -4,6 +4,7 @@
 #include "ToolCallSecurity.h"
 
 #include "ApiKeyStore.h"
+#include "AgentMutationAudit.h"
 #include "AgentTaskExecutor.h"
 #include "AiSettings.h"
 #include "DefaultSystemPrompt.h"
@@ -58,6 +59,32 @@ constexpr size_t kMaxInboundToolCalls = 64;
 constexpr size_t kMaxToolCallIdBytes = 256;
 constexpr size_t kMaxToolCallNameBytes = 64;
 constexpr size_t kMaxToolCallArgumentsBytes = 512 * 1024;
+
+bool persistMutationOutcome(
+    const std::string& runId,
+    const ToolCall& call,
+    const ToolResult& result,
+    const Mem::OperationContext& context,
+    MutationApproval approval,
+    long long durationMs,
+    std::string& error) {
+    ToolExecutor& tools = ToolExecutor::getInstance();
+    const ToolSafety safety = tools.getToolSafety(call.name);
+    if (safety != ToolSafety::Write) {
+        return true;
+    }
+
+    AgentMutationAuditEvent event;
+    event.runId = runId;
+    event.call = call;
+    event.result = result;
+    event.context = context;
+    event.safety = safety;
+    event.targetPolicy = tools.getToolTargetPolicy(call.name);
+    event.approval = approval;
+    event.durationMs = durationMs;
+    return AgentMutationAuditLog::getInstance().append(event, &error);
+}
 
 bool startsWithICase(const std::string& s, const char* prefix) {
     const size_t n = std::strlen(prefix);
@@ -510,6 +537,9 @@ void ChatWindow::onDraw() {
     if (showSettings_) {
         drawSettingsPanel();
     }
+    if (showMutationAudit_) {
+        drawMutationAuditPanel();
+    }
 
     // Session management popups.
     if (showDeleteConfirm_) {
@@ -827,6 +857,10 @@ void ChatWindow::drawToolbar() {
         showSettings_ = true;
     }
     ImGui::SameLine();
+    if (ImGui::Button("Audit")) {
+        showMutationAudit_ = true;
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Clear")) {
         clearHistory();
     }
@@ -940,6 +974,110 @@ void ChatWindow::drawAgentActivityPanel() {
         }
     }
     ImGui::EndChild();
+}
+
+void ChatWindow::drawMutationAuditPanel() {
+    ImGui::SetNextWindowSize(ImVec2(900.0f, 360.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Mutation Audit", &showMutationAudit_)) {
+        ImGui::End();
+        return;
+    }
+
+    AgentMutationAuditLog& audit = AgentMutationAuditLog::getInstance();
+    const std::vector<AgentMutationAuditEntry> entries = audit.recent();
+    ImGui::TextDisabled("%s", audit.filepath().c_str());
+    ImGui::Separator();
+
+    if (entries.empty()) {
+        ImGui::TextDisabled("No mutation outcomes recorded");
+        ImGui::End();
+        return;
+    }
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_BordersInnerV |
+        ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable |
+        ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_SizingStretchProp;
+    if (ImGui::BeginTable("##mutation_audit", 8, flags,
+                          ImVec2(0.0f, 0.0f))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed,
+                                78.0f);
+        ImGui::TableSetupColumn("Tool", ImGuiTableColumnFlags_WidthStretch,
+                                1.2f);
+        ImGui::TableSetupColumn("Effect", ImGuiTableColumnFlags_WidthStretch,
+                                1.0f);
+        ImGui::TableSetupColumn("Approval", ImGuiTableColumnFlags_WidthFixed,
+                                92.0f);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch,
+                                1.0f);
+        ImGui::TableSetupColumn("Completion",
+                                ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Duration",
+                                ImGuiTableColumnFlags_WidthFixed, 72.0f);
+        ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthStretch,
+                                1.4f);
+        ImGui::TableHeadersRow();
+
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+            const AgentMutationAuditEntry& entry = *it;
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            const std::string timestamp =
+                formatLocalTime(entry.timestampMs / 1000);
+            ImGui::TextUnformatted(
+                timestamp.empty() ? "--:--:--" : timestamp.c_str());
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(entry.tool.c_str());
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(entry.effect.c_str());
+            if (!entry.resourceDomain.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Resource: %s",
+                                  entry.resourceDomain.c_str());
+            }
+
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(entry.approval.c_str());
+
+            ImGui::TableSetColumnIndex(4);
+            if (entry.target) {
+                ImGui::Text("PID %d / r%llu",
+                            entry.target->pid,
+                            static_cast<unsigned long long>(
+                                entry.target->processRevision));
+            } else {
+                ImGui::Text("gen %llu",
+                            static_cast<unsigned long long>(
+                                entry.connectionGeneration));
+            }
+
+            ImGui::TableSetColumnIndex(5);
+            const bool uncertain =
+                entry.completion == "completion_unknown" ||
+                entry.completion == "cancel_requested" ||
+                entry.completion == "completed_after_cancel_request" ||
+                entry.completion == "completed_after_deadline";
+            ImGui::PushStyleColor(
+                ImGuiCol_Text,
+                uncertain ? ColorScheme::Warning
+                          : (entry.success ? ColorScheme::Success
+                                           : ColorScheme::Error));
+            ImGui::TextUnformatted(entry.completion.c_str());
+            ImGui::PopStyleColor();
+
+            ImGui::TableSetColumnIndex(6);
+            ImGui::TextUnformatted(formatDuration(entry.durationMs).c_str());
+
+            ImGui::TableSetColumnIndex(7);
+            ImGui::TextUnformatted(entry.error.c_str());
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
 }
 
 void ChatWindow::drawInputArea() {
@@ -1159,6 +1297,10 @@ void ChatWindow::clearHistory() {
 void ChatWindow::pollMessages() {
     UIMessage msg;
     while (UIMessageQueue::getInstance().tryPop(msg)) {
+        if (!msg.auditPersisted && !msg.auditError.empty()) {
+            Gui::log("[AI Chat] mutation audit persistence failed: %s",
+                     msg.auditError.c_str());
+        }
         if (!msg.runId.empty()) {
             const bool isToolResult = msg.type == UIMessageType::ToolResult;
             const std::string& expectedRunId =
@@ -1602,6 +1744,26 @@ void ChatWindow::drawToolConfirmationModal() {
             }
             ImGui::SameLine();
             if (ImGui::Button("Deny")) {
+                ToolResult deniedResult;
+                deniedResult.success = false;
+                deniedResult.errorMessage = "tool execution denied by user";
+                deniedResult.resultJson =
+                    R"({"success":false,"error":{"code":"permission_denied","message":"tool execution denied by user","retryable":false},"completion":"rejected_before_start"})";
+                deniedResult.completion =
+                    ToolCompletionState::RejectedBeforeStart;
+                std::string auditError;
+                if (!persistMutationOutcome(
+                        agentController_.runId(),
+                        *pending,
+                        deniedResult,
+                        agentController_.operationContext(),
+                        MutationApproval::Denied,
+                        0,
+                        auditError)) {
+                    Gui::log(
+                        "[AI Chat] mutation audit persistence failed: %s",
+                        auditError.c_str());
+                }
                 ImGui::CloseCurrentPopup();
                 state_ = State::ToolExecuting;
                 handleAgentOutcome(agentController_.denyPendingTool(makeAgentConfig()));
@@ -1634,6 +1796,15 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
     task.runId = runId;
     task.call = call;
     task.context = operationContext;
+    MutationApproval approval = MutationApproval::NotRequired;
+    if (ToolExecutor::getInstance().getToolSafety(call.name) ==
+        ToolSafety::Write) {
+        approval =
+            AiSettings::getInstance().get().autoApproveWrites
+                ? MutationApproval::AutoApproved
+                : MutationApproval::Approved;
+        task.approval = approval;
+    }
     const bool queued = AgentTaskExecutor::getInstance().enqueue(
         std::move(task), [](AgentToolTaskOutcome outcome) {
         UIMessage msg;
@@ -1642,6 +1813,8 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
         msg.toolCall = std::move(outcome.call);
         msg.toolResult = std::move(outcome.result);
         msg.durationMs = outcome.durationMs;
+        msg.auditPersisted = outcome.auditPersisted;
+        msg.auditError = std::move(outcome.auditError);
         UIMessageQueue::getInstance().push(std::move(msg));
     });
 
@@ -1657,6 +1830,14 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
             R"({"success":false,"error":{"code":"internal_error","message":"tool task queue is shutting down or full","retryable":false},"completion":"cancelled_before_start"})";
         msg.toolResult.completion =
             ToolCompletionState::CancelledBeforeStart;
+        msg.auditPersisted = persistMutationOutcome(
+            runId,
+            call,
+            msg.toolResult,
+            operationContext,
+            approval,
+            0,
+            msg.auditError);
         UIMessageQueue::getInstance().push(std::move(msg));
     }
 }

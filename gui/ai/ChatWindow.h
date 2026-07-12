@@ -71,6 +71,7 @@ private:
     void drawToolbar();
     void drawMessageArea();
     void drawAgentActivityPanel();
+    void drawMutationAuditPanel();
     void drawInputArea();
     void drawToolConfirmationModal();
 
@@ -123,6 +124,7 @@ private:
     // ---- state ---------------------------------------------------------
     enum class State { Idle, WaitingResponse, ToolConfirmation, ToolExecuting };
     State state_ = State::Idle;
+    bool showMutationAudit_ = false;
 
     // Input buffer for the composer. 2001 chars = 2000-char message cap
     // (AC 9.3) + null terminator.
