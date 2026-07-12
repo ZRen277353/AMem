@@ -13,6 +13,9 @@
 struct HW_HIT_INFO;
 class DisassemblyHelper;
 struct DisassemblyResult;
+namespace Mem {
+class IMemService;
+}
 
 // 断点类型枚举
 enum class BreakpointType {
@@ -65,7 +68,7 @@ struct BreakpointInfo {
 
 class BreakpointWindow : public Window {
 public:
-    BreakpointWindow();
+    explicit BreakpointWindow(Mem::IMemService& memService);
 
     void draw() override;
     unsigned int getWindowFlags() const override;
@@ -97,6 +100,7 @@ private:
     void resumeBreakpoint(int index);
     
     // 状态变量
+    Mem::IMemService& memService_;
     std::vector<BreakpointInfo> breakpoints;
     uint64_t observedProcessRevision = 0;
     

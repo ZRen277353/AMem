@@ -322,7 +322,7 @@ canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个
 
 canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，GUI/IPC/隐藏 alias 的 init 会使其失效。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
 
-canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确认和本地 cleanup tracker 更新处于同一 MAIN transaction。`ClearTrackedKernelBreakpoints()` 持 gate 完成 tracker snapshot 和逐项 remove，避免并发 set 落在 cleanup 缝隙；disconnect/reconnect 不向旧 target 发命令，只清本地 tracker。四种 mutation 使用相同 receipt：未发送可重试，已发送无响应为非重试 `completion_unknown`，确认后才报告 completed/cancel/deadline 状态。hits 协议没有 offset 参数，socket 层流式丢弃页外记录，Agent 只收到最多 100 项及实际可取总数。
+canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确认和本地 cleanup tracker 更新处于同一 MAIN transaction。`ClearTrackedKernelBreakpoints()` 持 gate 完成 tracker snapshot 和逐项 remove，避免并发 set 落在 cleanup 缝隙；disconnect/reconnect 不向旧 target 发命令，只清本地 tracker。四种 mutation 使用相同 receipt：未发送可重试，已发送无响应为非重试 `completion_unknown`，确认后才报告 completed/cancel/deadline 状态。`BreakpointWindow` 也显式注入同一个 `IMemService`，set/remove/enable/suspend/resume 每次捕获 target context 并消费结构化错误。hits 协议没有 offset 参数，socket 层流式丢弃页外记录，Agent 只收到最多 100 项及实际可取总数；GUI 命中详情仍读取 legacy DEBUG-port `HW_HIT_INFO`，因为 service DTO 尚未保留 FPSIMD 字段。
 
 当前复合序列包括：
 

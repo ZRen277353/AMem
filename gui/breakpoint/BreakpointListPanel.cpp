@@ -4,7 +4,7 @@
 #include "../AppContext.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
+#include "../../mem/IMemService.h"
 #include <algorithm>
 #include <cstring>
 #include <cerrno>
@@ -37,6 +37,17 @@ bool parseBreakpointAddress(const char* text, uint64_t& address)
     }
 
     return *end == '\0';
+}
+
+void logBreakpointServiceError(const char* action,
+                               uint64_t address,
+                               const Mem::Error& error)
+{
+    Gui::log("%s失败: 0x%llX [%s] %s",
+             action,
+             address,
+             Mem::errorCodeName(error.code),
+             error.message.c_str());
 }
 }
 
@@ -288,7 +299,13 @@ void BreakpointWindow::addBreakpoint(uint64_t address, BreakpointType type, Brea
         return;
     }
 
-    if (SetKernelBreakpoint(address, (uint32_t)type, (uint32_t)size)) {
+    Mem::BreakpointSetRequest request;
+    request.address = address;
+    request.access = static_cast<Mem::BreakpointAccess>(type);
+    request.size = static_cast<uint32_t>(size);
+    auto result = memService_.setBreakpoint(
+        memService_.captureContext(true), request);
+    if (result.ok()) {
         BreakpointInfo bp;
         bp.address = address;
         bp.type = type;
@@ -301,7 +318,7 @@ void BreakpointWindow::addBreakpoint(uint64_t address, BreakpointType type, Brea
         breakpoints.push_back(bp);
         Gui::log("断点已设置: 0x%llX", address);
     } else {
-        Gui::log("设置断点失败: 0x%llX", address);
+        logBreakpointServiceError("设置断点", address, result.error());
     }
 }
 
@@ -311,10 +328,13 @@ void BreakpointWindow::removeBreakpoint(int index)
 
     auto& bp = breakpoints[index];
     if (bp.enabled) {
-        if (RemoveKernelBreakpoint(bp.address)) {
+        Mem::BreakpointAddressRequest request{bp.address};
+        auto result = memService_.removeBreakpoint(
+            memService_.captureContext(true), request);
+        if (result.ok()) {
             Gui::log("断点已移除: 0x%llX", bp.address);
         } else {
-            Gui::log("移除断点失败: 0x%llX", bp.address);
+            logBreakpointServiceError("移除断点", bp.address, result.error());
             return;
         }
     }
@@ -338,21 +358,30 @@ void BreakpointWindow::toggleBreakpoint(int index)
     auto& bp = breakpoints[index];
     if (bp.enabled) {
         // 禁用断点
-        if (RemoveKernelBreakpoint(bp.address)) {
+        Mem::BreakpointAddressRequest request{bp.address};
+        auto result = memService_.removeBreakpoint(
+            memService_.captureContext(true), request);
+        if (result.ok()) {
             bp.enabled = false;
             bp.suspended = false;
             Gui::log("断点已禁用: 0x%llX", bp.address);
         } else {
-            Gui::log("禁用断点失败: 0x%llX", bp.address);
+            logBreakpointServiceError("禁用断点", bp.address, result.error());
         }
     } else {
         // 启用断点
-        if (SetKernelBreakpoint(bp.address, (uint32_t)bp.type, (uint32_t)bp.size)) {
+        Mem::BreakpointSetRequest request;
+        request.address = bp.address;
+        request.access = static_cast<Mem::BreakpointAccess>(bp.type);
+        request.size = static_cast<uint32_t>(bp.size);
+        auto result = memService_.setBreakpoint(
+            memService_.captureContext(true), request);
+        if (result.ok()) {
             bp.enabled = true;
             bp.suspended = false;
             Gui::log("断点已启用: 0x%llX", bp.address);
         } else {
-            Gui::log("启用断点失败: 0x%llX", bp.address);
+            logBreakpointServiceError("启用断点", bp.address, result.error());
         }
     }
 }
@@ -364,11 +393,14 @@ void BreakpointWindow::suspendBreakpoint(int index)
     auto& bp = breakpoints[index];
     if (!bp.enabled || bp.suspended) return;
 
-    if (SuspendKernelBreakpoint(bp.address)) {
+    Mem::BreakpointAddressRequest request{bp.address};
+    auto result = memService_.suspendBreakpoint(
+        memService_.captureContext(true), request);
+    if (result.ok()) {
         bp.suspended = true;
         Gui::log("断点已暂停: 0x%llX", bp.address);
     } else {
-        Gui::log("暂停断点失败: 0x%llX", bp.address);
+        logBreakpointServiceError("暂停断点", bp.address, result.error());
     }
 }
 
@@ -379,10 +411,13 @@ void BreakpointWindow::resumeBreakpoint(int index)
     auto& bp = breakpoints[index];
     if (!bp.enabled || !bp.suspended) return;
 
-    if (ResumeKernelBreakpoint(bp.address)) {
+    Mem::BreakpointAddressRequest request{bp.address};
+    auto result = memService_.resumeBreakpoint(
+        memService_.captureContext(true), request);
+    if (result.ok()) {
         bp.suspended = false;
         Gui::log("断点已恢复: 0x%llX", bp.address);
     } else {
-        Gui::log("恢复断点失败: 0x%llX", bp.address);
+        logBreakpointServiceError("恢复断点", bp.address, result.error());
     }
 }

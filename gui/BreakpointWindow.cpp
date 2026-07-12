@@ -12,7 +12,8 @@
 #include <cmath>
 
 
-BreakpointWindow::BreakpointWindow()
+BreakpointWindow::BreakpointWindow(Mem::IMemService& memService)
+    : memService_(memService)
 {
     name = "断点调试器";
     observedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);

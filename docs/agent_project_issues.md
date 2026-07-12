@@ -70,11 +70,12 @@
 - `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
 - 审批框显示预期 connection generation、PID 和 process revision。
 - `status`、`process_list`、`process_open`、module/pointer resolution、四个 canonical scan 工具、raw/typed memory read/write 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- GUI `BreakpointWindow` 的 set/remove/enable/suspend/resume 已显式注入 `IMemService`，每次调用捕获 target context，并仅在结构化成功回执后更新本地状态；命中详情读取仍是 legacy DEBUG-port DTO。
 - 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；canonical breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint mutation、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 

@@ -244,6 +244,8 @@ ChatWindow::processToolCalls()
 
 driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 以最多 100 项分页。旧 scan/symbol/breakpoint 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。`lua_execute` 在 host 边界复核 target，使用 Agent absolute deadline，并只把开始后的取消作为回执标记。
 
+GUI 的 `BreakpointWindow` 已开始复用该边界：窗口构造时注入 `IMemService`，添加、删除、启用、暂停和恢复均捕获当前 target/generation，并只在 confirmed success 后修改本地列表。命中历史暂时保留 `PORT_DEBUG` 的 `HW_HIT_INFO` 路径，以免丢失详情页使用的 FPSIMD 数据；这不是完整的 breakpoint GUI 迁移。
+
 ### 5.3 受管工具队列
 
 批准或只读工具进入 `ChatWindow::startToolExecution()`：

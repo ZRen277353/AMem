@@ -9,6 +9,7 @@
 #include "MemoryViewerWindow.h"
 #include "BreakpointWindow.h"
 #include "LogWindow.h"
+#include "../mem/SystemMemService.h"
 
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
@@ -254,7 +255,7 @@ void CEWindow::openMemoryViewerWindow()
 
 void CEWindow::openBreakpointWindow()
 {
-    Gui::getOrCreate<BreakpointWindow>();
+    Gui::getOrCreate<BreakpointWindow>(Mem::getSystemMemService());
 }
 
 void CEWindow::openModulesWindow()
