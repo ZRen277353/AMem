@@ -14,6 +14,8 @@
 
 namespace NativeIpc {
 
+class IpcApprovalBroker;
+
 enum class RuntimePhase {
   Idle,
   Handshaking,
@@ -27,6 +29,8 @@ struct NativeAgentRuntimeSnapshot {
   RuntimePhase phase = RuntimePhase::Idle;
   uint64_t establishedSessions = 0;
   uint64_t completedSessions = 0;
+  uint64_t activeSessionId = 0;
+  uint64_t lastSessionId = 0;
 
   std::string activeClientName;
   std::string activeClientVersion;
@@ -42,13 +46,15 @@ struct NativeAgentRuntimeSnapshot {
 };
 
 // Compile-only runtime composition. Product code must opt in explicitly and
-// retain this object for as long as the server is enabled.
+// retain this object for as long as the server is enabled. An injected
+// approval broker must outlive the runtime.
 class NativeAgentRuntime final {
 public:
   NativeAgentRuntime(Mem::IMemService &service,
                      std::wstring pipeName = kDefaultPipeName,
                      HandshakeConfig handshakeConfig = {},
-                     RequestSessionConfig requestConfig = {});
+                     RequestSessionConfig requestConfig = {},
+                     IpcApprovalBroker *approvalBroker = nullptr);
   ~NativeAgentRuntime();
 
   NativeAgentRuntime(const NativeAgentRuntime &) = delete;
@@ -60,13 +66,14 @@ public:
 
 private:
   void handleClient(HANDLE pipe, HANDLE stopEvent);
-  void recordHandshake(const HandshakeResult &result);
-  void recordSession(const RequestSessionResult &result);
+  uint64_t recordHandshake(const HandshakeResult &result);
+  void recordSession(uint64_t sessionId, const RequestSessionResult &result);
   void recordHandlerFailure(const std::wstring &error);
-  void finishClient();
+  void finishClient(uint64_t sessionId);
   void resetForStart();
 
   Mem::IMemService &service_;
+  IpcApprovalBroker *const approvalBroker_;
   const HandshakeConfig handshakeConfig_;
   const RequestSessionConfig requestConfig_;
   NamedPipeServer server_;
@@ -77,6 +84,9 @@ private:
   bool stopping_ = false;
   uint64_t establishedSessions_ = 0;
   uint64_t completedSessions_ = 0;
+  uint64_t nextSessionId_ = 1;
+  uint64_t activeSessionId_ = 0;
+  uint64_t lastSessionId_ = 0;
   std::string activeClientName_;
   std::string activeClientVersion_;
   std::vector<IpcCapability> grantedCapabilities_;

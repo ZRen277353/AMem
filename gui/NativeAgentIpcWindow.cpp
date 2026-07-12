@@ -262,6 +262,12 @@ void NativeAgentIpcWindow::onDraw() {
     countRow("已接受连接", snapshot.server.acceptedConnections);
     countRow("已建立会话", snapshot.establishedSessions);
     countRow("已完成会话", snapshot.completedSessions);
+    if (snapshot.activeSessionId != 0) {
+      countRow("当前会话 ID", snapshot.activeSessionId);
+    }
+    if (snapshot.lastSessionId != 0) {
+      countRow("最近会话 ID", snapshot.lastSessionId);
+    }
     if (!snapshot.activeClientName.empty()) {
       textRow("当前客户端", snapshot.activeClientName.c_str());
       textRow("客户端版本", snapshot.activeClientVersion.empty()

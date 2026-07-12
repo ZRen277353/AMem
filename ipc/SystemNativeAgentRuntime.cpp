@@ -13,18 +13,18 @@ class SystemRuntimeOwner final {
 public:
   NativeAgentRuntime &getRuntime() {
     std::lock_guard<std::mutex> lock(mutex_);
+    ensureApprovalBrokerLocked();
     if (!runtime_) {
-      runtime_ =
-          std::make_unique<NativeAgentRuntime>(Mem::getSystemMemService());
+      runtime_ = std::make_unique<NativeAgentRuntime>(
+          Mem::getSystemMemService(), kDefaultPipeName, HandshakeConfig{},
+          RequestSessionConfig{}, approvalBroker_.get());
     }
     return *runtime_;
   }
 
   IpcApprovalBroker &getApprovalBroker() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!approvalBroker_) {
-      approvalBroker_ = std::make_unique<IpcApprovalBroker>();
-    }
+    ensureApprovalBrokerLocked();
     return *approvalBroker_;
   }
 
@@ -45,9 +45,15 @@ public:
   }
 
 private:
+  void ensureApprovalBrokerLocked() {
+    if (!approvalBroker_) {
+      approvalBroker_ = std::make_unique<IpcApprovalBroker>();
+    }
+  }
+
   std::mutex mutex_;
-  std::unique_ptr<NativeAgentRuntime> runtime_;
   std::unique_ptr<IpcApprovalBroker> approvalBroker_;
+  std::unique_ptr<NativeAgentRuntime> runtime_;
 };
 
 SystemRuntimeOwner &owner() {

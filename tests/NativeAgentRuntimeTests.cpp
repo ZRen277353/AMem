@@ -1,3 +1,4 @@
+#include "ipc/IpcApprovalBroker.h"
 #include "ipc/NativeAgentRuntime.h"
 
 #include <nlohmann/json.hpp>
@@ -297,6 +298,20 @@ json responseJson(const IpcProtocol::Frame &frame,
   return json::parse(frame.payload);
 }
 
+NativeIpc::IpcApprovalSubmission approvalSubmission(StubMemService &service,
+                                                    uint64_t sessionId,
+                                                    uint64_t requestId = 100) {
+  NativeIpc::IpcApprovalSubmission value;
+  value.sessionId = sessionId;
+  value.requestId = requestId;
+  value.clientName = "AMem.RuntimeTests";
+  value.clientVersion = "1.0";
+  value.method = "memory_write";
+  value.expected = service.captureContext(true);
+  value.deadline = std::chrono::steady_clock::now() + 5s;
+  return value;
+}
+
 void testObserveRequestPrivilegeBoundaryAndSnapshot() {
   StubMemService service;
   NativeIpc::NativeAgentRuntime runtime(service, uniquePipeName(L"observe"), {},
@@ -482,9 +497,15 @@ void testRuntimeRestartResetsInstanceDiagnostics() {
   NativeIpc::NativeAgentRuntime runtime(service, uniquePipeName(L"restart"), {},
                                         fastSessionConfig());
   startRuntime(runtime);
+  uint64_t firstSessionId = 0;
   {
     RuntimeClient client(runtime.snapshot().server.pipeName);
     client.hello();
+    expect(waitUntil([&] {
+             firstSessionId = runtime.snapshot().activeSessionId;
+             return firstSessionId != 0;
+           }),
+           "first runtime epoch should allocate a session id");
     client.close();
     expect(waitUntil([&] { return runtime.snapshot().completedSessions == 1; }),
            "first runtime instance should complete a session");
@@ -497,9 +518,79 @@ void testRuntimeRestartResetsInstanceDiagnostics() {
              restarted.establishedSessions == 0 &&
              restarted.completedSessions == 0 &&
              !restarted.lastHandshakeStatus.has_value() &&
-             !restarted.lastSessionStatus.has_value(),
+             !restarted.lastSessionStatus.has_value() &&
+             restarted.activeSessionId == 0 && restarted.lastSessionId == 0,
          "restart should begin a fresh diagnostics epoch");
+  {
+    RuntimeClient client(runtime.snapshot().server.pipeName);
+    client.hello();
+    expect(waitUntil([&] {
+             return runtime.snapshot().activeSessionId > firstSessionId;
+           }),
+           "server session ids must not be reused across restart");
+    client.close();
+    expect(waitUntil([&] { return runtime.snapshot().completedSessions == 1; }),
+           "restarted session should complete");
+  }
   runtime.stop();
+  runtime.stop();
+}
+
+void testSessionCloseCancelsBoundApproval() {
+  StubMemService service;
+  NativeIpc::IpcApprovalBroker broker;
+  NativeIpc::NativeAgentRuntime runtime(service,
+                                        uniquePipeName(L"approval-close"), {},
+                                        fastSessionConfig(), &broker);
+  startRuntime(runtime);
+  RuntimeClient client(runtime.snapshot().server.pipeName);
+  client.hello();
+  expect(waitUntil([&] { return runtime.snapshot().activeSessionId != 0; }),
+         "established client should receive a server session id");
+  const uint64_t sessionId = runtime.snapshot().activeSessionId;
+  const auto submitted = broker.submit(approvalSubmission(service, sessionId));
+  expect(submitted.ok, "test approval should bind active runtime session");
+
+  client.close();
+  expect(waitUntil([&] { return runtime.snapshot().completedSessions == 1; }),
+         "closed approval session should finish");
+  const auto records = broker.snapshot();
+  const auto snapshot = runtime.snapshot();
+  expect(records.size() == 1 &&
+             records.front().state == NativeIpc::IpcApprovalState::Cancelled &&
+             snapshot.activeSessionId == 0 &&
+             snapshot.lastSessionId == sessionId,
+         "session close must cancel approval and retain bounded session id");
+  runtime.stop();
+}
+
+void testSessionInvalidationCancelsBoundApproval() {
+  StubMemService service;
+  NativeIpc::IpcApprovalBroker broker;
+  NativeIpc::NativeAgentRuntime runtime(service,
+                                        uniquePipeName(L"approval-invalidate"),
+                                        {}, fastSessionConfig(), &broker);
+  startRuntime(runtime);
+  RuntimeClient client(runtime.snapshot().server.pipeName);
+  client.hello();
+  client.request(1, "status");
+  expect(responseJson(client.read(), IpcProtocol::MessageType::Response,
+                      1)["ok"] == true,
+         "approval invalidation baseline request should succeed");
+  const uint64_t sessionId = runtime.snapshot().activeSessionId;
+  expect(sessionId != 0 &&
+             broker.submit(approvalSubmission(service, sessionId)).ok,
+         "pending approval should bind established session");
+
+  service.invalidateTarget();
+  expect(responseJson(client.read(), IpcProtocol::MessageType::Error,
+                      0)["code"] == "target_changed",
+         "target change should close request session");
+  expect(waitUntil([&] { return runtime.snapshot().completedSessions == 1; }),
+         "invalidated approval session should finish");
+  expect(broker.snapshot().front().state ==
+             NativeIpc::IpcApprovalState::Cancelled,
+         "request-session invalidation must cancel its broker approvals");
   runtime.stop();
 }
 
@@ -518,6 +609,10 @@ int main() {
        &testStopDuringActiveRequestJoinsWorker},
       {"runtime restart resets diagnostics",
        &testRuntimeRestartResetsInstanceDiagnostics},
+      {"session close cancels bound approval",
+       &testSessionCloseCancelsBoundApproval},
+      {"session invalidation cancels bound approval",
+       &testSessionInvalidationCancelsBoundApproval},
   };
 
   int failures = 0;

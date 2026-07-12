@@ -1,5 +1,6 @@
 #include "NativeAgentRuntime.h"
 
+#include "IpcApprovalBroker.h"
 #include "IpcFramedConnection.h"
 #include "IpcMemServiceDispatcher.h"
 
@@ -11,9 +12,10 @@ namespace NativeIpc {
 NativeAgentRuntime::NativeAgentRuntime(Mem::IMemService &service,
                                        std::wstring pipeName,
                                        HandshakeConfig handshakeConfig,
-                                       RequestSessionConfig requestConfig)
-    : service_(service), handshakeConfig_(handshakeConfig),
-      requestConfig_(requestConfig),
+                                       RequestSessionConfig requestConfig,
+                                       IpcApprovalBroker *approvalBroker)
+    : service_(service), approvalBroker_(approvalBroker),
+      handshakeConfig_(handshakeConfig), requestConfig_(requestConfig),
       server_(std::move(pipeName), [this](HANDLE pipe, HANDLE stopEvent) {
         handleClient(pipe, stopEvent);
       }) {}
@@ -55,6 +57,7 @@ void NativeAgentRuntime::stop() {
   activeClientName_.clear();
   activeClientVersion_.clear();
   grantedCapabilities_.clear();
+  activeSessionId_ = 0;
 }
 
 NativeAgentRuntimeSnapshot NativeAgentRuntime::snapshot() const {
@@ -68,6 +71,8 @@ NativeAgentRuntimeSnapshot NativeAgentRuntime::snapshot() const {
   result.phase = phase_;
   result.establishedSessions = establishedSessions_;
   result.completedSessions = completedSessions_;
+  result.activeSessionId = activeSessionId_;
+  result.lastSessionId = lastSessionId_;
   result.activeClientName = activeClientName_;
   result.activeClientVersion = activeClientVersion_;
   result.grantedCapabilities = grantedCapabilities_;
@@ -82,6 +87,7 @@ NativeAgentRuntimeSnapshot NativeAgentRuntime::snapshot() const {
 }
 
 void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
+  uint64_t sessionId = 0;
   {
     std::lock_guard<std::mutex> stateLock(stateMutex_);
     phase_ = stopping_ ? RuntimePhase::Stopping : RuntimePhase::Handshaking;
@@ -94,9 +100,14 @@ void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
     IpcFramedConnection connection(pipe, stopEvent);
     IpcHandshakeSession handshake(connection, handshakeConfig_);
     HandshakeResult handshakeResult = handshake.perform();
-    recordHandshake(handshakeResult);
+    sessionId = recordHandshake(handshakeResult);
     if (handshakeResult.status != HandshakeStatus::Established) {
-      finishClient();
+      finishClient(0);
+      return;
+    }
+    if (sessionId == 0) {
+      recordHandlerFailure(L"native Agent session id space exhausted");
+      finishClient(0);
       return;
     }
 
@@ -104,35 +115,43 @@ void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
     IpcRequestSession session(connection, dispatcher,
                               handshakeResult.grantedCapabilities,
                               requestConfig_);
-    recordSession(session.run());
-    finishClient();
+    recordSession(sessionId, session.run());
+    finishClient(sessionId);
   } catch (const std::exception &) {
     recordHandlerFailure(L"native Agent client handler threw an exception");
-    finishClient();
+    finishClient(sessionId);
   } catch (...) {
     recordHandlerFailure(
         L"native Agent client handler failed with an unknown error");
-    finishClient();
+    finishClient(sessionId);
   }
 }
 
-void NativeAgentRuntime::recordHandshake(const HandshakeResult &result) {
+uint64_t NativeAgentRuntime::recordHandshake(const HandshakeResult &result) {
   std::lock_guard<std::mutex> stateLock(stateMutex_);
   lastHandshakeStatus_ = result.status;
   lastError_ = result.error;
   if (result.status != HandshakeStatus::Established) {
-    return;
+    return 0;
+  }
+  if (nextSessionId_ == 0) {
+    return 0;
   }
 
+  const uint64_t sessionId = nextSessionId_++;
   ++establishedSessions_;
+  activeSessionId_ = sessionId;
   phase_ = stopping_ ? RuntimePhase::Stopping : RuntimePhase::Serving;
   activeClientName_ = result.clientName;
   activeClientVersion_ = result.clientVersion;
   grantedCapabilities_ = result.grantedCapabilities;
+  return sessionId;
 }
 
-void NativeAgentRuntime::recordSession(const RequestSessionResult &result) {
+void NativeAgentRuntime::recordSession(uint64_t sessionId,
+                                       const RequestSessionResult &result) {
   std::lock_guard<std::mutex> stateLock(stateMutex_);
+  lastSessionId_ = sessionId;
   lastSessionStatus_ = result.status;
   lastRequestFrames_ = result.requestFrames;
   lastDispatchedRequests_ = result.dispatchedRequests;
@@ -147,12 +166,19 @@ void NativeAgentRuntime::recordHandlerFailure(const std::wstring &error) {
   lastError_ = error;
 }
 
-void NativeAgentRuntime::finishClient() {
+void NativeAgentRuntime::finishClient(uint64_t sessionId) {
+  if (approvalBroker_ != nullptr && sessionId != 0) {
+    approvalBroker_->cancelSession(sessionId);
+  }
   std::lock_guard<std::mutex> stateLock(stateMutex_);
   ++completedSessions_;
+  if (sessionId != 0) {
+    lastSessionId_ = sessionId;
+  }
   activeClientName_.clear();
   activeClientVersion_.clear();
   grantedCapabilities_.clear();
+  activeSessionId_ = 0;
   if (!stopping_ && phase_ != RuntimePhase::Failed) {
     phase_ = RuntimePhase::Idle;
   }
@@ -164,6 +190,8 @@ void NativeAgentRuntime::resetForStart() {
   stopping_ = false;
   establishedSessions_ = 0;
   completedSessions_ = 0;
+  activeSessionId_ = 0;
+  lastSessionId_ = 0;
   activeClientName_.clear();
   activeClientVersion_.clear();
   grantedCapabilities_.clear();

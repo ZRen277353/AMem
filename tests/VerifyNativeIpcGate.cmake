@@ -9,6 +9,7 @@ file(READ "${SOURCE_ROOT}/main.cpp" main_source)
 file(READ "${SOURCE_ROOT}/gui/NativeAgentIpcWindow.cpp" control_source)
 file(READ "${SOURCE_ROOT}/ipc/SystemNativeAgentRuntime.cpp" owner_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcHandshakeSession.cpp" handshake_source)
+file(READ "${SOURCE_ROOT}/ipc/NativeAgentRuntime.cpp" runtime_source)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -52,6 +53,12 @@ forbid_text("${control_source}" "raw approval result in GUI"
     "resultJson")
 require_text("${owner_source}" "stop-time approval invalidation"
     "approvalBroker->cancelAll();")
+require_text("${owner_source}" "runtime receives the system broker"
+    "RequestSessionConfig{}, approvalBroker_.get())")
+require_text("${runtime_source}" "session-scoped approval cancellation"
+    "approvalBroker_->cancelSession(sessionId);")
+forbid_text("${runtime_source}" "runtime privileged submission"
+    "approvalBroker_->submit")
 require_text("${handshake_source}" "Observe-only grant remains fixed"
     "if (capability == IpcCapability::Observe) {\n            result.grantedCapabilities.push_back(capability);")
 
