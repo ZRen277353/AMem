@@ -5,6 +5,7 @@
 #include "AppContext.h"
 #include "ColorScheme.h"
 #include "../imgui/imgui.h"
+#include "../mem/IMemService.h"
 #include "../socket/client_singleton.h"
 #include "../socket/client.hpp"
 #include <algorithm>
@@ -146,9 +147,14 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
         return;
     }
     
-    std::vector<HW_HIT_INFO> hitInfos;
-    // 使用调试端口进行自动刷新，避免阻塞主端口
-    if (ReadKernelBreakpointInfo(bp.address, hitInfos, PORT_DEBUG)) {
+    Mem::BreakpointHitBatchRequest request;
+    request.address = bp.address;
+    request.limit = Mem::kMaxBreakpointHitBatchSize;
+    auto response = memService_.breakpointHitBatch(
+        memService_.captureContext(true), request);
+    if (response.ok()) {
+        const size_t dropped = response.value().dropped;
+        auto hitInfos = std::move(response.value().items);
         int newCount = (int)hitInfos.size();
         
         // 如果没有新数据，直接返回
@@ -163,7 +169,8 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
         bool historyTrimmed = false;
         
         // 限制历史记录最大数量，防止内存溢出
-        const int MAX_HISTORY_SIZE = 50000; // 最多保留5万条记录
+        const int MAX_HISTORY_SIZE =
+            static_cast<int>(Mem::kMaxBreakpointHitBatchSize);
         if ((int)bp.hitHistory.size() > MAX_HISTORY_SIZE) {
             // 删除最旧的记录，保留最新的
             int removeCount = (int)bp.hitHistory.size() - MAX_HISTORY_SIZE;
@@ -182,16 +189,16 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
         } else {
             // 增量更新PC统计信息（只处理新增的记录）
             for (const auto& hit : hitInfos) {
-                uint64_t pc = hit.regs_info.pc;
+                uint64_t pc = hit.programCounter;
                 auto& stat = bp.pcHitStats[pc];
 
                 if (stat.hit_count == 0) {
                     stat.pc_address = pc;
-                    stat.first_hit_time = hit.hit_time;
+                    stat.first_hit_time = hit.hitTime;
                 }
 
                 stat.hit_count++;
-                stat.last_hit_time = hit.hit_time;
+                stat.last_hit_time = hit.hitTime;
             }
         }
         
@@ -201,11 +208,20 @@ void BreakpointWindow::refreshBreakpointHitInfo(int index)
         
         // 通知所有相关的详情窗口需要刷新缓存
         markDetailWindowsForRefresh(index);
+
+        if (dropped > 0) {
+            Gui::log("断点 0x%llX 当前批次超过上限，已丢弃 %llu 条较早命中",
+                     bp.address,
+                     static_cast<unsigned long long>(dropped));
+        }
         
         Gui::log("断点 0x%llX 命中信息已更新: +%d条新记录, 总计%d条 (版本: %d)", 
                 bp.address, newCount, bp.hitCount, bp.dataVersion);
     } else {
-        Gui::log("获取断点命中信息失败: 0x%llX", bp.address);
+        Gui::log("获取断点命中信息失败: 0x%llX [%s] %s",
+                 bp.address,
+                 Mem::errorCodeName(response.error().code),
+                 response.error().message.c_str());
     }
 }
 
@@ -217,16 +233,16 @@ void BreakpointWindow::updatePCHitStatistics(int index)
     bp.pcHitStats.clear();
     
     for (const auto& hit : bp.hitHistory) {
-        uint64_t pc = hit.regs_info.pc;
+        uint64_t pc = hit.programCounter;
         auto& stat = bp.pcHitStats[pc];
         
         if (stat.hit_count == 0) {
             stat.pc_address = pc;
-            stat.first_hit_time = hit.hit_time;
+            stat.first_hit_time = hit.hitTime;
         }
         
         stat.hit_count++;
-        stat.last_hit_time = hit.hit_time;
+        stat.last_hit_time = hit.hitTime;
     }
 }
 

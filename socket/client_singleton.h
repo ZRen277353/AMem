@@ -326,6 +326,10 @@ bool ReadKernelBreakpointInfoPage(
     uint64_t address, size_t offset, size_t limit,
     std::vector<HW_HIT_INFO> &infos, size_t &total,
     PortType type = PORT_MAIN);
+bool ReadKernelBreakpointInfoTail(
+    uint64_t address, size_t limit,
+    std::vector<HW_HIT_INFO> &infos, size_t &total,
+    PortType type = PORT_MAIN);
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
 void ResetTrackedKernelBreakpoints();
 

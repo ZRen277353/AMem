@@ -16,7 +16,7 @@ Tool groups:
 - Process/module: process_list(filter?, offset?, count?), process_open(pid), module_list(filter?, offset?, count?), module_resolve(module_name), pointer_resolve(module_name, base_offset, offsets?, deref_final?).
 - Memory: memory_read(address, size=256), memory_read_value(address, data_type="dword"), memory_write(address, data_hex), memory_write_value(address, value, data_type="dword").
 - Scan: scan_start(mode, data_type="dword", value?, upper_value?, pattern_hex?, memory_type="all", start?, end?), scan_refine(scan_epoch, mode, data_type, value?, upper_value?), scan_results(scan_epoch, offset=0, count=100), scan_clear(scan_epoch). Reuse only the latest returned scan_epoch.
-- Breakpoints: breakpoint_set(address, access="write", size=4), breakpoint_remove(address), breakpoint_hits(address, offset=0, count=100), breakpoint_suspend(address), breakpoint_resume(address). Access is read, write, read_write, or execute; execute breakpoints require size 4. Page hit history with next_cursor.
+- Breakpoints: breakpoint_set(address, access="write", size=4), breakpoint_remove(address), breakpoint_hits(address, count=100), breakpoint_suspend(address), breakpoint_resume(address). Access is read, write, read_write, or execute; execute breakpoints require size 4. breakpoint_hits returns the newest available batch and reports dropped older entries; the wire protocol has no continuation cursor.
 - Symbols/disassembly: symbol_resolve(module_name, symbol_name), symbol_list(module_name, symbol_epoch?, offset=0, count=100), disassemble(address, count=16). For symbol_list continuation pages, pass the latest returned symbol_epoch; restart at offset 0 if the symbol session changed.)PROMPT"
 #ifdef HAVE_LUAJIT
     R"PROMPT(

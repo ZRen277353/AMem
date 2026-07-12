@@ -90,9 +90,8 @@ public:
         uint64_t address) = 0;
     virtual BreakpointMutationBackendResult resumeBreakpoint(
         uint64_t address) = 0;
-    virtual bool fetchBreakpointHits(
+    virtual bool fetchBreakpointHitBatch(
         uint64_t address,
-        size_t offset,
         size_t limit,
         std::vector<BreakpointHit>& hits,
         size_t& total) = 0;

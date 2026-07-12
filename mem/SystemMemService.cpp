@@ -6,6 +6,7 @@
 #include "../socket/client_singleton.h"
 #include "../socket/SocketCommand.h"
 
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -141,6 +142,33 @@ BreakpointMutationBackendResult toBreakpointBackendResult(
     result.responseReceived = io.responseReceived;
     result.applied = io.applied;
     return result;
+}
+
+void convertBreakpointHits(const std::vector<HW_HIT_INFO>& raw,
+                           std::vector<BreakpointHit>& hits) {
+    hits.clear();
+    hits.reserve(raw.size());
+    for (const auto& item : raw) {
+        BreakpointHit hit;
+        hit.hitAddress = item.hit_addr;
+        hit.hitTime = item.hit_time;
+        for (size_t index = 0; index < hit.registers.size(); ++index) {
+            hit.registers[index] = item.regs_info.regs[index];
+        }
+        hit.stackPointer = item.regs_info.sp;
+        hit.programCounter = item.regs_info.pc;
+        hit.pstate = item.regs_info.pstate;
+        hit.originalX0 = item.regs_info.orig_x0;
+        hit.syscallNumber = item.regs_info.syscallno;
+        for (size_t index = 0; index < hit.vectorRegisters.size(); ++index) {
+            std::memcpy(hit.vectorRegisters[index].data(),
+                        &item.fpsimd_info.vregs[index],
+                        hit.vectorRegisters[index].size());
+        }
+        hit.fpsr = item.fpsimd_info.fpsr;
+        hit.fpcr = item.fpsimd_info.fpcr;
+        hits.push_back(std::move(hit));
+    }
 }
 
 class SystemScanTransaction final : public IMemScanTransaction {
@@ -464,34 +492,21 @@ public:
             ResumeKernelBreakpointTracked(address, PORT_MAIN));
     }
 
-    bool fetchBreakpointHits(
+    bool fetchBreakpointHitBatch(
         uint64_t address,
-        size_t offset,
         size_t limit,
         std::vector<BreakpointHit>& hits,
         size_t& total) override {
         std::vector<HW_HIT_INFO> raw;
-        if (!ReadKernelBreakpointInfoPage(
-                address, offset, limit, raw, total, PORT_MAIN)) {
+        if (!ReadKernelBreakpointInfoTail(
+                address, limit, raw, total, PORT_DEBUG)) {
             return false;
         }
-        if (total > kMaxBreakpointHitCount || raw.size() > limit) {
+        if (total > kMaxBreakpointHitCount || raw.size() > limit ||
+            raw.size() > total) {
             return false;
         }
-        hits.clear();
-        hits.reserve(raw.size());
-        for (const auto& item : raw) {
-            BreakpointHit hit;
-            hit.hitAddress = item.hit_addr;
-            hit.hitTime = item.hit_time;
-            for (size_t index = 0; index < hit.registers.size(); ++index) {
-                hit.registers[index] = item.regs_info.regs[index];
-            }
-            hit.stackPointer = item.regs_info.sp;
-            hit.programCounter = item.regs_info.pc;
-            hit.pstate = item.regs_info.pstate;
-            hits.push_back(std::move(hit));
-        }
+        convertBreakpointHits(raw, hits);
         return true;
     }
 

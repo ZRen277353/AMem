@@ -54,9 +54,9 @@ public:
     Result<BreakpointMutationReceipt> resumeBreakpoint(
         const OperationContext& context,
         const BreakpointAddressRequest& request) override;
-    Result<BreakpointHitPage> breakpointHits(
+    Result<BreakpointHitBatch> breakpointHitBatch(
         const OperationContext& context,
-        const BreakpointHitsRequest& request) override;
+        const BreakpointHitBatchRequest& request) override;
     Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) override;

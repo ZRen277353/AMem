@@ -1409,74 +1409,64 @@ Result<BreakpointMutationReceipt> MemService::resumeBreakpoint(
         [&] { return backend_.resumeBreakpoint(request.address); });
 }
 
-Result<BreakpointHitPage> MemService::breakpointHits(
+Result<BreakpointHitBatch> MemService::breakpointHitBatch(
     const OperationContext& context,
-    const BreakpointHitsRequest& request) {
+    const BreakpointHitBatchRequest& request) {
     const auto start = Clock::now();
     if (request.address == 0) {
-        return Result<BreakpointHitPage>::failure(
+        return Result<BreakpointHitBatch>::failure(
             ErrorCode::InvalidArgument,
             "breakpoint address must not be zero",
             false,
             elapsedMilliseconds(start));
     }
-    if (request.limit == 0 || request.limit > kMaxBreakpointHitPageSize ||
-        request.offset > kMaxBreakpointHitCount) {
-        return Result<BreakpointHitPage>::failure(
+    if (request.limit == 0 ||
+        request.limit > kMaxBreakpointHitBatchSize) {
+        return Result<BreakpointHitBatch>::failure(
             ErrorCode::InvalidArgument,
-            "breakpoint hits require offset <= 100000 and count from 1 to 100",
+            "breakpoint hit batch count must be from 1 to 50000",
             false,
             elapsedMilliseconds(start));
     }
 
     std::lock_guard<std::mutex> breakpointLock(breakpointMutex_);
     if (const auto error = validateContext(context, true, true, true)) {
-        return failureFrom<BreakpointHitPage>(*error, start);
+        return failureFrom<BreakpointHitBatch>(*error, start);
     }
 
     std::vector<BreakpointHit> hits;
     size_t total = 0;
-    if (!backend_.fetchBreakpointHits(
-            request.address, request.offset, request.limit, hits, total)) {
+    if (!backend_.fetchBreakpointHitBatch(
+            request.address, request.limit, hits, total)) {
         if (const auto error = validateContext(context, true, true, true)) {
-            return failureFrom<BreakpointHitPage>(*error, start);
+            return failureFrom<BreakpointHitBatch>(*error, start);
         }
-        return Result<BreakpointHitPage>::failure(
+        return Result<BreakpointHitBatch>::failure(
             ErrorCode::ProtocolError,
-            "failed to read breakpoint hits from the Android server",
+            "failed to read the breakpoint hit batch from the Android server",
             true,
             elapsedMilliseconds(start));
     }
     if (const auto error = validateContext(context, true, true, true)) {
-        return failureFrom<BreakpointHitPage>(*error, start);
+        return failureFrom<BreakpointHitBatch>(*error, start);
     }
-    if (total > kMaxBreakpointHitCount || hits.size() > request.limit) {
-        return Result<BreakpointHitPage>::failure(
+    if (total > kMaxBreakpointHitCount || hits.size() > request.limit ||
+        hits.size() > total) {
+        return Result<BreakpointHitBatch>::failure(
             ErrorCode::ProtocolError,
-            "breakpoint hit response exceeds service limits",
+            "breakpoint hit batch response exceeds service limits",
             false,
             elapsedMilliseconds(start));
     }
 
-    BreakpointHitPage page;
-    page.address = request.address;
-    page.items = std::move(hits);
-    page.total = total;
-    page.offset = (std::min)(request.offset, total);
-    const size_t end = page.offset + page.items.size();
-    if (end < page.total) {
-        if (page.items.empty()) {
-            return Result<BreakpointHitPage>::failure(
-                ErrorCode::ProtocolError,
-                "breakpoint hit page is empty before the reported end",
-                false,
-                elapsedMilliseconds(start));
-        }
-        page.nextOffset = end;
-    }
-    page.target = *context.target;
-    return Result<BreakpointHitPage>::success(
-        std::move(page), elapsedMilliseconds(start));
+    BreakpointHitBatch batch;
+    batch.address = request.address;
+    batch.items = std::move(hits);
+    batch.available = total;
+    batch.dropped = total - batch.items.size();
+    batch.target = *context.target;
+    return Result<BreakpointHitBatch>::success(
+        std::move(batch), elapsedMilliseconds(start));
 }
 
 Result<ScanSummary> MemService::startScan(

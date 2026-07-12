@@ -168,7 +168,7 @@ public:
     int breakpointRemoveCalls = 0;
     int breakpointSuspendCalls = 0;
     int breakpointResumeCalls = 0;
-    int breakpointHitsCalls = 0;
+    int breakpointHitBatchCalls = 0;
     uint64_t lastBreakpointAddress = 0;
     Mem::BreakpointAccess lastBreakpointAccess =
         Mem::BreakpointAccess::Write;
@@ -180,6 +180,12 @@ public:
         hits[0].registers[0] = 0xA0;
         hits[0].programCounter = 0x7100;
         hits[0].stackPointer = 0x7200;
+        hits[0].originalX0 = 0x7300;
+        hits[0].syscallNumber = 64;
+        hits[0].vectorRegisters[0][0] = 0xAB;
+        hits[0].vectorRegisters[31][15] = 0xCD;
+        hits[0].fpsr = 0x01000000;
+        hits[0].fpcr = 0x00400000;
         hits[1].hitAddress = 0x7004;
         hits[1].hitTime = 200;
         hits[1].registers[1] = 0xB1;
@@ -629,22 +635,20 @@ public:
         return breakpointMutation(address);
     }
 
-    bool fetchBreakpointHits(
+    bool fetchBreakpointHitBatch(
         uint64_t address,
-        size_t offset,
         size_t limit,
         std::vector<Mem::BreakpointHit>& hits,
         size_t& total) override {
-        ++breakpointHitsCalls;
+        ++breakpointHitBatchCalls;
         lastBreakpointAddress = address;
         if (!breakpointHitsSucceed) {
             return false;
         }
         total = breakpointHitsData.size();
-        const size_t begin = (std::min)(offset, total);
-        const size_t end = begin + (std::min)(limit, total - begin);
-        hits.assign(breakpointHitsData.begin() + begin,
-                    breakpointHitsData.begin() + end);
+        const size_t count = (std::min)(limit, total);
+        hits.assign(breakpointHitsData.end() - count,
+                    breakpointHitsData.end());
         if (changeTargetAfterBreakpointHits) {
             target.processRevision += 2;
         }
@@ -1683,45 +1687,51 @@ void testBreakpointService() {
                backend.breakpointResumeCalls == 1,
            "all breakpoint mutations should share the receipt contract");
 
-    Mem::BreakpointHitsRequest hitsRequest;
-    hitsRequest.address = 0x7000;
-    hitsRequest.limit = 2;
-    const auto firstPage = service.breakpointHits(
-        service.captureContext(true), hitsRequest);
-    expect(firstPage.ok() && firstPage.value().total == 3 &&
-               firstPage.value().items.size() == 2 &&
-               firstPage.value().nextOffset == 2 &&
-               firstPage.value().items.front().registers[0] == 0xA0 &&
-               firstPage.value().items.front().programCounter == 0x7100,
-           "breakpoint hits should return a bounded structured page");
+    Mem::BreakpointHitBatchRequest batchRequest;
+    batchRequest.address = 0x7000;
+    batchRequest.limit = 3;
+    const auto fullBatch = service.breakpointHitBatch(
+        service.captureContext(true), batchRequest);
+    expect(fullBatch.ok() && fullBatch.value().available == 3 &&
+               fullBatch.value().dropped == 0 &&
+               fullBatch.value().items.size() == 3 &&
+               fullBatch.value().items.front().originalX0 == 0x7300 &&
+               fullBatch.value().items.front().syscallNumber == 64 &&
+               fullBatch.value().items.front().vectorRegisters[0][0] == 0xAB &&
+               fullBatch.value().items.front().vectorRegisters[31][15] == 0xCD &&
+               fullBatch.value().items.front().fpsr == 0x01000000 &&
+               fullBatch.value().items.front().fpcr == 0x00400000,
+           "breakpoint hit batches must preserve complete register state");
 
-    hitsRequest.offset = 2;
-    const auto secondPage = service.breakpointHits(
-        service.captureContext(true), hitsRequest);
-    expect(secondPage.ok() && secondPage.value().items.size() == 1 &&
-               !secondPage.value().nextOffset &&
-               secondPage.value().items.front().hitAddress == 0x7008,
-           "breakpoint hit continuation should terminate at the available total");
+    batchRequest.limit = 2;
+    const auto tailBatch = service.breakpointHitBatch(
+        service.captureContext(true), batchRequest);
+    expect(tailBatch.ok() && tailBatch.value().available == 3 &&
+               tailBatch.value().dropped == 1 &&
+               tailBatch.value().items.size() == 2 &&
+               tailBatch.value().items.front().hitAddress == 0x7004 &&
+               tailBatch.value().items.back().hitAddress == 0x7008,
+           "breakpoint hit batches must retain the newest bounded tail");
 
-    hitsRequest.limit = Mem::kMaxBreakpointHitPageSize + 1;
-    const int hitCallsBeforeInvalid = backend.breakpointHitsCalls;
-    const auto invalidPage = service.breakpointHits(
-        service.captureContext(true), hitsRequest);
-    expect(!invalidPage.ok() &&
-               invalidPage.error().code == Mem::ErrorCode::InvalidArgument &&
-               backend.breakpointHitsCalls == hitCallsBeforeInvalid,
-           "oversized breakpoint pages must fail before backend access");
+    batchRequest.limit = Mem::kMaxBreakpointHitBatchSize + 1;
+    const int batchCallsBeforeInvalid = backend.breakpointHitBatchCalls;
+    const auto invalidBatch = service.breakpointHitBatch(
+        service.captureContext(true), batchRequest);
+    expect(!invalidBatch.ok() &&
+               invalidBatch.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.breakpointHitBatchCalls == batchCallsBeforeInvalid,
+           "oversized breakpoint hit batches must fail before backend access");
 
-    FakeBackend changedHitsTargetBackend;
-    Mem::MemService changedHitsTargetService(changedHitsTargetBackend);
-    changedHitsTargetBackend.changeTargetAfterBreakpointHits = true;
-    hitsRequest = {};
-    hitsRequest.address = 0x7000;
-    const auto changedHitsTarget = changedHitsTargetService.breakpointHits(
-        changedHitsTargetService.captureContext(true), hitsRequest);
-    expect(!changedHitsTarget.ok() &&
-               changedHitsTarget.error().code == Mem::ErrorCode::TargetChanged,
-           "breakpoint hit pages must be rejected after target replacement");
+    FakeBackend changedBatchTargetBackend;
+    Mem::MemService changedBatchTargetService(changedBatchTargetBackend);
+    changedBatchTargetBackend.changeTargetAfterBreakpointHits = true;
+    batchRequest = {};
+    batchRequest.address = 0x7000;
+    const auto changedBatchTarget = changedBatchTargetService.breakpointHitBatch(
+        changedBatchTargetService.captureContext(true), batchRequest);
+    expect(!changedBatchTarget.ok() &&
+               changedBatchTarget.error().code == Mem::ErrorCode::TargetChanged,
+           "breakpoint hit batches must be rejected after target replacement");
 }
 
 void testScanSessionService() {
@@ -2760,14 +2770,26 @@ void testAgentAdapter() {
             R"({"address":"0x7000","count":2})",
             targetContext));
     expect(breakpointHits.at("success").get<bool>() &&
-               breakpointHits.at("total") == 3 &&
+               breakpointHits.at("available") == 3 &&
                breakpointHits.at("count") == 2 &&
+               breakpointHits.at("dropped") == 1 &&
                breakpointHits.at("truncated").get<bool>() &&
-               breakpointHits.at("next_cursor") == 2 &&
-               breakpointHits.at("hits").at(0).at("hit_time") == "100" &&
-               breakpointHits.at("hits").at(0).at("registers").at(0) ==
-                   "0xA0",
-           "breakpoint_hits adapter should page precision-safe register data");
+               !breakpointHits.contains("next_cursor") &&
+               breakpointHits.at("hits").at(0).at("hit_time") == "200" &&
+               breakpointHits.at("hits").at(0).at("registers").at(1) ==
+                   "0xB1",
+           "breakpoint_hits adapter should expose the newest precision-safe batch without a false cursor");
+
+    const int batchCallsBeforeOffset = backend.breakpointHitBatchCalls;
+    const json invalidBreakpointOffset = json::parse(
+        tools.breakpointHits(
+            R"({"address":"0x7000","offset":1,"count":2})",
+            targetContext));
+    expect(!invalidBreakpointOffset.at("success").get<bool>() &&
+               invalidBreakpointOffset.at("error").at("code") ==
+                   "invalid_argument" &&
+               backend.breakpointHitBatchCalls == batchCallsBeforeOffset,
+           "breakpoint_hits must reject false continuation offsets before backend access");
 
     const json breakpointRemove = json::parse(
         tools.breakpointRemove(

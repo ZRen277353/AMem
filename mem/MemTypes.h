@@ -230,10 +230,9 @@ struct BreakpointAddressRequest {
     uint64_t address = 0;
 };
 
-struct BreakpointHitsRequest {
+struct BreakpointHitBatchRequest {
     uint64_t address = 0;
-    size_t offset = 0;
-    size_t limit = 100;
+    size_t limit = 50000;
 };
 
 struct BreakpointMutationReceipt {
@@ -253,14 +252,18 @@ struct BreakpointHit {
     uint64_t stackPointer = 0;
     uint64_t programCounter = 0;
     uint64_t pstate = 0;
+    uint64_t originalX0 = 0;
+    uint64_t syscallNumber = 0;
+    std::array<std::array<unsigned char, 16>, 32> vectorRegisters{};
+    uint32_t fpsr = 0;
+    uint32_t fpcr = 0;
 };
 
-struct BreakpointHitPage {
+struct BreakpointHitBatch {
     uint64_t address = 0;
     std::vector<BreakpointHit> items;
-    size_t total = 0;
-    size_t offset = 0;
-    std::optional<size_t> nextOffset;
+    size_t available = 0;
+    size_t dropped = 0;
     TargetSnapshot target;
 };
 
@@ -470,7 +473,8 @@ inline constexpr size_t kMaxSymbolPageSize = 1000;
 inline constexpr size_t kMaxSymbolResultCount = 1000000;
 inline constexpr size_t kMaxSymbolNameBytes = 64u * 1024u;
 inline constexpr size_t kMaxSymbolPageNameBytes = 4u * 1024u * 1024u;
-inline constexpr size_t kMaxBreakpointHitPageSize = 100;
+inline constexpr size_t kMaxAgentBreakpointHitBatchSize = 100;
+inline constexpr size_t kMaxBreakpointHitBatchSize = 50000;
 inline constexpr size_t kMaxBreakpointHitCount = 100000;
 inline constexpr size_t kMaxScanValueBytes = 4096;
 inline constexpr size_t kMaxScanResultPageSize = 1000;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Window.h"
-#include "../socket/client_singleton.h"
+#include "../mem/MemTypes.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -10,9 +10,9 @@
 #include <memory>
 
 // 前向声明
-struct HW_HIT_INFO;
 class DisassemblyHelper;
 struct DisassemblyResult;
+struct ModuleInfoItem;
 namespace Mem {
 class IMemService;
 }
@@ -57,7 +57,7 @@ struct BreakpointInfo {
     bool enabled;
     bool suspended;
     int hitCount;
-    std::vector<HW_HIT_INFO> hitHistory;
+    std::vector<Mem::BreakpointHit> hitHistory;
     std::map<uint64_t, PCHitStat> pcHitStats;  // PC地址命中统计
     int dataVersion = 0;  // 数据版本号，用于检测变化
     
@@ -180,7 +180,7 @@ private:
     void drawBreakpointDetailWindow(BreakpointDetailWindow& detailWindow);
     void drawPCHitStatisticsInWindow(BreakpointDetailWindow& detailWindow);
     void drawDetailedHitInfoInWindow(BreakpointDetailWindow& detailWindow);
-    void drawRegisterInfoInWindow(const struct _user_pt_regs& regs, const struct _user_fpsimd_state& fpsimd, BreakpointDetailWindow& detailWindow);
+    void drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, BreakpointDetailWindow& detailWindow);
     void drawDisassemblyInWindow(uint64_t address, const uint8_t* code, size_t codeSize);
     void drawDisassemblyForPC(uint64_t pcAddress, int beforeCount, int afterCount, BreakpointDetailWindow& detailWindow);
     void closeBreakpointDetailWindow(int windowIndex);

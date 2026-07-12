@@ -1200,17 +1200,19 @@ std::string AgentMemTools::breakpointHits(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
+        if (args.contains("offset")) {
+            throw std::runtime_error(
+                "offset is unsupported because breakpoint hit batches have no stable continuation cursor");
+        }
         const auto address = parseAddressArgument(args.at("address"), false);
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
-        Mem::BreakpointHitsRequest request;
+        Mem::BreakpointHitBatchRequest request;
         request.address = address.value();
-        request.offset = optionalSize(
-            args, "offset", 0, Mem::kMaxBreakpointHitCount);
         request.limit = optionalSize(
-            args, "count", 100, Mem::kMaxBreakpointHitPageSize);
-        const auto response = service_.breakpointHits(context, request);
+            args, "count", 100, Mem::kMaxAgentBreakpointHitBatchSize);
+        const auto response = service_.breakpointHitBatch(context, request);
         if (!response.ok()) {
             return errorResult(response.error(), response.durationMs());
         }
@@ -1233,14 +1235,11 @@ std::string AgentMemTools::breakpointHits(
         json output;
         output["success"] = true;
         output["address"] = Mem::formatAddress(response.value().address);
-        output["total"] = response.value().total;
-        output["offset"] = response.value().offset;
+        output["available"] = response.value().available;
         output["count"] = response.value().items.size();
         output["hits"] = std::move(hits);
-        output["truncated"] = response.value().nextOffset.has_value();
-        output["next_cursor"] = response.value().nextOffset
-                                    ? json(*response.value().nextOffset)
-                                    : json(nullptr);
+        output["dropped"] = response.value().dropped;
+        output["truncated"] = response.value().dropped > 0;
         output["meta"] = resultMeta(
             response.durationMs(),
             response.value().target.connectionGeneration,

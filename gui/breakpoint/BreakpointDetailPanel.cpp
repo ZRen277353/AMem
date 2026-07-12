@@ -517,7 +517,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                 // 查找该PC地址的最新命中记录
                 bool foundHit = false;
                 for (int i = (int)bp.hitHistory.size() - 1; i >= 0; i--) {
-                    if (bp.hitHistory[i].regs_info.pc == detailWindow.selectedPCAddress) {
+                    if (bp.hitHistory[i].programCounter == detailWindow.selectedPCAddress) {
                         std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(detailWindow.selectedPCAddress);
                         ImGui::Text("PC地址: %s 的详细信息", pcAddrDisplayStr.c_str());
                         if (ImGui::IsItemHovered()) {
@@ -528,7 +528,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                         // 使用标签页显示寄存器和反汇编
                         if (ImGui::BeginTabBar("PCDetailTab")) {
                             if (ImGui::BeginTabItem("寄存器")) {
-                                drawRegisterInfoInWindow(bp.hitHistory[i].regs_info, bp.hitHistory[i].fpsimd_info, detailWindow);
+                                drawRegisterInfoInWindow(bp.hitHistory[i], detailWindow);
                                 ImGui::EndTabItem();
                             }
                             
@@ -619,7 +619,7 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
         ImGui::TableSetColumnIndex(2);
         if (!bp.hitHistory.empty()) {
             const auto& lastHit = bp.hitHistory.back();
-            ImGui::Text("时间: %llu", lastHit.hit_time);
+            ImGui::Text("时间: %llu", lastHit.hitTime);
         } else {
             ImGui::Text("无");
         }
@@ -665,28 +665,28 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
                 }
                 
                 ImGui::TableSetColumnIndex(1);
-                std::string hitAddrStr = AppContext::Get().moduleCache.formatWithModule(hit.hit_addr);
+                std::string hitAddrStr = AppContext::Get().moduleCache.formatWithModule(hit.hitAddress);
                 ImGui::Text("%s", hitAddrStr.c_str());
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("命中地址: 0x%llX", hit.hit_addr);
+                    ImGui::SetTooltip("命中地址: 0x%llX", hit.hitAddress);
                 }
                 
                 ImGui::TableSetColumnIndex(2);
-                // std::string pcAddrStr = AppContext::Get().moduleCache.formatWithModule(hit.regs_info.pc);
+                // std::string pcAddrStr = AppContext::Get().moduleCache.formatWithModule(hit.programCounter);
                 // char pcStr[256];
                 // snprintf(pcStr, sizeof(pcStr), "%s", pcAddrStr.c_str());
                 char pcStr[32];
-                snprintf(pcStr, sizeof(pcStr), "0x%llX", hit.regs_info.pc);
+                snprintf(pcStr, sizeof(pcStr), "0x%llX", hit.programCounter);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(hit.regs_info.pc);
-                    Gui::log("跳转到PC地址: 0x%llX", hit.regs_info.pc);
+                    navigateToAddress(hit.programCounter);
+                    Gui::log("跳转到PC地址: 0x%llX", hit.programCounter);
                 }
                 
                 ImGui::TableSetColumnIndex(3);
-                std::string hitTime = formatTime(hit.hit_time);
+                std::string hitTime = formatTime(hit.hitTime);
                 ImGui::Text("%s", hitTime.c_str());
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("精确时间戳: %llu", hit.hit_time);
+                    ImGui::SetTooltip("精确时间戳: %llu", hit.hitTime);
                 }
             }
             
@@ -712,25 +712,25 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
             ImGui::TableSetColumnIndex(1);
             if (ImGui::SmallButton("跳转到PC")) {
                 const auto& hit = bp.hitHistory[detailWindow.selectedHitIndex];
-                navigateToAddress(hit.regs_info.pc);
-                Gui::log("跳转到PC地址: 0x%llX", hit.regs_info.pc);
+                navigateToAddress(hit.programCounter);
+                Gui::log("跳转到PC地址: 0x%llX", hit.programCounter);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("跳转到SP")) {
                 const auto& hit = bp.hitHistory[detailWindow.selectedHitIndex];
-                navigateToAddress(hit.regs_info.sp);
-                Gui::log("跳转到栈地址: 0x%llX", hit.regs_info.sp);
+                navigateToAddress(hit.stackPointer);
+                Gui::log("跳转到栈地址: 0x%llX", hit.stackPointer);
             }
             
             ImGui::EndTable();
         }
         
         const auto& hit = bp.hitHistory[detailWindow.selectedHitIndex];
-        drawRegisterInfoInWindow(hit.regs_info, hit.fpsimd_info, detailWindow);
+        drawRegisterInfoInWindow(hit, detailWindow);
     }
 }
 
-void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs, const struct _user_fpsimd_state& fpsimd, BreakpointDetailWindow& detailWindow)
+void BreakpointWindow::drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, BreakpointDetailWindow& detailWindow)
 {
     // 使用标签页组织通用寄存器和浮点寄存器
     if (ImGui::BeginTabBar("RegisterTabs")) {
@@ -752,30 +752,30 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                     ImGui::TextColored(ColorScheme::Register, "X%d", i);
                     ImGui::TableSetColumnIndex(1);
                     char regStr[32];
-                    snprintf(regStr, sizeof(regStr), "0x%016llX", regs.regs[i]);
+                    snprintf(regStr, sizeof(regStr), "0x%016llX", hit.registers[i]);
                     if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
-                        if (regs.regs[i] != 0) {
-                            navigateToAddress(regs.regs[i]);
-                            Gui::log("跳转到寄存器X%d地址: 0x%llX", i, regs.regs[i]);
+                        if (hit.registers[i] != 0) {
+                            navigateToAddress(hit.registers[i]);
+                            Gui::log("跳转到寄存器X%d地址: 0x%llX", i, hit.registers[i]);
                         }
                     }
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("十进制: %llu\n点击跳转到内存查看器", regs.regs[i]);
+                        ImGui::SetTooltip("十进制: %llu\n点击跳转到内存查看器", hit.registers[i]);
                     }
                     
                     if (i + 1 < 31) {
                         ImGui::TableSetColumnIndex(2);
                         ImGui::TextColored(ColorScheme::Register, "X%d", i + 1);
                         ImGui::TableSetColumnIndex(3);
-                        snprintf(regStr, sizeof(regStr), "0x%016llX", regs.regs[i + 1]);
+                        snprintf(regStr, sizeof(regStr), "0x%016llX", hit.registers[i + 1]);
                         if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
-                            if (regs.regs[i + 1] != 0) {
-                                navigateToAddress(regs.regs[i + 1]);
-                                Gui::log("跳转到寄存器X%d地址: 0x%llX", i + 1, regs.regs[i + 1]);
+                            if (hit.registers[i + 1] != 0) {
+                                navigateToAddress(hit.registers[i + 1]);
+                                Gui::log("跳转到寄存器X%d地址: 0x%llX", i + 1, hit.registers[i + 1]);
                             }
                         }
                         if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("十进制: %llu\n点击跳转到内存查看器", regs.regs[i + 1]);
+                            ImGui::SetTooltip("十进制: %llu\n点击跳转到内存查看器", hit.registers[i + 1]);
                         }
                     }
                 }
@@ -786,52 +786,52 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::RegisterSpecial, "SP");
                 ImGui::TableSetColumnIndex(1);
                 char spStr[32];
-                snprintf(spStr, sizeof(spStr), "0x%016llX", regs.sp);
+                snprintf(spStr, sizeof(spStr), "0x%016llX", hit.stackPointer);
                 if (ImGui::Selectable(spStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(regs.sp);
-                    Gui::log("跳转到栈指针地址: 0x%llX", regs.sp);
+                    navigateToAddress(hit.stackPointer);
+                    Gui::log("跳转到栈指针地址: 0x%llX", hit.stackPointer);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("栈指针\n十进制: %llu\n点击跳转到内存查看器", regs.sp);
+                    ImGui::SetTooltip("栈指针\n十进制: %llu\n点击跳转到内存查看器", hit.stackPointer);
                 }
                 
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextColored(ColorScheme::RegisterSpecial, "PC");
                 ImGui::TableSetColumnIndex(3);
                 char pcStr[32];
-                snprintf(pcStr, sizeof(pcStr), "0x%016llX", regs.pc);
+                snprintf(pcStr, sizeof(pcStr), "0x%016llX", hit.programCounter);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(regs.pc);
-                    Gui::log("跳转到程序计数器地址: 0x%llX", regs.pc);
+                    navigateToAddress(hit.programCounter);
+                    Gui::log("跳转到程序计数器地址: 0x%llX", hit.programCounter);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("程序计数器\n十进制: %llu\n点击跳转到内存查看器", regs.pc);
+                    ImGui::SetTooltip("程序计数器\n十进制: %llu\n点击跳转到内存查看器", hit.programCounter);
                 }
                 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImGui::TextColored(ColorScheme::RegisterStatus, "PSTATE");
                 ImGui::TableSetColumnIndex(1);
-                ImGui::Text("0x%016llX", regs.pstate);
+                ImGui::Text("0x%016llX", hit.pstate);
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("处理器状态寄存器\n十进制: %llu", regs.pstate);
+                    ImGui::SetTooltip("处理器状态寄存器\n十进制: %llu", hit.pstate);
                 }
                 
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextColored(ColorScheme::RegisterStatus, "ORIG_X0");
                 ImGui::TableSetColumnIndex(3);
-                ImGui::Text("0x%016llX", regs.orig_x0);
+                ImGui::Text("0x%016llX", hit.originalX0);
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("原始X0寄存器值\n十进制: %llu", regs.orig_x0);
+                    ImGui::SetTooltip("原始X0寄存器值\n十进制: %llu", hit.originalX0);
                 }
                 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImGui::TextColored(ColorScheme::RegisterStatus, "SYSCALLNO");
                 ImGui::TableSetColumnIndex(1);
-                ImGui::Text("0x%016llX", regs.syscallno);
+                ImGui::Text("0x%016llX", hit.syscallNumber);
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("系统调用号\n十进制: %llu", regs.syscallno);
+                    ImGui::SetTooltip("系统调用号\n十进制: %llu", hit.syscallNumber);
                 }
                 
                 ImGui::EndTable();
@@ -860,40 +860,40 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 ImGui::TextColored(ColorScheme::FloatRegister, "FPSR");
                 ImGui::TableSetColumnIndex(1);
                 char fpsrStr[64];
-                snprintf(fpsrStr, sizeof(fpsrStr), "0x%08X", fpsimd.fpsr);
+                snprintf(fpsrStr, sizeof(fpsrStr), "0x%08X", hit.fpsr);
                 if (ImGui::Selectable(fpsrStr, false, ImGuiSelectableFlags_None)) {
                     ImGui::SetClipboardText(fpsrStr);
                 }
                 if (ImGui::IsItemHovered()) {
                     // 解析FPSR标志位
-                    bool n = (fpsimd.fpsr & (1u << 31)) != 0;
-                    bool z = (fpsimd.fpsr & (1u << 30)) != 0;
-                    bool c = (fpsimd.fpsr & (1u << 29)) != 0;
-                    bool v = (fpsimd.fpsr & (1u << 28)) != 0;
+                    bool n = (hit.fpsr & (1u << 31)) != 0;
+                    bool z = (hit.fpsr & (1u << 30)) != 0;
+                    bool c = (hit.fpsr & (1u << 29)) != 0;
+                    bool v = (hit.fpsr & (1u << 28)) != 0;
                     ImGui::SetTooltip("浮点状态寄存器 (FPSR)\n"
                                      "十六进制: 0x%08X\n"
                                      "十进制: %u\n"
                                      "条件标志: N=%d Z=%d C=%d V=%d\n"
-                                     "点击复制", fpsimd.fpsr, fpsimd.fpsr, n, z, c, v);
+                                     "点击复制", hit.fpsr, hit.fpsr, n, z, c, v);
                 }
                 
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextColored(ColorScheme::FloatRegister, "FPCR");
                 ImGui::TableSetColumnIndex(3);
                 char fpcrStr[64];
-                snprintf(fpcrStr, sizeof(fpcrStr), "0x%08X", fpsimd.fpcr);
+                snprintf(fpcrStr, sizeof(fpcrStr), "0x%08X", hit.fpcr);
                 if (ImGui::Selectable(fpcrStr, false, ImGuiSelectableFlags_None)) {
                     ImGui::SetClipboardText(fpcrStr);
                 }
                 if (ImGui::IsItemHovered()) {
                     // 解析FPCR的舍入模式 (bits [23:22])
-                    int roundingMode = (fpsimd.fpcr >> 22) & 0x3;
+                    int roundingMode = (hit.fpcr >> 22) & 0x3;
                     const char* roundingModes[] = { "RN (最近舍入)", "RP (正无穷舍入)", "RM (负无穷舍入)", "RZ (零舍入)" };
                     ImGui::SetTooltip("浮点控制寄存器 (FPCR)\n"
                                      "十六进制: 0x%08X\n"
                                      "十进制: %u\n"
                                      "舍入模式: %s\n"
-                                     "点击复制", fpsimd.fpcr, fpsimd.fpcr, roundingModes[roundingMode]);
+                                     "点击复制", hit.fpcr, hit.fpcr, roundingModes[roundingMode]);
                 }
                 
                 ImGui::EndTable();
@@ -1022,14 +1022,8 @@ void BreakpointWindow::drawRegisterInfoInWindow(const struct _user_pt_regs& regs
                 for (int i = regStart; i < regEnd; i++) {
                     // 获取128位向量寄存器的值（从字节数组读取）
                     uint64_t low64, high64;
-#ifdef _MSC_VER
-                    std::memcpy(&low64, fpsimd.vregs[i], 8);
-                    std::memcpy(&high64, fpsimd.vregs[i] + 8, 8);
-#else
-                    __uint128_t vreg = fpsimd.vregs[i];
-                    low64 = (uint64_t)(vreg & 0xFFFFFFFFFFFFFFFFULL);
-                    high64 = (uint64_t)((vreg >> 64) & 0xFFFFFFFFFFFFFFFFULL);
-#endif
+                    std::memcpy(&low64, hit.vectorRegisters[i].data(), 8);
+                    std::memcpy(&high64, hit.vectorRegisters[i].data() + 8, 8);
                     
                     // 过滤非零寄存器
                     if (filterNonZero && low64 == 0 && high64 == 0) {

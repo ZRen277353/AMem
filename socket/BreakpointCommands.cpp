@@ -169,9 +169,11 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
         infos, total, port);
 }
 
-bool ReadKernelBreakpointInfoPage(
+namespace {
+bool readKernelBreakpointInfoSlice(
     uint64_t address, size_t offset, size_t limit,
-    std::vector<HW_HIT_INFO> &infos, size_t &total, PortType port) {
+    bool keepTail, std::vector<HW_HIT_INFO> &infos, size_t &total,
+    PortType port) {
     infos.clear();
     total = 0;
     if (offset > static_cast<size_t>(kMaxBreakpointHitCount) ||
@@ -197,7 +199,9 @@ bool ReadKernelBreakpointInfoPage(
             static_cast<uint64_t>(result) > TotalCount)
             return false;
         const size_t resultCount = static_cast<size_t>(result);
-        const size_t pageBegin = (std::min)(offset, resultCount);
+        const size_t pageBegin = keepTail
+            ? resultCount - (std::min)(limit, resultCount)
+            : (std::min)(offset, resultCount);
         const size_t pageEnd = pageBegin + (std::min)(limit, resultCount - pageBegin);
         std::vector<HW_HIT_INFO> receivedInfos;
         receivedInfos.reserve(pageEnd - pageBegin);
@@ -226,6 +230,21 @@ bool ReadKernelBreakpointInfoPage(
         infos.swap(receivedInfos);
         return true;
     });
+}
+} // namespace
+
+bool ReadKernelBreakpointInfoPage(
+    uint64_t address, size_t offset, size_t limit,
+    std::vector<HW_HIT_INFO> &infos, size_t &total, PortType port) {
+    return readKernelBreakpointInfoSlice(
+        address, offset, limit, false, infos, total, port);
+}
+
+bool ReadKernelBreakpointInfoTail(
+    uint64_t address, size_t limit,
+    std::vector<HW_HIT_INFO> &infos, size_t &total, PortType port) {
+    return readKernelBreakpointInfoSlice(
+        address, 0, limit, true, infos, total, port);
 }
 
 bool ClearTrackedKernelBreakpoints(PortType port) {

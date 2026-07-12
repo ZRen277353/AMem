@@ -50,9 +50,9 @@ public:
     virtual Result<BreakpointMutationReceipt> resumeBreakpoint(
         const OperationContext& context,
         const BreakpointAddressRequest& request) = 0;
-    virtual Result<BreakpointHitPage> breakpointHits(
+    virtual Result<BreakpointHitBatch> breakpointHitBatch(
         const OperationContext& context,
-        const BreakpointHitsRequest& request) = 0;
+        const BreakpointHitBatchRequest& request) = 0;
     virtual Result<ScanSummary> startScan(
         const OperationContext& context,
         const ScanStartRequest& request) = 0;

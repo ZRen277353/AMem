@@ -2443,11 +2443,6 @@ constexpr const char* kSchemaBreakpointHits = R"JSON({
       "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Explicit 0x-prefixed breakpoint address"
     },
-    "offset": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 100000
-    },
     "count": {
       "type": "integer",
       "minimum": 1,
@@ -3047,7 +3042,7 @@ void ToolExecutor::initBuiltinTools() {
 
     registerTool(
         "breakpoint_hits",
-        "Read a bounded page of hit and register data for a hardware breakpoint.",
+        "Read the newest bounded batch of hit and register data for a hardware breakpoint.",
         kSchemaBreakpointHits,
         ToolSafety::ReadOnly,
         &execBreakpointHits,
