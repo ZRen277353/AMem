@@ -244,6 +244,21 @@ size_t IpcApprovalBroker::cancelSession(uint64_t sessionId) {
   return changed.size();
 }
 
+size_t IpcApprovalBroker::cancelAll() {
+  std::vector<IpcApprovalRecord> changed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &record : records_) {
+      if (isLive(record.state)) {
+        record.state = IpcApprovalState::Cancelled;
+        changed.push_back(record);
+      }
+    }
+  }
+  audit(changed);
+  return changed.size();
+}
+
 size_t IpcApprovalBroker::expire(std::chrono::steady_clock::time_point now) {
   std::vector<IpcApprovalRecord> changed;
   {

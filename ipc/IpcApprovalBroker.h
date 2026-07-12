@@ -103,6 +103,7 @@ public:
 
   size_t invalidateStale(const Mem::OperationContext &current);
   size_t cancelSession(uint64_t sessionId);
+  size_t cancelAll();
   size_t expire(std::chrono::steady_clock::time_point now =
                     std::chrono::steady_clock::now());
 

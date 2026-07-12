@@ -8,7 +8,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <chrono>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -124,6 +127,96 @@ void countRow(const char *label, uint64_t value) {
   ImGui::Text("%llu", static_cast<unsigned long long>(value));
 }
 
+const char *capabilityName(NativeIpc::IpcCapability capability) {
+  return NativeIpc::CapabilityName(capability);
+}
+
+std::string approvalTarget(const NativeIpc::IpcApprovalRecord &record) {
+  if (!record.target) {
+    return "connection g" + std::to_string(record.connectionGeneration);
+  }
+  return "PID " + std::to_string(record.target->pid) + " / r" +
+         std::to_string(record.target->processRevision) + " / g" +
+         std::to_string(record.connectionGeneration);
+}
+
+long long remainingApprovalSeconds(const NativeIpc::IpcApprovalRecord &record) {
+  const auto remaining = std::chrono::ceil<std::chrono::seconds>(
+      record.deadline - std::chrono::steady_clock::now());
+  return (std::max)(0ll, remaining.count());
+}
+
+void drawPendingApprovals(
+    const std::vector<NativeIpc::IpcApprovalRecord> &records) {
+  size_t pendingCount = 0;
+  size_t approvedCount = 0;
+  for (const auto &record : records) {
+    pendingCount += record.state == NativeIpc::IpcApprovalState::Pending;
+    approvedCount += record.state == NativeIpc::IpcApprovalState::Approved;
+  }
+
+  ImGui::SeparatorText("特权审批");
+  ImGui::TextDisabled("待处理: %zu", pendingCount);
+  ImGui::SameLine();
+  ImGui::TextDisabled("已批准待消费: %zu", approvedCount);
+  if (pendingCount == 0) {
+    return;
+  }
+
+  if (!ImGui::BeginTable("native_ipc_approvals", 6,
+                         ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                             ImGuiTableFlags_SizingStretchProp)) {
+    return;
+  }
+  ImGui::TableSetupColumn("客户端", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("方法", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("权限", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+  ImGui::TableSetupColumn("目标", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+  ImGui::TableSetupColumn("剩余", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+  ImGui::TableSetupColumn("决策", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+  ImGui::TableHeadersRow();
+
+  for (const auto &record : records) {
+    if (record.state != NativeIpc::IpcApprovalState::Pending) {
+      continue;
+    }
+    const std::string approvalKey = std::to_string(record.approvalId);
+    ImGui::PushID(approvalKey.c_str());
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextUnformatted(record.clientName.c_str());
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(record.method.c_str());
+    ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(capabilityName(record.capability));
+    ImGui::TableSetColumnIndex(3);
+    const std::string target = approvalTarget(record);
+    ImGui::TextUnformatted(target.c_str());
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%llds", remainingApprovalSeconds(record));
+    ImGui::TableSetColumnIndex(5);
+    if (ImGui::SmallButton("批准")) {
+      const NativeIpc::IpcApprovalResult result =
+          NativeIpc::DecideSystemIpcApproval(
+              record.approvalId, NativeIpc::IpcApprovalDecision::Approve);
+      Gui::log("Native IPC approval %llu: %s",
+               static_cast<unsigned long long>(record.approvalId),
+               result.ok ? "approved" : result.code.c_str());
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("拒绝")) {
+      const NativeIpc::IpcApprovalResult result =
+          NativeIpc::DecideSystemIpcApproval(
+              record.approvalId, NativeIpc::IpcApprovalDecision::Deny);
+      Gui::log("Native IPC approval %llu: %s",
+               static_cast<unsigned long long>(record.approvalId),
+               result.ok ? "denied" : result.code.c_str());
+    }
+    ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
 } // namespace
 
 NativeAgentIpcWindow::NativeAgentIpcWindow() { name = "Native Agent IPC"; }
@@ -140,7 +233,7 @@ void NativeAgentIpcWindow::onDraw() {
   ImGui::SameLine();
   if (running) {
     if (ImGui::Button("停止")) {
-      runtime.stop();
+      NativeIpc::StopSystemNativeAgentRuntime();
       Gui::log("Native Agent IPC 已停止");
       snapshot = runtime.snapshot();
     }
@@ -193,4 +286,6 @@ void NativeAgentIpcWindow::onDraw() {
     ImGui::Separator();
     ImGui::TextColored(ColorScheme::Error, "%s", error.c_str());
   }
+
+  drawPendingApprovals(NativeIpc::RefreshSystemIpcApprovals());
 }

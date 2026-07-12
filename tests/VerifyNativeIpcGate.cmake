@@ -7,6 +7,8 @@ endif()
 file(READ "${SOURCE_ROOT}/CMakeLists.txt" cmake_source)
 file(READ "${SOURCE_ROOT}/main.cpp" main_source)
 file(READ "${SOURCE_ROOT}/gui/NativeAgentIpcWindow.cpp" control_source)
+file(READ "${SOURCE_ROOT}/ipc/SystemNativeAgentRuntime.cpp" owner_source)
+file(READ "${SOURCE_ROOT}/ipc/IpcHandshakeSession.cpp" handshake_source)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -40,6 +42,18 @@ require_text("${control_source}" "user-initiated native IPC startup"
     "if (runtime.start(error))")
 require_text("${control_source}" "visible Observe-only capability"
     "textRow(\"特权能力\", \"禁用\")")
+require_text("${control_source}" "bounded GUI approval decision"
+    "NativeIpc::DecideSystemIpcApproval(")
+require_text("${control_source}" "approval-aware runtime stop"
+    "NativeIpc::StopSystemNativeAgentRuntime();")
+forbid_text("${control_source}" "raw approval params in GUI"
+    "params")
+forbid_text("${control_source}" "raw approval result in GUI"
+    "resultJson")
+require_text("${owner_source}" "stop-time approval invalidation"
+    "approvalBroker->cancelAll();")
+require_text("${handshake_source}" "Observe-only grant remains fixed"
+    "if (capability == IpcCapability::Observe) {\n            result.grantedCapabilities.push_back(capability);")
 
 string(FIND "${main_source}"
     "NativeIpc::ShutdownSystemNativeAgentRuntime();" shutdown_position)

@@ -275,6 +275,30 @@ void testAuditReceivesBoundedStateTransitions() {
   }
 }
 
+void testCancelAllRevokesPendingAndApproved() {
+  NativeIpc::IpcApprovalBroker broker;
+  const Mem::OperationContext expected = context();
+  const auto pending =
+      broker.submit(submission("memory_write", 50, 1, expected));
+  const auto approved =
+      broker.submit(submission("memory_write", 60, 1, expected));
+  expect(pending.ok && approved.ok &&
+             broker
+                 .decide(approved.record->approvalId,
+                         NativeIpc::IpcApprovalDecision::Approve, expected)
+                 .ok,
+         "cancel-all fixture should contain pending and approved records");
+
+  expect(broker.cancelAll() == 2,
+         "runtime stop should revoke every live approval");
+  const auto records = broker.snapshot();
+  expect(records.size() == 2 &&
+             records[0].state == NativeIpc::IpcApprovalState::Cancelled &&
+             records[1].state == NativeIpc::IpcApprovalState::Cancelled &&
+             broker.cancelAll() == 0,
+         "cancel-all should be terminal and idempotent");
+}
+
 void testConcurrentSubmissionAndInvalidation() {
   NativeIpc::IpcApprovalBroker broker({16, 32});
   std::vector<std::thread> threads;
@@ -309,6 +333,8 @@ int main() {
        &testQueueCancellationExpiryAndRetention},
       {"audit receives bounded transitions",
        &testAuditReceivesBoundedStateTransitions},
+      {"cancel all revokes pending and approved",
+       &testCancelAllRevokesPendingAndApproved},
       {"concurrent submission and invalidation",
        &testConcurrentSubmissionAndInvalidation},
   };
