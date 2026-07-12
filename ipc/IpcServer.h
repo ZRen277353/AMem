@@ -10,9 +10,9 @@
 using json = nlohmann::json;
 
 /**
- * 轻量 HTTP Server，监听 localhost，接收 JSON-RPC 风格请求，
- * 分发到已注册的 handler，返回 JSON 响应。
- * 供外部 MCP Python 代理通过 HTTP 调用 GUI 已有的 C++ 能力。
+ * Legacy loopback HTTP server for migration diagnostics.
+ * It is unauthenticated, bypasses Agent approval, and is excluded from
+ * default builds. Do not add new product capabilities here.
  */
 class IpcServer {
 public:

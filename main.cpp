@@ -7,7 +7,9 @@
 #include "renderer/DX12Renderer.h"
 #include "renderer/StyleSetup.h"
 #include "ExceptionHandler.h"
+#ifdef HAVE_LEGACY_HTTP_IPC
 #include "ipc/IpcServer.h"
+#endif
 #ifdef HAVE_AI_CHAT
 #include "ai/AgentTaskExecutor.h"
 #include "ai/HttpClient.h"
@@ -91,8 +93,10 @@ int main(int, char**)
 
     StyleSetup::loadFonts(io);
 
-    // 启动 IPC HTTP Server（供 MCP 代理调用）
+#ifdef HAVE_LEGACY_HTTP_IPC
+    // Temporary migration-only endpoint. Default builds exclude this path.
     IpcServer::GetInstance().Start(28100);
+#endif
 
     bool done = false;
     while (!done)
@@ -122,8 +126,9 @@ int main(int, char**)
 
     g_renderer.waitForPendingOperations();
 
-    // 停止 IPC Server
+#ifdef HAVE_LEGACY_HTTP_IPC
     IpcServer::GetInstance().Stop();
+#endif
 
 #ifdef HAVE_AI_CHAT
     // Stop model delivery, then cancel and join the owned tool worker before

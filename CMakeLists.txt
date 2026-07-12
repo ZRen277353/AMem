@@ -33,6 +33,9 @@ option(USE_DX12 "Use DirectX 12 backend" ON)
 # AI 聊天集成选项（Requirement 13.4）
 option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
 
+# 旧 loopback HTTP IPC 仅用于迁移验证。默认构建不编译也不监听 28100。
+option(ENABLE_LEGACY_HTTP_IPC "Enable legacy unauthenticated HTTP IPC" OFF)
+
 # 生成版本信息头文件
 string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
 string(TIMESTAMP BUILD_TIME "%H:%M:%S")
@@ -259,9 +262,14 @@ set(RENDERER_SOURCES
     renderer/StyleSetup.cpp
 )
 
-set(IPC_SOURCES
-    ipc/IpcServer.cpp
-)
+set(IPC_SOURCES)
+if(ENABLE_LEGACY_HTTP_IPC)
+    list(APPEND IPC_SOURCES ipc/IpcServer.cpp)
+    message(WARNING
+        "Legacy HTTP IPC enabled: unauthenticated loopback port 28100 will be exposed")
+else()
+    message(STATUS "Legacy HTTP IPC disabled")
+endif()
 
 
 # 配置 DirectX 后端
@@ -291,6 +299,10 @@ add_executable(ImGuiProject
     ${IPC_SOURCES}
     ${LUA_SOURCES}
 )
+
+if(ENABLE_LEGACY_HTTP_IPC)
+    target_compile_definitions(ImGuiProject PRIVATE HAVE_LEGACY_HTTP_IPC)
+endif()
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
@@ -404,6 +416,12 @@ if(BUILD_TESTING)
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/VerifyNoPythonMcp.cmake
+    )
+    add_test(
+        NAME native_agent_legacy_ipc_gate
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyLegacyHttpIpcGate.cmake
     )
 endif()
 
