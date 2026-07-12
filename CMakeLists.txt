@@ -278,12 +278,16 @@ endif()
 if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
         ipc/IpcFramedConnection.cpp
+        ipc/IpcHandshakeSession.cpp
         ipc/IpcProtocol.cpp
         ipc/NamedPipeServer.cpp
         ipc/NativePipeSecurity.cpp
     )
     target_include_directories(NativeIpcTransport PUBLIC
         ${CMAKE_SOURCE_DIR}
+    )
+    target_include_directories(NativeIpcTransport PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
     )
     target_link_libraries(NativeIpcTransport PUBLIC advapi32)
     if(MSVC)
@@ -412,6 +416,25 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcHandshakeTests
+        tests/IpcHandshakeSessionTests.cpp
+    )
+    target_include_directories(NativeIpcHandshakeTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(NativeIpcHandshakeTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcHandshakeTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcHandshakeTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcHandshakeTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_handshake COMMAND NativeIpcHandshakeTests)
+
     add_executable(NativeIpcFramedIoTests
         tests/IpcFramedConnectionTests.cpp
     )
