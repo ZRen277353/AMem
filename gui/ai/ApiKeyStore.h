@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AIProvider.h"
+#include "Persistence.h"
 
 #include <cstdint>
 #include <map>
@@ -38,7 +39,8 @@ public:
     // "Provider 配置存储格式", for the exact layout. The default filename
     // uses a .json extension so the file is recognisable as user-editable
     // JSON (the API key value is still a DPAPI-encrypted base64 blob).
-    bool loadFromFile(const std::string& filepath = "ai_config.json");
+    PersistenceLoadResult loadFromFile(
+        const std::string& filepath = "ai_config.json");
     bool saveToFile(const std::string& filepath = "ai_config.json");
 
     // Store a provider configuration. The apiKey is encrypted with DPAPI

@@ -142,6 +142,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/HttpClient.cpp
     gui/ai/SSEParser.cpp
     gui/ai/ProviderStreamTerminal.cpp
+    gui/ai/Persistence.cpp
     gui/ai/UIMessageQueue.cpp
     gui/ai/OpenAIProvider.cpp
     gui/ai/ClaudeProvider.cpp
@@ -467,6 +468,31 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativePersistenceTests
+        tests/PersistenceTests.cpp
+        gui/ai/Persistence.cpp
+        gui/ai/ApiKeyStore.cpp
+        gui/ai/AiSettings.cpp
+        gui/ai/SessionManager.cpp
+        gui/ai/ChatSession.cpp
+        gui/ai/ToolCallSecurity.cpp
+    )
+    target_include_directories(NativePersistenceTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_definitions(NativePersistenceTests PRIVATE HAVE_AI_CHAT)
+    target_link_libraries(NativePersistenceTests PRIVATE crypt32)
+    if(MSVC)
+        target_compile_options(NativePersistenceTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativePersistenceTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativePersistenceTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_persistence_recovery COMMAND NativePersistenceTests)
+
     add_executable(NativeProviderStreamTerminalTests
         tests/ProviderStreamTerminalTests.cpp
         gui/ai/SSEParser.cpp
@@ -700,6 +726,7 @@ if(BUILD_TESTING)
         gui/ai/AgentRunner.cpp
         gui/ai/AgentMutationAudit.cpp
         gui/ai/ToolCallSecurity.cpp
+        gui/ai/Persistence.cpp
         gui/ai/ChatSession.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp

@@ -5,6 +5,7 @@
 
 #include "../Gui.h"
 #include "../../third_party/nlohmann/json.hpp"
+#include "../../utils/AtomicFileWrite.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -151,6 +152,62 @@ ChatMessage messageFromJson(const nlohmann::json& j) {
     if (j.contains("durationMs") && j["durationMs"].is_number_integer())
         msg.durationMs = j["durationMs"].get<long long>();
     return msg;
+}
+
+bool validateMessageJson(const nlohmann::json& message,
+                         std::string& error) {
+    if (!message.is_object()) {
+        error = "message entries must be objects";
+        return false;
+    }
+
+    const auto role = message.find("role");
+    const auto content = message.find("content");
+    const auto toolCallId = message.find("toolCallId");
+    const auto name = message.find("name");
+    const auto timestamp = message.find("timestamp");
+    const auto duration = message.find("durationMs");
+    if ((role != message.end() && !role->is_string()) ||
+        (content != message.end() && !content->is_string()) ||
+        (toolCallId != message.end() && !toolCallId->is_string()) ||
+        (name != message.end() && !name->is_string()) ||
+        (timestamp != message.end() && !timestamp->is_number_integer()) ||
+        (duration != message.end() && !duration->is_number_integer())) {
+        error = "message fields have invalid types";
+        return false;
+    }
+
+    if (role != message.end()) {
+        const std::string value = role->get<std::string>();
+        if (value != "system" && value != "user" &&
+            value != "assistant" && value != "tool") {
+            error = "message has an unknown role";
+            return false;
+        }
+    }
+
+    const auto toolCalls = message.find("toolCalls");
+    if (toolCalls == message.end()) {
+        return true;
+    }
+    if (!toolCalls->is_array()) {
+        error = "message 'toolCalls' must be an array";
+        return false;
+    }
+    for (const auto& call : *toolCalls) {
+        if (!call.is_object()) {
+            error = "tool call entries must be objects";
+            return false;
+        }
+        for (const char* fieldName : {"id", "name", "arguments"}) {
+            const auto field = call.find(fieldName);
+            if (field != call.end() && !field->is_string()) {
+                error = "tool call fields must be strings";
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool eraseOldestConversationGroup(std::vector<ChatMessage>& messages) {
@@ -468,6 +525,14 @@ bool ChatSession::save(const std::string& filepath) {
     return ok;
 }
 
+bool ChatSession::saveBound() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sessionFilePath_.empty()) {
+        return false;
+    }
+    return saveUnlocked(sessionFilePath_);
+}
+
 bool ChatSession::saveUnlocked(const std::string& filepath) const {
     nlohmann::json root;
     root["version"]      = 1;
@@ -510,23 +575,10 @@ bool ChatSession::saveUnlocked(const std::string& filepath) const {
             }
         }
 
-        std::error_code ec;
-        std::filesystem::rename(tmpPath, targetPath, ec);
-        if (ec) {
-            // Rename across volumes or when destination exists+locked may fail;
-            // fall back to copy+remove.
-            std::filesystem::copy_file(
-                tmpPath, targetPath,
-                std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) {
-                Gui::log("[ChatSession] failed to persist '%s': %s",
-                         targetPath.string().c_str(), ec.message().c_str());
-                std::error_code rmec;
-                std::filesystem::remove(tmpPath, rmec);
-                return false;
-            }
-            std::error_code rmec;
-            std::filesystem::remove(tmpPath, rmec);
+        if (!utils::installTempFile(tmpPath, targetPath)) {
+            Gui::log("[ChatSession] failed to atomically install '%s'",
+                     targetPath.string().c_str());
+            return false;
         }
     } catch (const std::exception& e) {
         Gui::log("[ChatSession] exception while saving '%s': %s",
@@ -539,92 +591,92 @@ bool ChatSession::saveUnlocked(const std::string& filepath) const {
     return true;
 }
 
-bool ChatSession::load(const std::string& filepath) {
+PersistenceLoadResult ChatSession::load(const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Always remember the target path so future addMessage() calls auto-persist
-    // even when the initial file is missing or corrupt.
-    sessionFilePath_ = filepath;
     return loadUnlocked(filepath);
 }
 
-bool ChatSession::loadUnlocked(const std::string& filepath) {
-    std::error_code ec;
-    if (!std::filesystem::exists(filepath, ec)) {
-        // Missing file is a legitimate state — a session may have been
-        // freshly created via SessionManager::create() and simply not
-        // persisted any messages yet. Silently clear in-memory state and
-        // return false; the caller still gets the "nothing was loaded"
-        // signal via the return value, and auto-persistence via
-        // addMessage() will create the file on first append.
+PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
+    JsonDocumentLoadResult document = loadJsonDocument(filepath);
+    if (document.result.status == PersistenceLoadStatus::Missing) {
         messages_.clear();
-        return false;
+        sessionFilePath_ = filepath;
+        return document.result;
+    }
+    if (document.result.failed()) {
+        Gui::log("[ChatSession] %s session '%s': %s",
+                 persistenceLoadStatusName(document.result.status),
+                 filepath.c_str(), document.result.message.c_str());
+        return document.result;
     }
 
-    std::ifstream ifs(filepath, std::ios::binary);
-    if (!ifs.is_open()) {
-        Gui::log("[ChatSession] could not open '%s' for reading; starting empty",
-                 filepath.c_str());
-        messages_.clear();
-        return false;
-    }
-
-    nlohmann::json root;
+    std::vector<ChatMessage> loadedMessages;
+    std::string loadedPrompt = systemPrompt_;
+    int loadedTokenLimit = tokenLimit_;
     try {
-        ifs >> root;
-    } catch (const std::exception& e) {
-        // AC 8.7: invalid JSON -> start empty and log a warning.
-        Gui::log("[ChatSession] invalid JSON in '%s' (%s); starting empty",
-                 filepath.c_str(), e.what());
-        messages_.clear();
-        return false;
-    }
-
-    try {
+        const nlohmann::json& root = document.document;
         if (!root.is_object()) {
             throw std::runtime_error("root is not a JSON object");
         }
 
-        if (root.contains("systemPrompt") && root["systemPrompt"].is_string()) {
-            std::string prompt = root["systemPrompt"].get<std::string>();
-            if (prompt.size() > static_cast<size_t>(kMaxSystemPromptChars)) {
-                prompt.resize(static_cast<size_t>(kMaxSystemPromptChars));
+        const auto prompt = root.find("systemPrompt");
+        if (prompt != root.end()) {
+            if (!prompt->is_string()) {
+                throw std::runtime_error("systemPrompt must be a string");
             }
-            systemPrompt_ = std::move(prompt);
+            loadedPrompt = prompt->get<std::string>();
+            if (loadedPrompt.size() >
+                static_cast<size_t>(kMaxSystemPromptChars)) {
+                loadedPrompt.resize(static_cast<size_t>(kMaxSystemPromptChars));
+            }
         }
 
-        if (root.contains("tokenLimit") && root["tokenLimit"].is_number_integer()) {
-            int limit = root["tokenLimit"].get<int>();
-            if (limit < kMinTokenLimit)      limit = kMinTokenLimit;
-            else if (limit > kMaxTokenLimit) limit = kMaxTokenLimit;
-            tokenLimit_ = limit;
+        const auto tokenLimit = root.find("tokenLimit");
+        if (tokenLimit != root.end()) {
+            if (!tokenLimit->is_number_integer()) {
+                throw std::runtime_error("tokenLimit must be an integer");
+            }
+            loadedTokenLimit = tokenLimit->get<int>();
+            if (loadedTokenLimit < kMinTokenLimit) {
+                loadedTokenLimit = kMinTokenLimit;
+            } else if (loadedTokenLimit > kMaxTokenLimit) {
+                loadedTokenLimit = kMaxTokenLimit;
+            }
         }
 
-        messages_.clear();
-        if (root.contains("messages") && root["messages"].is_array()) {
-            const auto& arr = root["messages"];
-            messages_.reserve(arr.size());
+        const auto messages = root.find("messages");
+        if (messages != root.end()) {
+            if (!messages->is_array()) {
+                throw std::runtime_error("messages must be an array");
+            }
+            const auto& arr = *messages;
+            loadedMessages.reserve(
+                std::min(arr.size(), static_cast<size_t>(kMaxMessages)));
             for (const auto& mj : arr) {
-                if (mj.is_object()) {
-                    messages_.push_back(messageFromJson(mj));
+                std::string validationError;
+                if (!validateMessageJson(mj, validationError)) {
+                    throw std::runtime_error(validationError);
                 }
+                loadedMessages.push_back(messageFromJson(mj));
             }
-            // Enforce retention cap in case the persisted file pre-dates the
-            // limit or was edited externally. Trim complete groups so loading
-            // cannot create orphan tool-result messages either.
-            while (messages_.size() > static_cast<size_t>(kMaxMessages)) {
-                if (!eraseOldestConversationGroup(messages_)) {
+            while (loadedMessages.size() >
+                   static_cast<size_t>(kMaxMessages)) {
+                if (!eraseOldestConversationGroup(loadedMessages)) {
                     break;
                 }
             }
         }
     } catch (const std::exception& e) {
-        Gui::log("[ChatSession] malformed session in '%s' (%s); starting empty",
+        Gui::log("[ChatSession] malformed session in '%s' (%s); preserving current state",
                  filepath.c_str(), e.what());
-        messages_.clear();
-        return false;
+        return {PersistenceLoadStatus::Invalid, e.what()};
     }
 
-    return true;
+    messages_ = std::move(loadedMessages);
+    systemPrompt_ = std::move(loadedPrompt);
+    tokenLimit_ = loadedTokenLimit;
+    sessionFilePath_ = filepath;
+    return {PersistenceLoadStatus::Loaded, {}};
 }
 
 } // namespace AI

@@ -291,55 +291,75 @@ void ApiKeyStore::seedDefaultsIfEmpty() {
 // File I/O
 // --------------------------------------------------------------------------
 
-bool ApiKeyStore::loadFromFile(const std::string& filepath) {
+PersistenceLoadResult ApiKeyStore::loadFromFile(const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex_);
-    configs_.clear();
-
-    std::error_code ec;
-    if (!std::filesystem::exists(filepath, ec)) {
-        // AC 10.6: a missing file is not an error. Start with an empty
-        // store so the caller (e.g. ChatWindow) can seed defaults.
-        return true;
+    JsonDocumentLoadResult document = loadJsonDocument(filepath);
+    if (document.result.status == PersistenceLoadStatus::Missing) {
+        configs_.clear();
+        decryptionFailures_.clear();
+        return document.result;
+    }
+    if (document.result.failed()) {
+        return document.result;
     }
 
-    std::ifstream in(filepath, std::ios::binary);
-    if (!in.is_open()) {
-        return false;
-    }
-
-    nlohmann::json root;
+    std::map<std::string, StoredProviderConfig> loadedConfigs;
     try {
-        in >> root;
-    } catch (const nlohmann::json::exception&) {
-        // Malformed JSON – leave configs_ empty and report failure so the
-        // UI can surface an error instead of silently clobbering the file.
-        return false;
-    }
-
-    if (!root.is_object()) {
-        return false;
-    }
-
-    auto providersIt = root.find("providers");
-    if (providersIt == root.end() || !providersIt->is_object()) {
-        // No providers section is legal – treat as empty store.
-        return true;
-    }
-
-    for (auto it = providersIt->begin(); it != providersIt->end(); ++it) {
-        const auto& entry = it.value();
-        if (!entry.is_object()) {
-            continue;
+        const nlohmann::json& root = document.document;
+        if (!root.is_object()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "configuration root must be an object"};
         }
-        StoredProviderConfig stored;
-        stored.encryptedApiKey = entry.value("apiKey", std::string{});
-        stored.baseUrl = entry.value("baseUrl", std::string{});
-        stored.model = entry.value("model", std::string{});
-        stored.apiVersion = entry.value("apiVersion", std::string{});
-        configs_[it.key()] = std::move(stored);
+        if (root.contains("version") && !root["version"].is_number_integer()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "configuration 'version' must be an integer"};
+        }
+
+        const auto providersIt = root.find("providers");
+        if (providersIt != root.end()) {
+            if (!providersIt->is_object()) {
+                return {PersistenceLoadStatus::Invalid,
+                        "configuration 'providers' must be an object"};
+            }
+
+            for (auto it = providersIt->begin(); it != providersIt->end(); ++it) {
+                if (it.key().empty() || !it.value().is_object()) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "provider entries require a non-empty name and object value"};
+                }
+
+                StoredProviderConfig stored;
+                const auto readString = [&](const char* name,
+                                            std::string& destination) -> bool {
+                    const auto field = it.value().find(name);
+                    if (field == it.value().end()) {
+                        return true;
+                    }
+                    if (!field->is_string()) {
+                        return false;
+                    }
+                    destination = field->get<std::string>();
+                    return true;
+                };
+
+                if (!readString("apiKey", stored.encryptedApiKey) ||
+                    !readString("baseUrl", stored.baseUrl) ||
+                    !readString("model", stored.model) ||
+                    !readString("apiVersion", stored.apiVersion)) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "provider configuration fields must be strings"};
+                }
+                loadedConfigs.emplace(it.key(), std::move(stored));
+            }
+        }
+    } catch (const nlohmann::json::exception& error) {
+        return {PersistenceLoadStatus::Invalid,
+                std::string("invalid provider configuration: ") + error.what()};
     }
 
-    return true;
+    configs_ = std::move(loadedConfigs);
+    decryptionFailures_.clear();
+    return {PersistenceLoadStatus::Loaded, {}};
 }
 
 bool ApiKeyStore::saveToFile(const std::string& filepath) {

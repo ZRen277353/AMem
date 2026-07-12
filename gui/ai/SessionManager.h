@@ -1,6 +1,8 @@
 #pragma once
 #ifdef HAVE_AI_CHAT
 
+#include "Persistence.h"
+
 #include <mutex>
 #include <string>
 #include <vector>
@@ -55,8 +57,9 @@ public:
     // Load the index from disk (or initialise empty). Performs legacy
     // migration exactly once. Idempotent — safe to call from every
     // ChatWindow constructor.
-    void init(const std::string& sessionsDir = "ai_sessions",
-              const std::string& legacySessionFile = "ai_session.json");
+    PersistenceLoadResult init(
+        const std::string& sessionsDir = "ai_sessions",
+        const std::string& legacySessionFile = "ai_session.json");
 
     // All known sessions, ordered by updatedAt descending. A fresh copy
     // is returned so callers can iterate without holding the mutex.
@@ -107,7 +110,9 @@ private:
     SessionManager& operator=(const SessionManager&) = delete;
 
     // Unlocked helpers; callers must hold mutex_.
-    bool loadIndexUnlocked();
+    PersistenceLoadResult loadIndexUnlocked();
+    PersistenceLoadResult recoverIndexUnlocked(
+        const PersistenceLoadResult& failure);
     bool saveIndexUnlocked() const;
     std::string allocIdUnlocked() const;
     std::string pathForUnlocked(const std::string& id) const;
@@ -118,6 +123,8 @@ private:
     std::string activeId_;
     std::vector<SessionInfo> sessions_;
     bool initialized_ = false;
+    bool indexWritesEnabled_ = true;
+    PersistenceLoadResult lastLoadResult_;
     // True once the one-time ai_session.json → ai_sessions/ migration has been
     // handled. Persisted in index.json so a leftover legacy file can't be
     // re-imported on a later launch (e.g. after the user deletes all sessions).

@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AIProvider.h"
+#include "Persistence.h"
 
 #include <mutex>
 #include <string>
@@ -45,7 +46,8 @@ public:
     // Persistence. On success, the filepath is remembered and subsequent
     // addMessage() calls auto-persist to it.
     bool save(const std::string& filepath);
-    bool load(const std::string& filepath);
+    bool saveBound();
+    PersistenceLoadResult load(const std::string& filepath);
 
     // Clear in-memory messages WITHOUT touching the persisted file or the
     // bound sessionFilePath_. Used when switching to a different chat
@@ -82,7 +84,7 @@ private:
     int estimateTokenCountUnlocked() const;
     void truncateIfNeededUnlocked();
     bool saveUnlocked(const std::string& filepath) const;
-    bool loadUnlocked(const std::string& filepath);
+    PersistenceLoadResult loadUnlocked(const std::string& filepath);
     void clearHistoryUnlocked();
 
     std::vector<ChatMessage> messages_;

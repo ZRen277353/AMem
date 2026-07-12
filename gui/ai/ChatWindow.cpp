@@ -377,15 +377,29 @@ ChatWindow::ChatWindow()
             }
         }
     }
-    keyStore.loadFromFile(kConfigFile);
-    keyStore.seedDefaultsIfEmpty();
-    keyStore.saveToFile(kConfigFile);
+    const PersistenceLoadResult keyLoad = keyStore.loadFromFile(kConfigFile);
+    if (keyLoad.status == PersistenceLoadStatus::Missing) {
+        keyStore.seedDefaultsIfEmpty();
+        if (!keyStore.saveToFile(kConfigFile)) {
+            Gui::log("[AI Chat] could not create missing '%s'", kConfigFile);
+        }
+    } else if (keyLoad.failed()) {
+        Gui::log("[AI Chat] preserved %s '%s': %s",
+                 persistenceLoadStatusName(keyLoad.status),
+                 kConfigFile, keyLoad.message.c_str());
+    }
 
     // Load (or create with defaults) the plain-JSON user settings file.
     // This is separate from the DPAPI-encrypted key store so users can
     // hand-edit non-secret fields like the system prompt or proxy.
     auto& aiSettings = AiSettings::getInstance();
-    aiSettings.loadOrDefault(kSettingsFile);
+    const PersistenceLoadResult settingsLoad =
+        aiSettings.loadOrDefault(kSettingsFile);
+    if (settingsLoad.failed()) {
+        Gui::log("[AI Chat] preserved %s '%s': %s",
+                 persistenceLoadStatusName(settingsLoad.status),
+                 kSettingsFile, settingsLoad.message.c_str());
+    }
     AiSettingsData settingsSnapshot = aiSettings.get();
 
     // On a fresh install (or if the user cleared the field), seed the
@@ -457,14 +471,27 @@ ChatWindow::ChatWindow()
     // which session id to load here. Brand-new installs get a fresh
     // empty session created on the fly.
     auto& sm = SessionManager::getInstance();
-    sm.init(kSessionsDir, kSessionFile);
+    const PersistenceLoadResult indexLoad = sm.init(kSessionsDir, kSessionFile);
+    if (indexLoad.status == PersistenceLoadStatus::Recovered) {
+        Gui::log("[AI Chat] %s", indexLoad.message.c_str());
+    } else if (indexLoad.failed()) {
+        Gui::log("[AI Chat] session index %s: %s",
+                 persistenceLoadStatusName(indexLoad.status),
+                 indexLoad.message.c_str());
+    }
     activeSessionId_ = sm.activeId();
     if (activeSessionId_.empty()) {
         activeSessionId_ = sm.create();
     }
     const std::string sessionPath = sm.pathFor(activeSessionId_);
     if (!sessionPath.empty()) {
-        session_.load(sessionPath);
+        const PersistenceLoadResult sessionLoad = session_.load(sessionPath);
+        if (sessionLoad.failed()) {
+            Gui::log("[AI Chat] active session was not loaded; original file is preserved");
+            activeSessionId_ = sm.create();
+            const std::string freshPath = sm.pathFor(activeSessionId_);
+            session_.load(freshPath);
+        }
     }
 }
 
@@ -478,11 +505,7 @@ ChatWindow::~ChatWindow() {
     // Best-effort persist on shutdown. addMessage() already auto-persists
     // after every append, but saving again here captures any in-memory
     // state changes (e.g. a flushed tail) that predated a final write.
-    const std::string path =
-        SessionManager::getInstance().pathFor(activeSessionId_);
-    if (!path.empty()) {
-        session_.save(path);
-    }
+    session_.saveBound();
 }
 
 unsigned int ChatWindow::getWindowFlags() const {
@@ -691,30 +714,27 @@ void ChatWindow::switchToSession(const std::string& id) {
     // Persist whatever's currently in-memory to the old session's file
     // before we clobber the in-memory state.
     auto& sm = SessionManager::getInstance();
-    if (!activeSessionId_.empty()) {
-        const std::string oldPath = sm.pathFor(activeSessionId_);
-        if (!oldPath.empty()) session_.save(oldPath);
-    }
+    session_.saveBound();
 
+    const std::string path = sm.pathFor(id);
+    if (path.empty()) return;
+
+    // load() commits messages and the persistence binding together. On an
+    // invalid/unreadable target it preserves the current session unchanged.
+    const PersistenceLoadResult loaded = session_.load(path);
+    if (loaded.failed()) {
+        Gui::log("[AI Chat] session switch rejected; '%s' is preserved",
+                 path.c_str());
+        return;
+    }
     activeSessionId_ = id;
     sm.setActiveId(id);
-
-    // Replace the in-memory conversation with the selected session's
-    // contents. Use resetInMemory() rather than clearHistory() so the
-    // previous session's persisted file is NOT deleted as a side effect
-    // of this switch. load() will rebind sessionFilePath_ to the new id.
-    session_.resetInMemory();
-    const std::string path = sm.pathFor(id);
-    if (!path.empty()) session_.load(path);
 }
 
 void ChatWindow::createNewSession() {
     auto& sm = SessionManager::getInstance();
     // Persist current session before switching.
-    if (!activeSessionId_.empty()) {
-        const std::string oldPath = sm.pathFor(activeSessionId_);
-        if (!oldPath.empty()) session_.save(oldPath);
-    }
+    session_.saveBound();
 
     const std::string id = sm.create();
     activeSessionId_ = id;
@@ -751,6 +771,7 @@ void ChatWindow::deleteSession(const std::string& id) {
         requestStartMs_ = 0;
         state_ = State::Idle;
         session_.resetInMemory();
+        session_.setSessionFilePath({});
 
         std::string next = sm.activeId();
         if (next.empty()) {
@@ -758,8 +779,14 @@ void ChatWindow::deleteSession(const std::string& id) {
         }
         activeSessionId_ = next;
         const std::string nextPath = sm.pathFor(next);
-        session_.setSessionFilePath(nextPath);
-        session_.load(nextPath);
+        const PersistenceLoadResult loaded = session_.load(nextPath);
+        if (loaded.failed()) {
+            Gui::log("[AI Chat] replacement session was not loaded; '%s' is preserved",
+                     nextPath.c_str());
+            next = sm.create();
+            activeSessionId_ = next;
+            session_.load(sm.pathFor(next));
+        }
     }
 }
 

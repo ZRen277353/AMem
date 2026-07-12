@@ -2,6 +2,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "HttpClient.h"
+#include "Persistence.h"
 
 #include <mutex>
 #include <string>
@@ -52,7 +53,8 @@ public:
 
     // Default filename sits next to ai_config.json so users know the two
     // belong together. Both default paths can be overridden by callers.
-    bool loadFromFile(const std::string& filepath = "ai_settings.json");
+    PersistenceLoadResult loadFromFile(
+        const std::string& filepath = "ai_settings.json");
     bool saveToFile(const std::string& filepath = "ai_settings.json");
 
     // Thread-safe snapshot / replace. Callers should avoid holding onto
@@ -70,9 +72,10 @@ public:
     void setSystemPrompt(const std::string& prompt);
     void setProxy(const ProxyConfig& proxy);
 
-    // Initialize from disk if present; fill in safe defaults otherwise.
-    // Returns true when the file existed and parsed, false otherwise.
-    bool loadOrDefault(const std::string& filepath = "ai_settings.json");
+    // Initialize from disk if present. Only a genuinely missing file is
+    // created from defaults; invalid or unreadable files are preserved.
+    PersistenceLoadResult loadOrDefault(
+        const std::string& filepath = "ai_settings.json");
 
 private:
     AiSettings() = default;
@@ -82,7 +85,9 @@ private:
 
     mutable std::mutex mutex_;
     AiSettingsData data_;
-    std::string lastPath_ = "ai_settings.json";
+    void persistLastPath();
+
+    std::string lastPath_;
 };
 
 } // namespace AI

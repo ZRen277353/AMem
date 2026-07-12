@@ -22,52 +22,108 @@ int clamp(int v, int lo, int hi) {
 
 } // namespace
 
-bool AiSettings::loadFromFile(const std::string& filepath) {
+PersistenceLoadResult AiSettings::loadFromFile(const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastPath_ = filepath;
-
-    std::error_code ec;
-    if (!std::filesystem::exists(filepath, ec)) {
-        // Missing file is not an error; caller gets defaults.
-        return false;
+    JsonDocumentLoadResult document = loadJsonDocument(filepath);
+    if (document.result.status == PersistenceLoadStatus::Missing) {
+        lastPath_ = filepath;
+        return document.result;
     }
-
-    std::ifstream in(filepath, std::ios::binary);
-    if (!in.is_open()) {
-        return false;
-    }
-
-    nlohmann::json root;
-    try {
-        in >> root;
-    } catch (const nlohmann::json::exception&) {
-        return false;
-    }
-    if (!root.is_object()) {
-        return false;
+    if (document.result.failed()) {
+        return document.result;
     }
 
     AiSettingsData loaded;
-    loaded.activeProvider     = root.value("activeProvider", loaded.activeProvider);
-    loaded.executionTimeout   = clamp(root.value("executionTimeout", loaded.executionTimeout), 1, 300);
-    loaded.maxAgentSteps      = clamp(root.value("maxAgentSteps", loaded.maxAgentSteps), 1, 64);
-    loaded.maxToolCallsPerTurn = clamp(root.value("maxToolCallsPerTurn", loaded.maxToolCallsPerTurn), 1, 64);
-    loaded.tokenLimit         = clamp(root.value("tokenLimit", loaded.tokenLimit), 1000, 1000000);
-    loaded.systemPrompt       = root.value("systemPrompt", loaded.systemPrompt);
-    loaded.autoApproveWrites  = root.value("autoApproveWrites", loaded.autoApproveWrites);
+    try {
+        const nlohmann::json& root = document.document;
+        if (!root.is_object()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "settings root must be an object"};
+        }
+        if (root.contains("version") && !root["version"].is_number_integer()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "settings 'version' must be an integer"};
+        }
 
-    if (root.contains("proxy") && root["proxy"].is_object()) {
-        const auto& p = root["proxy"];
-        loaded.proxy.enabled = p.value("enabled", false);
-        loaded.proxy.host    = p.value("host", std::string{});
-        loaded.proxy.port    = clamp(p.value("port", 0), 0, 65535);
+        const auto readString = [&](const char* name,
+                                    std::string& destination) -> bool {
+            const auto field = root.find(name);
+            if (field == root.end()) return true;
+            if (!field->is_string()) return false;
+            destination = field->get<std::string>();
+            return true;
+        };
+        const auto readInt = [&](const char* name, int& destination) -> bool {
+            const auto field = root.find(name);
+            if (field == root.end()) return true;
+            if (!field->is_number_integer()) return false;
+            destination = field->get<int>();
+            return true;
+        };
+        const auto readBool = [&](const char* name, bool& destination) -> bool {
+            const auto field = root.find(name);
+            if (field == root.end()) return true;
+            if (!field->is_boolean()) return false;
+            destination = field->get<bool>();
+            return true;
+        };
+
+        if (!readString("activeProvider", loaded.activeProvider) ||
+            !readInt("executionTimeout", loaded.executionTimeout) ||
+            !readInt("maxAgentSteps", loaded.maxAgentSteps) ||
+            !readInt("maxToolCallsPerTurn", loaded.maxToolCallsPerTurn) ||
+            !readInt("tokenLimit", loaded.tokenLimit) ||
+            !readString("systemPrompt", loaded.systemPrompt) ||
+            !readBool("autoApproveWrites", loaded.autoApproveWrites)) {
+            return {PersistenceLoadStatus::Invalid,
+                    "settings fields have invalid types"};
+        }
+
+        loaded.executionTimeout = clamp(loaded.executionTimeout, 1, 300);
+        loaded.maxAgentSteps = clamp(loaded.maxAgentSteps, 1, 64);
+        loaded.maxToolCallsPerTurn =
+            clamp(loaded.maxToolCallsPerTurn, 1, 64);
+        loaded.tokenLimit = clamp(loaded.tokenLimit, 1000, 1000000);
+
+        const auto proxy = root.find("proxy");
+        if (proxy != root.end()) {
+            if (!proxy->is_object()) {
+                return {PersistenceLoadStatus::Invalid,
+                        "settings 'proxy' must be an object"};
+            }
+            const auto enabled = proxy->find("enabled");
+            const auto host = proxy->find("host");
+            const auto port = proxy->find("port");
+            if ((enabled != proxy->end() && !enabled->is_boolean()) ||
+                (host != proxy->end() && !host->is_string()) ||
+                (port != proxy->end() && !port->is_number_integer())) {
+                return {PersistenceLoadStatus::Invalid,
+                        "proxy fields have invalid types"};
+            }
+            if (enabled != proxy->end()) {
+                loaded.proxy.enabled = enabled->get<bool>();
+            }
+            if (host != proxy->end()) {
+                loaded.proxy.host = host->get<std::string>();
+            }
+            if (port != proxy->end()) {
+                loaded.proxy.port = clamp(port->get<int>(), 0, 65535);
+            }
+        }
+    } catch (const nlohmann::json::exception& error) {
+        return {PersistenceLoadStatus::Invalid,
+                std::string("invalid settings: ") + error.what()};
     }
 
     data_ = std::move(loaded);
-    return true;
+    lastPath_ = filepath;
+    return {PersistenceLoadStatus::Loaded, {}};
 }
 
 bool AiSettings::saveToFile(const std::string& filepath) {
+    if (filepath.empty()) {
+        return false;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     lastPath_ = filepath;
 
@@ -122,7 +178,7 @@ void AiSettings::set(const AiSettingsData& data) {
         data_.tokenLimit       = clamp(data_.tokenLimit, 1000, 1000000);
         data_.proxy.port       = clamp(data_.proxy.port, 0, 65535);
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
 void AiSettings::setActiveProvider(const std::string& name) {
@@ -130,7 +186,7 @@ void AiSettings::setActiveProvider(const std::string& name) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.activeProvider = name;
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
 void AiSettings::setExecutionTimeout(int seconds) {
@@ -138,7 +194,7 @@ void AiSettings::setExecutionTimeout(int seconds) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.executionTimeout = clamp(seconds, 1, 300);
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
 void AiSettings::setTokenLimit(int limit) {
@@ -146,7 +202,7 @@ void AiSettings::setTokenLimit(int limit) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.tokenLimit = clamp(limit, 1000, 1000000);
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
 void AiSettings::setSystemPrompt(const std::string& prompt) {
@@ -154,7 +210,7 @@ void AiSettings::setSystemPrompt(const std::string& prompt) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.systemPrompt = prompt;
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
 void AiSettings::setProxy(const ProxyConfig& proxy) {
@@ -163,14 +219,26 @@ void AiSettings::setProxy(const ProxyConfig& proxy) {
         data_.proxy = proxy;
         data_.proxy.port = clamp(data_.proxy.port, 0, 65535);
     }
-    saveToFile(lastPath_);
+    persistLastPath();
 }
 
-bool AiSettings::loadOrDefault(const std::string& filepath) {
-    const bool loaded = loadFromFile(filepath);
-    if (!loaded) {
-        // Persist defaults so the user sees an editable file on first run.
+void AiSettings::persistLastPath() {
+    std::string filepath;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        filepath = lastPath_;
+    }
+    if (!filepath.empty()) {
         saveToFile(filepath);
+    }
+}
+
+PersistenceLoadResult AiSettings::loadOrDefault(const std::string& filepath) {
+    PersistenceLoadResult loaded = loadFromFile(filepath);
+    if (loaded.status == PersistenceLoadStatus::Missing &&
+        !saveToFile(filepath)) {
+        return {PersistenceLoadStatus::IoError,
+                "could not create missing settings file"};
     }
     return loaded;
 }

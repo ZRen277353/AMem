@@ -10,8 +10,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <system_error>
+#include <unordered_set>
 
 namespace AI {
 
@@ -44,28 +46,109 @@ std::string sanitizeId(const std::string& s) {
     return out;
 }
 
+long long fileTimestamp(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto fileTime = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+        return nowUnixSeconds();
+    }
+    const auto systemTime =
+        std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            fileTime - std::filesystem::file_time_type::clock::now() +
+            std::chrono::system_clock::now());
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        systemTime.time_since_epoch()).count();
+}
+
+bool recoverSessionInfo(const std::filesystem::path& path,
+                        SessionInfo& info) {
+    const std::string id = path.stem().string();
+    if (id.empty() || sanitizeId(id) != id) {
+        return false;
+    }
+
+    JsonDocumentLoadResult document = loadJsonDocument(path);
+    if (document.result.status != PersistenceLoadStatus::Loaded ||
+        !document.document.is_object()) {
+        return false;
+    }
+
+    const auto messages = document.document.find("messages");
+    if (messages != document.document.end() && !messages->is_array()) {
+        return false;
+    }
+
+    std::string firstUserMessage;
+    size_t messageCount = 0;
+    if (messages != document.document.end()) {
+        messageCount = messages->size();
+        for (const auto& message : *messages) {
+            if (!message.is_object()) {
+                return false;
+            }
+            const auto role = message.find("role");
+            const auto content = message.find("content");
+            if ((role != message.end() && !role->is_string()) ||
+                (content != message.end() && !content->is_string())) {
+                return false;
+            }
+            if (firstUserMessage.empty() && role != message.end() &&
+                role->get<std::string>() == "user" &&
+                content != message.end()) {
+                firstUserMessage = content->get<std::string>();
+            }
+        }
+    }
+
+    info.id = id;
+    info.title = firstUserMessage.empty()
+        ? std::string("Recovered session")
+        : SessionManager::deriveTitle(firstUserMessage);
+    info.createdAt = fileTimestamp(path);
+    info.updatedAt = info.createdAt;
+    info.messageCount = static_cast<int>(std::min<size_t>(
+        messageCount,
+        static_cast<size_t>(std::numeric_limits<int>::max())));
+    return true;
+}
+
 } // namespace
 
-void SessionManager::init(const std::string& sessionsDir,
-                          const std::string& legacySessionFile) {
+PersistenceLoadResult SessionManager::init(
+    const std::string& sessionsDir,
+    const std::string& legacySessionFile) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (initialized_) return;
+    if (initialized_) return lastLoadResult_;
 
     dir_       = sessionsDir;
     indexPath_ = dir_ + "/index.json";
 
     std::error_code ec;
-    std::filesystem::create_directories(dir_, ec); // non-fatal if exists
+    std::filesystem::create_directories(dir_, ec);
+    if (ec) {
+        indexWritesEnabled_ = false;
+        lastLoadResult_ = {
+            PersistenceLoadStatus::IoError,
+            "could not create sessions directory: " + ec.message()};
+        initialized_ = true;
+        return lastLoadResult_;
+    }
 
-    // Load index (if any).
-    loadIndexUnlocked();
+    lastLoadResult_ = loadIndexUnlocked();
+    if (lastLoadResult_.status == PersistenceLoadStatus::Invalid ||
+        lastLoadResult_.status == PersistenceLoadStatus::Missing) {
+        lastLoadResult_ = recoverIndexUnlocked(lastLoadResult_);
+    } else if (lastLoadResult_.status == PersistenceLoadStatus::IoError) {
+        indexWritesEnabled_ = false;
+    }
 
     // Legacy migration: promote `ai_session.json` into the new layout exactly
     // once, tracked by the persisted `legacyMigrated_` flag rather than by an
     // empty session list — otherwise a leftover legacy file (e.g. one whose
     // removal failed below) would be re-imported every time the user empties
     // their session list.
-    if (!legacyMigrated_ && !legacySessionFile.empty()) {
+    if (indexWritesEnabled_ && !legacyMigrated_ &&
+        !legacySessionFile.empty()) {
         std::error_code fec;
         if (std::filesystem::exists(legacySessionFile, fec)) {
             SessionInfo info;
@@ -119,6 +202,7 @@ void SessionManager::init(const std::string& sessionsDir,
     }
 
     initialized_ = true;
+    return lastLoadResult_;
 }
 
 std::vector<SessionInfo> SessionManager::list() const {
@@ -261,59 +345,184 @@ std::string SessionManager::deriveTitle(const std::string& firstUserMessage) {
 // Private helpers — mutex held by callers
 // ---------------------------------------------------------------------------
 
-bool SessionManager::loadIndexUnlocked() {
-    sessions_.clear();
-    activeId_.clear();
-    legacyMigrated_ = false;
-
-    std::error_code ec;
-    if (!std::filesystem::exists(indexPath_, ec)) {
-        return false; // fresh install
+PersistenceLoadResult SessionManager::loadIndexUnlocked() {
+    JsonDocumentLoadResult document = loadJsonDocument(indexPath_);
+    if (document.result.status != PersistenceLoadStatus::Loaded) {
+        return document.result;
     }
 
-    std::ifstream in(indexPath_, std::ios::binary);
-    if (!in.is_open()) return false;
-
-    nlohmann::json root;
+    std::vector<SessionInfo> loadedSessions;
+    std::string loadedActiveId;
+    bool loadedLegacyMigrated = false;
     try {
-        in >> root;
-    } catch (const nlohmann::json::exception&) {
-        return false;
-    }
-    if (!root.is_object()) return false;
+        const nlohmann::json& root = document.document;
+        if (!root.is_object()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "session index root must be an object"};
+        }
+        if (root.contains("version") && !root["version"].is_number_integer()) {
+            return {PersistenceLoadStatus::Invalid,
+                    "session index 'version' must be an integer"};
+        }
 
-    activeId_ = sanitizeId(root.value("activeId", std::string{}));
-    if (root.contains("sessions") && root["sessions"].is_array()) {
-        for (const auto& entry : root["sessions"]) {
-            if (!entry.is_object()) continue;
-            SessionInfo info;
-            info.id = sanitizeId(entry.value("id", std::string{}));
-            if (info.id.empty()) continue;
-            info.title        = entry.value("title", std::string{});
-            info.createdAt    = entry.value("createdAt", 0ll);
-            info.updatedAt    = entry.value("updatedAt", 0ll);
-            info.messageCount = entry.value("messageCount", 0);
-            sessions_.push_back(std::move(info));
+        const auto active = root.find("activeId");
+        if (active != root.end()) {
+            if (!active->is_string()) {
+                return {PersistenceLoadStatus::Invalid,
+                        "session index 'activeId' must be a string"};
+            }
+            loadedActiveId = active->get<std::string>();
+            if (sanitizeId(loadedActiveId) != loadedActiveId) {
+                return {PersistenceLoadStatus::Invalid,
+                        "session index contains an unsafe active id"};
+            }
+        }
+
+        const auto sessions = root.find("sessions");
+        if (sessions != root.end()) {
+            if (!sessions->is_array()) {
+                return {PersistenceLoadStatus::Invalid,
+                        "session index 'sessions' must be an array"};
+            }
+
+            std::unordered_set<std::string> ids;
+            for (const auto& entry : *sessions) {
+                if (!entry.is_object()) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "session index entries must be objects"};
+                }
+
+                SessionInfo info;
+                const auto id = entry.find("id");
+                if (id == entry.end() || !id->is_string()) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "session index entry is missing a string id"};
+                }
+                info.id = id->get<std::string>();
+                if (info.id.empty() || sanitizeId(info.id) != info.id ||
+                    !ids.insert(info.id).second) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "session index contains an unsafe or duplicate id"};
+                }
+
+                const auto title = entry.find("title");
+                const auto created = entry.find("createdAt");
+                const auto updated = entry.find("updatedAt");
+                const auto count = entry.find("messageCount");
+                if ((title != entry.end() && !title->is_string()) ||
+                    (created != entry.end() && !created->is_number_integer()) ||
+                    (updated != entry.end() && !updated->is_number_integer()) ||
+                    (count != entry.end() && !count->is_number_integer())) {
+                    return {PersistenceLoadStatus::Invalid,
+                            "session index entry fields have invalid types"};
+                }
+                if (title != entry.end()) info.title = title->get<std::string>();
+                if (created != entry.end()) info.createdAt = created->get<long long>();
+                if (updated != entry.end()) info.updatedAt = updated->get<long long>();
+                if (count != entry.end()) {
+                    info.messageCount = std::max(0, count->get<int>());
+                }
+                loadedSessions.push_back(std::move(info));
+            }
+        }
+
+        const auto migrated = root.find("legacyMigrated");
+        if (migrated != root.end()) {
+            if (!migrated->is_boolean()) {
+                return {PersistenceLoadStatus::Invalid,
+                        "session index 'legacyMigrated' must be boolean"};
+            }
+            loadedLegacyMigrated = migrated->get<bool>();
+        } else {
+            loadedLegacyMigrated = !loadedSessions.empty();
+        }
+    } catch (const nlohmann::json::exception& error) {
+        return {PersistenceLoadStatus::Invalid,
+                std::string("invalid session index: ") + error.what()};
+    }
+
+    if (!loadedActiveId.empty()) {
+        const auto active = std::find_if(
+            loadedSessions.begin(), loadedSessions.end(),
+            [&](const SessionInfo& info) { return info.id == loadedActiveId; });
+        if (active == loadedSessions.end()) {
+            loadedActiveId.clear();
         }
     }
 
-    // Default the migration flag to "already migrated" when an existing index
-    // has sessions but no explicit flag — those users predate this field and
-    // must not have a leftover legacy file re-imported. A flagless empty index
-    // (fresh install / all sessions deleted) defaults to not-migrated.
-    legacyMigrated_ = root.value("legacyMigrated", !sessions_.empty());
+    sessions_ = std::move(loadedSessions);
+    activeId_ = std::move(loadedActiveId);
+    legacyMigrated_ = loadedLegacyMigrated;
+    return {PersistenceLoadStatus::Loaded, {}};
+}
 
-    // If the index referenced an active id that no longer exists, clear
-    // it so the caller can pick a sane default.
-    if (!activeId_.empty()) {
-        auto it = std::find_if(sessions_.begin(), sessions_.end(),
-                               [&](const SessionInfo& s) { return s.id == activeId_; });
-        if (it == sessions_.end()) activeId_.clear();
+PersistenceLoadResult SessionManager::recoverIndexUnlocked(
+    const PersistenceLoadResult& failure) {
+    std::filesystem::path backupPath;
+    if (failure.status == PersistenceLoadStatus::Invalid) {
+        std::string backupError;
+        if (!preserveInvalidFile(indexPath_, backupPath, backupError)) {
+            indexWritesEnabled_ = false;
+            return {PersistenceLoadStatus::Invalid,
+                    failure.message + "; could not preserve index: " +
+                        backupError};
+        }
     }
-    return true;
+
+    std::vector<SessionInfo> recovered;
+    std::error_code ec;
+    std::filesystem::directory_iterator iterator(dir_, ec);
+    if (ec) {
+        indexWritesEnabled_ = false;
+        return {PersistenceLoadStatus::IoError,
+                "could not scan sessions directory: " + ec.message()};
+    }
+
+    for (const auto& entry : iterator) {
+        ec.clear();
+        if (!entry.is_regular_file(ec) || ec ||
+            entry.path().extension() != ".json" ||
+            entry.path().filename() ==
+                std::filesystem::path(indexPath_).filename()) {
+            continue;
+        }
+
+        SessionInfo info;
+        if (recoverSessionInfo(entry.path(), info)) {
+            recovered.push_back(std::move(info));
+        }
+    }
+
+    sessions_ = std::move(recovered);
+    activeId_.clear();
+    long long newest = std::numeric_limits<long long>::min();
+    for (const auto& session : sessions_) {
+        if (session.updatedAt >= newest) {
+            newest = session.updatedAt;
+            activeId_ = session.id;
+        }
+    }
+    legacyMigrated_ = !sessions_.empty();
+
+    if (failure.status == PersistenceLoadStatus::Missing && sessions_.empty()) {
+        return failure;
+    }
+
+    std::string message = "rebuilt session index from " +
+        std::to_string(sessions_.size()) + " session file(s)";
+    if (!backupPath.empty()) {
+        message += "; corrupt index preserved as " + backupPath.string();
+    }
+    if (!saveIndexUnlocked()) {
+        message += "; rebuilt index could not be persisted";
+    }
+    return {PersistenceLoadStatus::Recovered, std::move(message)};
 }
 
 bool SessionManager::saveIndexUnlocked() const {
+    if (!indexWritesEnabled_ || indexPath_.empty()) {
+        return false;
+    }
     nlohmann::json root = nlohmann::json::object();
     root["version"]        = kIndexVersion;
     root["activeId"]       = activeId_;
