@@ -1275,6 +1275,149 @@ Result<SymbolPage> MemService::listSymbols(
         std::move(page), elapsedMilliseconds(start));
 }
 
+Result<SymbolTable> MemService::loadSymbolTable(
+    const OperationContext& context,
+    const SymbolTableRequest& request) {
+    const auto start = Clock::now();
+    if (request.moduleName.size() > kMaxTextParameterBytes) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const std::string moduleQuery =
+        lowerAscii(trimAscii(request.moduleName));
+    if (moduleQuery.empty()) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name must not be empty",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> symbolLock(symbolMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<SymbolTable>(*error, start);
+    }
+    auto transaction = backend_.beginSymbolTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<SymbolTable>(*error, start);
+        }
+        return Result<SymbolTable>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    std::vector<ModuleInfo> modules;
+    if (!transaction->fetchModules(modules)) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch modules inside the symbol transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<SymbolTable>(*error, start);
+    }
+    if (const auto error = validateModules(modules)) {
+        return failureFrom<SymbolTable>(*error, start);
+    }
+    const ModuleInfo* matched = nullptr;
+    if (const auto error = findResolvedModule(
+            modules, moduleQuery, matched)) {
+        return failureFrom<SymbolTable>(*error, start);
+    }
+
+    int initializedTotal = 0;
+    if (!transaction->initializeSymbols(matched->base, initializedTotal)) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::ProtocolError,
+            "failed to initialize the module symbol table",
+            true,
+            elapsedMilliseconds(start));
+    }
+    const uint64_t completedEpoch = transaction->symbolEpoch();
+    if (initializedTotal < 0 ||
+        static_cast<size_t>(initializedTotal) > kMaxSymbolResultCount) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::ProtocolError,
+            "symbol table returned an invalid total count",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    SymbolTable table;
+    const size_t total = static_cast<size_t>(initializedTotal);
+    table.items.reserve(total);
+    size_t totalNameBytes = 0;
+    while (table.items.size() < total) {
+        if (const auto error = validateContext(
+                context, true, false, true)) {
+            return failureFrom<SymbolTable>(*error, start);
+        }
+
+        const size_t remaining = total - table.items.size();
+        const size_t pageLimit =
+            (std::min)(remaining, kMaxSymbolPageSize);
+        int fetchedTotal = 0;
+        std::vector<SymbolInfo> symbols;
+        if (!transaction->fetchSymbols(table.items.size(),
+                                       pageLimit,
+                                       symbols,
+                                       fetchedTotal)) {
+            return Result<SymbolTable>::failure(
+                ErrorCode::ProtocolError,
+                "failed to fetch the complete symbol table",
+                true,
+                elapsedMilliseconds(start));
+        }
+        if (fetchedTotal != initializedTotal || symbols.empty() ||
+            symbols.size() > pageLimit) {
+            return Result<SymbolTable>::failure(
+                ErrorCode::ProtocolError,
+                "symbol table page is inconsistent with the initialized table",
+                false,
+                elapsedMilliseconds(start));
+        }
+        for (auto& symbol : symbols) {
+            if (symbol.name.size() > kMaxSymbolNameBytes ||
+                totalNameBytes >
+                    kMaxSymbolTableNameBytes - symbol.name.size()) {
+                return Result<SymbolTable>::failure(
+                    ErrorCode::ProtocolError,
+                    "symbol table exceeds the total name-size limit",
+                    false,
+                    elapsedMilliseconds(start));
+            }
+            totalNameBytes += symbol.name.size();
+            table.items.push_back(std::move(symbol));
+        }
+    }
+
+    table.session.epoch = completedEpoch;
+    table.session.module = *matched;
+    table.session.total = total;
+    table.session.target = *context.target;
+
+    transaction.reset();
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<SymbolTable>(*error, start);
+    }
+    if (backend_.symbolEpoch() != completedEpoch) {
+        return Result<SymbolTable>::failure(
+            ErrorCode::SymbolSessionChanged,
+            "symbol table changed before the complete result was committed",
+            false,
+            elapsedMilliseconds(start));
+    }
+    return Result<SymbolTable>::success(
+        std::move(table), elapsedMilliseconds(start));
+}
+
 Result<BreakpointMutationReceipt> MemService::mutateBreakpoint(
     const OperationContext& context,
     uint64_t address,

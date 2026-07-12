@@ -1,5 +1,6 @@
 #include "AppContext.h"
 #include "Gui.h"
+#include "../mem/IMemService.h"
 #include "../socket/client_singleton.h"
 #include "../imgui/imgui.h"
 #include <algorithm>
@@ -179,7 +180,10 @@ std::string AppContext::ModuleCache::formatWithModule(uint64_t addr) {
     return buf;
 }
 
-bool AppContext::ModuleCache::ensureSymbolListCached(const ModuleInfoItem& module, std::vector<SymbolInfoItem>& outSymbols) {
+bool AppContext::ModuleCache::ensureSymbolListCached(
+    const ModuleInfoItem& module,
+    Mem::IMemService& service,
+    std::vector<SymbolInfoItem>& outSymbols) {
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto it = symbolCacheByModuleBase.find(module.base);
@@ -189,32 +193,22 @@ bool AppContext::ModuleCache::ensureSymbolListCached(const ModuleInfoItem& modul
         }
     }
 
-    int totalCount = 0;
-    if (!SymbolInit(module.base, totalCount) || totalCount <= 0) {
+    Mem::SymbolTableRequest request;
+    request.moduleName = module.name;
+    auto response = service.loadSymbolTable(
+        service.captureContext(true), request);
+    if (!response.ok() || response.value().items.empty() ||
+        response.value().session.module.base != module.base) {
         return false;
     }
 
-    constexpr int kBatchSize = 256;
+    const Mem::TargetSnapshot expectedTarget = response.value().session.target;
     std::vector<SymbolInfoItem> loadedSymbols;
-    loadedSymbols.reserve(totalCount);
-
-    for (int offset = 0; offset < totalCount; offset += kBatchSize) {
-        int requestCount = (kBatchSize < (totalCount - offset)) ? kBatchSize : (totalCount - offset);
-        int fetchedTotalCount = totalCount;
-        std::vector<std::pair<uint64_t, std::string>> symbols;
-        if (!SymbolGetList(offset, requestCount, symbols, &fetchedTotalCount)) {
-            return false;
-        }
-
-        for (const auto& symbol : symbols) {
-            if (symbol.second.empty()) {
-                continue;
-            }
-
-            SymbolInfoItem item;
-            item.address = symbol.first;
-            item.name = symbol.second;
-            loadedSymbols.push_back(std::move(item));
+    loadedSymbols.reserve(response.value().items.size());
+    for (auto& symbol : response.value().items) {
+        if (!symbol.name.empty()) {
+            loadedSymbols.push_back(
+                SymbolInfoItem{symbol.address, std::move(symbol.name)});
         }
     }
 
@@ -224,8 +218,20 @@ bool AppContext::ModuleCache::ensureSymbolListCached(const ModuleInfoItem& modul
 
     {
         std::lock_guard<std::mutex> lock(mutex);
+        if (!AppContext::Get().matchesStableTarget(
+                expectedTarget, expectedTarget.connectionGeneration)) {
+            return false;
+        }
+        const auto currentModule = std::find_if(
+            modules.begin(), modules.end(),
+            [&](const ModuleInfoItem& item) {
+                return item.base == module.base && item.name == module.name;
+            });
+        if (currentModule == modules.end()) {
+            return false;
+        }
         auto& cacheEntry = symbolCacheByModuleBase[module.base];
-        cacheEntry.symbols = loadedSymbols;
+        cacheEntry.symbols = std::move(loadedSymbols);
         cacheEntry.lastMatchedIndex = 0;
         cacheEntry.valid = true;
         outSymbols = cacheEntry.symbols;
@@ -233,7 +239,11 @@ bool AppContext::ModuleCache::ensureSymbolListCached(const ModuleInfoItem& modul
     return true;
 }
 
-bool AppContext::ModuleCache::tryFindContainingSymbol(uint64_t addr, SymbolInfoItem& outSymbol, uint64_t& outOffset) {
+bool AppContext::ModuleCache::tryFindContainingSymbol(
+    uint64_t addr,
+    Mem::IMemService& service,
+    SymbolInfoItem& outSymbol,
+    uint64_t& outOffset) {
     outSymbol = SymbolInfoItem{};
     outOffset = 0;
 
@@ -243,7 +253,7 @@ bool AppContext::ModuleCache::tryFindContainingSymbol(uint64_t addr, SymbolInfoI
     }
 
     std::vector<SymbolInfoItem> symbols;
-    if (!ensureSymbolListCached(mod, symbols) || symbols.empty()) {
+    if (!ensureSymbolListCached(mod, service, symbols) || symbols.empty()) {
         return false;
     }
 
@@ -291,10 +301,12 @@ bool AppContext::ModuleCache::tryFindContainingSymbol(uint64_t addr, SymbolInfoI
     return true;
 }
 
-std::string AppContext::ModuleCache::formatWithSymbol(uint64_t addr) {
+std::string AppContext::ModuleCache::formatWithSymbol(
+    uint64_t addr, Mem::IMemService& service) {
     SymbolInfoItem symbol;
     uint64_t symbolOffset = 0;
-    if (!tryFindContainingSymbol(addr, symbol, symbolOffset)) {
+    if (!tryFindContainingSymbol(
+            addr, service, symbol, symbolOffset)) {
         return "";
     }
 
@@ -307,9 +319,10 @@ std::string AppContext::ModuleCache::formatWithSymbol(uint64_t addr) {
     return buf;
 }
 
-std::string AppContext::ModuleCache::formatAddressWithModuleAndSymbol(uint64_t addr) {
+std::string AppContext::ModuleCache::formatAddressWithModuleAndSymbol(
+    uint64_t addr, Mem::IMemService& service) {
     std::string moduleText = formatWithModule(addr);
-    std::string symbolText = formatWithSymbol(addr);
+    std::string symbolText = formatWithSymbol(addr, service);
     if (symbolText.empty()) {
         return moduleText;
     }

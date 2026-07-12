@@ -86,7 +86,8 @@ bool MemoryViewerWindow::parseAddressExpression(const char* expr, uint64_t& resu
     return true;
 }
 
-MemoryViewerWindow::MemoryViewerWindow()
+MemoryViewerWindow::MemoryViewerWindow(Mem::IMemService& memService)
+    : memService_(memService)
 {
     name = "内存查看器";
     loadStructDefinitions();

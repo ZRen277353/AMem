@@ -9,6 +9,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace Mem {
+class IMemService;
+}
+
 class AppContext {
 public:
     static AppContext& Get() {
@@ -65,10 +69,15 @@ public:
         void refresh();
         ModuleInfoItem findByAddress(uint64_t addr);  // 返回值拷贝，避免悬空指针
         std::string formatWithModule(uint64_t addr);
-        std::string formatWithSymbol(uint64_t addr);
-        std::string formatAddressWithModuleAndSymbol(uint64_t addr);
-        bool tryFindContainingSymbol(uint64_t addr, SymbolInfoItem& outSymbol, uint64_t& outOffset);
-        bool ensureSymbolListCached(const ModuleInfoItem& module, std::vector<SymbolInfoItem>& outSymbols);
+        std::string formatWithSymbol(uint64_t addr, Mem::IMemService& service);
+        std::string formatAddressWithModuleAndSymbol(
+            uint64_t addr, Mem::IMemService& service);
+        bool tryFindContainingSymbol(
+            uint64_t addr, Mem::IMemService& service,
+            SymbolInfoItem& outSymbol, uint64_t& outOffset);
+        bool ensureSymbolListCached(
+            const ModuleInfoItem& module, Mem::IMemService& service,
+            std::vector<SymbolInfoItem>& outSymbols);
         void invalidate() {
             std::lock_guard<std::mutex> lock(mutex);
             valid = false;

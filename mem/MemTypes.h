@@ -180,6 +180,10 @@ struct SymbolListRequest {
     size_t limit = 100;
 };
 
+struct SymbolTableRequest {
+    std::string moduleName;
+};
+
 struct SymbolInfo {
     uint64_t address = 0;
     std::string name;
@@ -203,6 +207,11 @@ struct SymbolPage {
     size_t total = 0;
     size_t offset = 0;
     std::optional<size_t> nextOffset;
+    SymbolSessionSnapshot session;
+};
+
+struct SymbolTable {
+    std::vector<SymbolInfo> items;
     SymbolSessionSnapshot session;
 };
 
@@ -473,6 +482,7 @@ inline constexpr size_t kMaxSymbolPageSize = 1000;
 inline constexpr size_t kMaxSymbolResultCount = 1000000;
 inline constexpr size_t kMaxSymbolNameBytes = 64u * 1024u;
 inline constexpr size_t kMaxSymbolPageNameBytes = 4u * 1024u * 1024u;
+inline constexpr size_t kMaxSymbolTableNameBytes = 64u * 1024u * 1024u;
 inline constexpr size_t kMaxAgentBreakpointHitBatchSize = 100;
 inline constexpr size_t kMaxBreakpointHitBatchSize = 50000;
 inline constexpr size_t kMaxBreakpointHitCount = 100000;

@@ -38,6 +38,9 @@ public:
     virtual Result<SymbolPage> listSymbols(
         const OperationContext& context,
         const SymbolListRequest& request) = 0;
+    virtual Result<SymbolTable> loadSymbolTable(
+        const OperationContext& context,
+        const SymbolTableRequest& request) = 0;
     virtual Result<BreakpointMutationReceipt> setBreakpoint(
         const OperationContext& context,
         const BreakpointSetRequest& request) = 0;

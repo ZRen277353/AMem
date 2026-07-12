@@ -1530,6 +1530,43 @@ void testSymbolSessionService() {
                backend.beginSymbolTransactionCalls == transactionsBeforeInvalid,
            "symbol continuation must require an explicit epoch before backend access");
 
+    FakeBackend tableBackend;
+    tableBackend.symbolData.clear();
+    for (size_t index = 0; index < 1005; ++index) {
+        tableBackend.symbolData.push_back(Mem::SymbolInfo{
+            0x5000 + static_cast<uint64_t>(index * 4),
+            "Symbol" + std::to_string(index),
+        });
+    }
+    Mem::MemService tableService(tableBackend);
+    Mem::SymbolTableRequest tableRequest;
+    tableRequest.moduleName = "libgame.so";
+    const auto table = tableService.loadSymbolTable(
+        tableService.captureContext(true), tableRequest);
+    expect(table.ok() && table.value().items.size() == 1005 &&
+               table.value().items.front().name == "Symbol0" &&
+               table.value().items.back().name == "Symbol1004" &&
+               table.value().session.total == 1005 &&
+               table.value().session.epoch == 1 &&
+               tableBackend.beginSymbolTransactionCalls == 1 &&
+               tableBackend.symbolInitializeCalls == 1 &&
+               tableBackend.symbolFetchCalls == 2 &&
+               tableBackend.allTransactionOperationsGuarded,
+           "complete symbol tables must initialize once and fetch every page under one transaction");
+
+    FakeBackend oversizedNameBackend;
+    oversizedNameBackend.symbolData = {
+        Mem::SymbolInfo{0x5100,
+                        std::string(Mem::kMaxSymbolNameBytes + 1, 'x')},
+    };
+    Mem::MemService oversizedNameService(oversizedNameBackend);
+    const auto oversizedNameTable = oversizedNameService.loadSymbolTable(
+        oversizedNameService.captureContext(true), tableRequest);
+    expect(!oversizedNameTable.ok() &&
+               oversizedNameTable.error().code ==
+                   Mem::ErrorCode::ProtocolError,
+           "complete symbol tables must reject oversized names before caching");
+
     Mem::SymbolResolveRequest resolveRequest;
     resolveRequest.moduleName = "libgame.so";
     resolveRequest.symbolName = "GameUpdate";
@@ -1563,6 +1600,16 @@ void testSymbolSessionService() {
                changedTarget.error().code == Mem::ErrorCode::TargetChanged &&
                changedTargetBackend.symbolFetchCalls == 1,
            "symbol list must reject the fetched page after the transaction releases and the target changed");
+
+    FakeBackend changedTableTargetBackend;
+    Mem::MemService changedTableTargetService(changedTableTargetBackend);
+    changedTableTargetBackend.changeTargetAfterSymbol = true;
+    const auto changedTableTarget = changedTableTargetService.loadSymbolTable(
+        changedTableTargetService.captureContext(true), tableRequest);
+    expect(!changedTableTarget.ok() &&
+               changedTableTarget.error().code ==
+                   Mem::ErrorCode::TargetChanged,
+           "complete symbol tables must reject results after target replacement");
 
     FakeBackend changedGenerationBackend;
     Mem::MemService changedGenerationService(changedGenerationBackend);

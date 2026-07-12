@@ -9,6 +9,10 @@
 #include <limits>
 #include <memory>
 
+namespace Mem {
+class IMemService;
+}
+
 // 数据结构字段类型枚举
 enum class FieldType {
     BYTE = 0,
@@ -156,7 +160,7 @@ enum class AsciiDisplayMode {
 
 class MemoryViewerWindow : public Window {
 public:
-    MemoryViewerWindow();
+    explicit MemoryViewerWindow(Mem::IMemService& memService);
     ~MemoryViewerWindow();
 
     void onDraw() override;
@@ -165,6 +169,7 @@ public:
     void jumpToAddress(uint64_t address);
 
 private:
+    Mem::IMemService& memService_;
     int navSubscriptionId = 0;  // EventBus 订阅 ID
     uint64_t observedProcessRevision = 0;
     static bool parseAddressExpression(const char* expr, uint64_t& result);

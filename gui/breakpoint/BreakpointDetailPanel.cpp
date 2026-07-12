@@ -457,7 +457,9 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                     }
                     
                     ImGui::TableSetColumnIndex(1);
-                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(stat.pc_address);
+                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache
+                        .formatAddressWithModuleAndSymbol(
+                            stat.pc_address, memService_);
                     char pcAddrStr[512];
                     snprintf(pcAddrStr, sizeof(pcAddrStr), "%s", pcAddrDisplayStr.c_str());
                     if (ImGui::Selectable(pcAddrStr, isSelected, ImGuiSelectableFlags_SpanAllColumns)) {
@@ -518,7 +520,9 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                 bool foundHit = false;
                 for (int i = (int)bp.hitHistory.size() - 1; i >= 0; i--) {
                     if (bp.hitHistory[i].programCounter == detailWindow.selectedPCAddress) {
-                        std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(detailWindow.selectedPCAddress);
+                        std::string pcAddrDisplayStr = AppContext::Get().moduleCache
+                            .formatAddressWithModuleAndSymbol(
+                                detailWindow.selectedPCAddress, memService_);
                         ImGui::Text("PC地址: %s 的详细信息", pcAddrDisplayStr.c_str());
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("原始地址: 0x%llX", detailWindow.selectedPCAddress);
@@ -534,7 +538,10 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                             
                             if (detailWindow.showDisassembly && ImGui::BeginTabItem("反汇编")) {
                                 if (disassemblyInitialized && disassemblyHelper) {
-                                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(detailWindow.selectedPCAddress);
+                                    std::string pcAddrDisplayStr = AppContext::Get().moduleCache
+                                        .formatAddressWithModuleAndSymbol(
+                                            detailWindow.selectedPCAddress,
+                                            memService_);
                                     ImGui::TextColored(ColorScheme::SuccessLight, "PC: %s 的反汇编", pcAddrDisplayStr.c_str());
                                     ImGui::Separator();
                                     
@@ -1548,7 +1555,9 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
             
             // 地址列
             ImGui::TableSetColumnIndex(1);
-            std::string addrDisplayStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(instr.address);
+            std::string addrDisplayStr = AppContext::Get().moduleCache
+                .formatAddressWithModuleAndSymbol(
+                    instr.address, memService_);
             char rawAddrStr[32];
             snprintf(rawAddrStr, sizeof(rawAddrStr), "0x%llX", instr.address);
             

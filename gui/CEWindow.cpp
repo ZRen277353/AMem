@@ -250,7 +250,7 @@ void CEWindow::openScanWindow()
 
 void CEWindow::openMemoryViewerWindow()
 {
-    Gui::getOrCreate<MemoryViewerWindow>();
+    Gui::getOrCreate<MemoryViewerWindow>(Mem::getSystemMemService());
 }
 
 void CEWindow::openBreakpointWindow()

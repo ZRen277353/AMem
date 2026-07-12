@@ -11,7 +11,8 @@
 
 std::string MemoryViewerWindow::formatAddressWithOffset(uint64_t address)
 {
-    std::string baseText = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(address);
+    std::string baseText = AppContext::Get().moduleCache
+        .formatAddressWithModuleAndSymbol(address, memService_);
 
     char buffer[768];
     snprintf(buffer, sizeof(buffer), "0x%llX [%s]", address, baseText.c_str());
@@ -354,7 +355,9 @@ void MemoryViewerWindow::drawDisassemblyPanel()
                 bool isHighlightAddress = (insn.address == disassemblyAddress);
                 if (isHighlightAddress) {
                     // 高亮地址：模块名+偏移量=地址
-                    addrStr = AppContext::Get().moduleCache.formatAddressWithModuleAndSymbol(insn.address);
+                    addrStr = AppContext::Get().moduleCache
+                        .formatAddressWithModuleAndSymbol(
+                            insn.address, memService_);
                     // 使用更明显的颜色高亮显示
                     ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::WarningBright);
                     ImGui::Text("%s", addrStr.c_str());
@@ -398,4 +401,3 @@ void MemoryViewerWindow::drawDisassemblyPanel()
         ImGui::EndTable();
     }
 }
-

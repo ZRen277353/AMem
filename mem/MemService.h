@@ -42,6 +42,9 @@ public:
     Result<SymbolPage> listSymbols(
         const OperationContext& context,
         const SymbolListRequest& request) override;
+    Result<SymbolTable> loadSymbolTable(
+        const OperationContext& context,
+        const SymbolTableRequest& request) override;
     Result<BreakpointMutationReceipt> setBreakpoint(
         const OperationContext& context,
         const BreakpointSetRequest& request) override;
