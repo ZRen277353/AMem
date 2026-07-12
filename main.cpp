@@ -129,7 +129,10 @@ int main(int, char**)
 #ifdef HAVE_AI_CHAT
     // Stop model delivery, then cancel and join the owned tool worker before
     // closing the device session it may still be using.
-    AI::HttpClient::getInstance().shutdown();
+    if (!AI::HttpClient::getInstance().shutdown()) {
+        Gui::log("[AI Chat] HTTP shutdown was invoked from its own worker; "
+                 "provider callbacks are not fully drained");
+    }
     AI::AgentTaskExecutor::getInstance().shutdown();
 #endif
 

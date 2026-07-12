@@ -14,10 +14,49 @@
 #include <exception>
 #include <sstream>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace AI {
 
 namespace {
+
+thread_local const HttpClient* currentHttpClientWorker = nullptr;
+
+class HttpWorkerThreadMarker {
+public:
+    explicit HttpWorkerThreadMarker(const HttpClient* owner)
+        : previous_(currentHttpClientWorker) {
+        currentHttpClientWorker = owner;
+    }
+
+    ~HttpWorkerThreadMarker() {
+        currentHttpClientWorker = previous_;
+    }
+
+private:
+    const HttpClient* previous_;
+};
+
+template <typename Callback>
+class ScopeExit {
+public:
+    explicit ScopeExit(Callback callback)
+        : callback_(std::move(callback)) {}
+
+    ~ScopeExit() { callback_(); }
+
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+
+private:
+    Callback callback_;
+};
+
+template <typename Callback>
+ScopeExit<Callback> makeScopeExit(Callback callback) {
+    return ScopeExit<Callback>(std::move(callback));
+}
 
 // 解析 URL：提取 scheme/host/port/path
 // 返回 cpp-httplib Client 可接受的 base ("scheme://host[:port]") 和 path
@@ -120,23 +159,93 @@ ProxyConfig HttpClient::getProxy() const {
 }
 
 HttpClient::~HttpClient() {
-    shutdown();
+    (void)shutdown();
 }
 
-void HttpClient::shutdown() {
-    std::unique_lock<std::mutex> lock(activeMutex_);
-    shuttingDown_ = true;
-    for (auto& kv : activeRequests_) {
-        if (kv.second) {
-            kv.second->store(true);
+bool HttpClient::shutdown() {
+    if (currentHttpClientWorker == this) {
+        return false;
+    }
+
+    std::vector<std::function<void()>> stopCallbacks;
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        shuttingDown_ = true;
+        stopCallbacks.reserve(activeRequests_.size());
+        for (auto& entry : activeRequests_) {
+            ActiveRequest& request = *entry.second;
+            if (request.cancelToken) {
+                request.cancelToken->store(true);
+            }
+            if (!request.completed && request.stopTransport) {
+                stopCallbacks.push_back(request.stopTransport);
+            }
         }
     }
-    // Detached workers can't be joined, so give them a bounded window to
-    // observe cancellation and finish touching shared state. A worker blocked
-    // in a slow network read may exceed this; the wait is a best-effort guard
-    // against use-after-free of this singleton at exit, not a hard guarantee.
-    activeCv_.wait_for(lock, std::chrono::seconds(3),
-                       [this] { return inFlight_ == 0; });
+
+    for (auto& stop : stopCallbacks) {
+        try {
+            stop();
+        } catch (...) {
+            // Transport interruption is best effort; joining below is the
+            // ownership guarantee and remains mandatory.
+        }
+    }
+
+    std::lock_guard<std::mutex> joinLock(workerJoinMutex_);
+    std::vector<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        workers.reserve(activeRequests_.size());
+        for (auto& entry : activeRequests_) {
+            if (entry.second->worker.joinable()) {
+                workers.push_back(std::move(entry.second->worker));
+            }
+        }
+        activeRequests_.clear();
+    }
+
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    return true;
+}
+
+void HttpClient::markRequestCompleted(uint64_t requestId) {
+    std::function<void()> releaseTransport;
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        auto it = activeRequests_.find(requestId);
+        if (it == activeRequests_.end()) {
+            return;
+        }
+        releaseTransport = std::move(it->second->stopTransport);
+        it->second->completed = true;
+    }
+    // Destroy the captured httplib::Client outside activeMutex_.
+    releaseTransport = {};
+}
+
+void HttpClient::reapCompletedWorkers() {
+    std::lock_guard<std::mutex> joinLock(workerJoinMutex_);
+    std::vector<std::thread> completed;
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        for (auto it = activeRequests_.begin(); it != activeRequests_.end();) {
+            if (!it->second->completed) {
+                ++it;
+                continue;
+            }
+            if (it->second->worker.joinable()) {
+                completed.push_back(std::move(it->second->worker));
+            }
+            it = activeRequests_.erase(it);
+        }
+    }
+
+    for (std::thread& worker : completed) {
+        worker.join();
+    }
 }
 
 uint64_t HttpClient::postAsync(const std::string& url,
@@ -145,20 +254,17 @@ uint64_t HttpClient::postAsync(const std::string& url,
                                SSECallback onSSE,
                                HttpCompletionCallback onComplete,
                                CancellationToken cancelToken) {
-    const uint64_t requestId = nextRequestId_.fetch_add(1);
-    if (!cancelToken) {
-        cancelToken = std::make_shared<std::atomic<bool>>(false);
-    }
-
     {
         std::lock_guard<std::mutex> lock(activeMutex_);
         if (shuttingDown_) {
-            // App is tearing down; don't launch new work that could touch
-            // singletons mid-destruction. Caller treats id 0 as not dispatched.
             return 0;
         }
-        activeRequests_[requestId] = cancelToken;
-        ++inFlight_;
+    }
+    reapCompletedWorkers();
+
+    const uint64_t requestId = nextRequestId_.fetch_add(1);
+    if (!cancelToken) {
+        cancelToken = std::make_shared<std::atomic<bool>>(false);
     }
 
     // 捕获当前配置快照，避免后台线程读取时与 setter 竞争
@@ -172,30 +278,21 @@ uint64_t HttpClient::postAsync(const std::string& url,
         proxySnap = proxy_;
     }
 
-    std::thread worker([this,
-                        requestId,
-                        url,
-                        headers,
-                        body,
-                        onSSE = std::move(onSSE),
-                        onComplete = std::move(onComplete),
-                        cancelToken = std::move(cancelToken),
-                        connTimeout,
-                        readTimeout,
-                        proxySnap]() mutable {
+    auto workerTask = [this,
+                       requestId,
+                       url,
+                       headers,
+                       body,
+                       onSSE = std::move(onSSE),
+                       onComplete = std::move(onComplete),
+                       cancelToken,
+                       connTimeout,
+                       readTimeout,
+                       proxySnap]() mutable {
+        HttpWorkerThreadMarker workerMarker(this);
+        auto completionGuard = makeScopeExit(
+            [this, requestId] { markRequestCompleted(requestId); });
         HttpResponse response;
-
-        auto removeFromActive = [this, requestId]() {
-            std::lock_guard<std::mutex> lock(activeMutex_);
-            activeRequests_.erase(requestId);
-            // Signal shutdown() once the last in-flight worker is done with
-            // HttpClient state. (completeSafely runs after this but only
-            // touches the caller's callback, not this singleton.)
-            if (--inFlight_ <= 0) {
-                inFlight_ = 0;
-                activeCv_.notify_all();
-            }
-        };
 
         auto completeSafely = [&](HttpResponse resp) {
             if (!onComplete) {
@@ -211,30 +308,47 @@ uint64_t HttpClient::postAsync(const std::string& url,
             }
         };
 
+        try {
         ParsedUrl parsed = parseUrl(url);
         if (!parsed.valid) {
             response.statusCode = 0;
             response.errorMessage = "invalid URL: " + url;
-            removeFromActive();
             completeSafely(std::move(response));
             return;
         }
 
         // cpp-httplib 的 Client 构造接受形如 "https://host[:port]" 的 URL
         // 当启用 CPPHTTPLIB_OPENSSL_SUPPORT 时会自动处理 HTTPS
-        httplib::Client client(parsed.base);
+        auto client = std::make_shared<httplib::Client>(parsed.base);
 
-        client.set_connection_timeout(connTimeout, 0);
-        client.set_read_timeout(readTimeout, 0);
-        client.set_write_timeout(readTimeout, 0);
-        client.set_keep_alive(false);
-        client.set_follow_location(true);
+        {
+            std::lock_guard<std::mutex> lock(activeMutex_);
+            auto it = activeRequests_.find(requestId);
+            if (it != activeRequests_.end()) {
+                it->second->stopTransport = [client] { client->stop(); };
+            }
+        }
+
+        if (cancelToken->load()) {
+            response.cancelled = true;
+            response.errorMessage = "request cancelled";
+            completeSafely(std::move(response));
+            return;
+        }
+
+        client->set_connection_timeout(connTimeout, 0);
+        client->set_read_timeout(readTimeout, 0);
+        client->set_write_timeout(readTimeout, 0);
+        client->set_keep_alive(false);
+        client->set_follow_location(true);
 
         // TLS：交由 cpp-httplib/OpenSSL 使用系统证书存储进行校验
-        client.enable_server_certificate_verification(true);
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        client->enable_server_certificate_verification(true);
+#endif
 
         if (proxySnap.enabled && !proxySnap.host.empty() && proxySnap.port > 0) {
-            client.set_proxy(proxySnap.host.c_str(), proxySnap.port);
+            client->set_proxy(proxySnap.host.c_str(), proxySnap.port);
         }
 
         httplib::Headers httplibHeaders;
@@ -296,7 +410,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
 
         httplib::Response res;
         httplib::Error err = httplib::Error::Success;
-        bool sendOk = client.send(req, res, err);
+        bool sendOk = client->send(req, res, err);
 
         // 流结束：刷出挂起的 SSE 事件
         if (onSSE) {
@@ -309,7 +423,6 @@ uint64_t HttpClient::postAsync(const std::string& url,
             if (!parser.callbackError().empty()) {
                 response.errorMessage += ": " + parser.callbackError();
             }
-            removeFromActive();
             completeSafely(std::move(response));
             return;
         }
@@ -317,7 +430,6 @@ uint64_t HttpClient::postAsync(const std::string& url,
         if ((cancelToken && cancelToken->load()) || aborted) {
             response.cancelled = true;
             response.errorMessage = "request cancelled";
-            removeFromActive();
             completeSafely(std::move(response));
             return;
         }
@@ -330,7 +442,6 @@ uint64_t HttpClient::postAsync(const std::string& url,
                 err == httplib::Error::Write) {
                 response.timedOut = true;
             }
-            removeFromActive();
             completeSafely(std::move(response));
             return;
         }
@@ -345,19 +456,57 @@ uint64_t HttpClient::postAsync(const std::string& url,
             response.errorMessage = oss.str();
         }
 
-        removeFromActive();
         completeSafely(std::move(response));
-    });
+        } catch (const std::exception& error) {
+            response.statusCode = 0;
+            response.errorMessage = std::string("HTTP worker failed: ") +
+                                    error.what();
+            completeSafely(std::move(response));
+        } catch (...) {
+            response.statusCode = 0;
+            response.errorMessage = "HTTP worker failed: unknown error";
+            completeSafely(std::move(response));
+        }
+    };
 
-    worker.detach();
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        if (shuttingDown_) {
+            return 0;
+        }
+        auto request = std::make_unique<ActiveRequest>();
+        request->cancelToken = cancelToken;
+        ActiveRequest* requestPtr = request.get();
+        activeRequests_.emplace(requestId, std::move(request));
+        try {
+            requestPtr->worker = std::thread(std::move(workerTask));
+        } catch (...) {
+            activeRequests_.erase(requestId);
+            return 0;
+        }
+    }
     return requestId;
 }
 
 void HttpClient::cancelRequest(uint64_t requestId) {
-    std::lock_guard<std::mutex> lock(activeMutex_);
-    auto it = activeRequests_.find(requestId);
-    if (it != activeRequests_.end() && it->second) {
-        it->second->store(true);
+    std::function<void()> stopTransport;
+    {
+        std::lock_guard<std::mutex> lock(activeMutex_);
+        auto it = activeRequests_.find(requestId);
+        if (it == activeRequests_.end() || it->second->completed) {
+            return;
+        }
+        if (it->second->cancelToken) {
+            it->second->cancelToken->store(true);
+        }
+        stopTransport = it->second->stopTransport;
+    }
+    if (stopTransport) {
+        try {
+            stopTransport();
+        } catch (...) {
+            // The worker still owns and will join the transport lifecycle.
+        }
     }
 }
 

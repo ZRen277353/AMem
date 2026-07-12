@@ -2,13 +2,13 @@
 #ifdef HAVE_AI_CHAT
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace AI {
@@ -69,11 +69,11 @@ public:
     // 取消进行中的请求
     void cancelRequest(uint64_t requestId);
 
-    // Cancel every in-flight request and wait (bounded) for their detached
-    // worker threads to stop touching shared state, so a streaming request
-    // can't outlive this singleton (or UIMessageQueue) during app teardown.
-    // Call this from main() before static destruction; idempotent.
-    void shutdown();
+    // Stop accepting requests, cancel active transports, and join every owned
+    // worker after its completion callback returns. Returns false only when
+    // called from one of this client's own callbacks, where joining the
+    // current thread would deadlock. Call again from the main thread to drain.
+    bool shutdown();
 
 private:
     HttpClient() = default;
@@ -87,11 +87,21 @@ private:
     int responseTimeout_ = 300;
     ProxyConfig proxy_;
 
-    // Active request table: requestId -> cancellation token.
+    struct ActiveRequest {
+        CancellationToken cancelToken;
+        std::function<void()> stopTransport;
+        std::thread worker;
+        bool completed = false;
+    };
+
+    void markRequestCompleted(uint64_t requestId);
+    void reapCompletedWorkers();
+
+    // Active and completed-but-not-yet-joined request workers. A completed
+    // record remains here until the next dispatch or shutdown joins it.
     std::mutex activeMutex_;
-    std::condition_variable activeCv_;
-    std::unordered_map<uint64_t, CancellationToken> activeRequests_;
-    int inFlight_ = 0;          // detached workers still running; guarded by activeMutex_
+    std::unordered_map<uint64_t, std::unique_ptr<ActiveRequest>> activeRequests_;
+    std::mutex workerJoinMutex_;
     bool shuttingDown_ = false; // set by shutdown(); guarded by activeMutex_
 
     std::atomic<uint64_t> nextRequestId_{1};

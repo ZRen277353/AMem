@@ -516,6 +516,32 @@ if(BUILD_TESTING)
         COMMAND NativeProviderStreamTerminalTests
     )
 
+    add_executable(NativeHttpClientLifecycleTests
+        tests/HttpClientLifecycleTests.cpp
+        gui/ai/HttpClient.cpp
+        gui/ai/SSEParser.cpp
+    )
+    target_include_directories(NativeHttpClientLifecycleTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
+        ${CMAKE_SOURCE_DIR}/third_party/httplib
+    )
+    target_compile_definitions(NativeHttpClientLifecycleTests PRIVATE HAVE_AI_CHAT)
+    target_link_libraries(NativeHttpClientLifecycleTests PRIVATE ws2_32)
+    if(MSVC)
+        target_compile_options(NativeHttpClientLifecycleTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeHttpClientLifecycleTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeHttpClientLifecycleTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(
+        NAME native_http_client_lifecycle
+        COMMAND NativeHttpClientLifecycleTests
+    )
+    set_tests_properties(native_http_client_lifecycle PROPERTIES TIMEOUT 20)
+
     add_executable(NativeIpcApprovalAuditTests
         tests/IpcApprovalAuditTests.cpp
     )
