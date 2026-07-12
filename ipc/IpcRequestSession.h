@@ -22,6 +22,7 @@ enum class RequestCancelReason {
     None,
     Client,
     Deadline,
+    SessionInvalidated,
     SessionStopping,
 };
 
@@ -32,9 +33,12 @@ public:
     bool request(RequestCancelReason reason);
     RequestCancelReason reason() const;
     bool requested() const;
+    std::shared_ptr<std::atomic<bool>> booleanToken() const;
 
 private:
     std::atomic<RequestCancelReason> reason_{RequestCancelReason::None};
+    std::shared_ptr<std::atomic<bool>> booleanToken_ =
+        std::make_shared<std::atomic<bool>>(false);
 };
 
 struct IpcRequestContext {
@@ -52,6 +56,14 @@ public:
     // Capability metadata is server-owned. Unknown methods return false.
     virtual bool resolveCapability(const std::string& method,
                                    IpcCapability& capability) const = 0;
+    struct SessionValidation {
+        bool valid = true;
+        std::string code;
+        std::string message;
+    };
+    virtual SessionValidation validateSession() const {
+        return {};
+    }
     virtual IpcDispatchResult execute(const IpcRequestDto& request,
                                       const IpcRequestContext& context) = 0;
 };
@@ -61,6 +73,7 @@ constexpr size_t kDefaultMaxRequestsPerSession = 1024;
 struct RequestSessionConfig {
     std::chrono::milliseconds idleTimeout{5 * 60 * 1000};
     std::chrono::milliseconds writeTimeout{5000};
+    std::chrono::milliseconds validationInterval{250};
     RequestPayloadConfig payload;
     size_t maxRequestsPerSession = kDefaultMaxRequestsPerSession;
 };
@@ -70,6 +83,7 @@ enum class RequestSessionStatus {
     Cancelled,
     IdleTimedOut,
     RequestLimitReached,
+    Invalidated,
     ProtocolError,
     IoError,
 };
@@ -116,6 +130,7 @@ private:
     RequestSessionResult finish(RequestSessionStatus status,
                                 const std::wstring& error);
     RequestSessionResult finishFromIo(const FrameIoResult& result);
+    std::optional<RequestSessionResult> finishIfInvalidated();
 
     IpcFramedConnection& connection_;
     IIpcRequestDispatcher& dispatcher_;

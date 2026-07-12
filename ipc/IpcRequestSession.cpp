@@ -51,6 +51,8 @@ const char* RequestCancelReasonName(RequestCancelReason reason) {
         return "client";
     case RequestCancelReason::Deadline:
         return "deadline";
+    case RequestCancelReason::SessionInvalidated:
+        return "session_invalidated";
     case RequestCancelReason::SessionStopping:
         return "session_stopping";
     }
@@ -62,9 +64,13 @@ bool RequestCancellation::request(RequestCancelReason reason) {
         return false;
     }
     RequestCancelReason expected = RequestCancelReason::None;
-    return reason_.compare_exchange_strong(expected, reason,
-                                           std::memory_order_acq_rel,
-                                           std::memory_order_acquire);
+    const bool changed = reason_.compare_exchange_strong(
+        expected, reason, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+    if (changed || expected != RequestCancelReason::None) {
+        booleanToken_->store(true, std::memory_order_release);
+    }
+    return changed;
 }
 
 RequestCancelReason RequestCancellation::reason() const {
@@ -73,6 +79,10 @@ RequestCancelReason RequestCancellation::reason() const {
 
 bool RequestCancellation::requested() const {
     return reason() != RequestCancelReason::None;
+}
+
+std::shared_ptr<std::atomic<bool>> RequestCancellation::booleanToken() const {
+    return booleanToken_;
 }
 
 bool IpcRequestContext::cancellationRequested() const {
@@ -283,6 +293,27 @@ RequestSessionResult IpcRequestSession::finishFromIo(
                   L"unknown framed I/O result");
 }
 
+std::optional<RequestSessionResult>
+IpcRequestSession::finishIfInvalidated() {
+    const auto validation = dispatcher_.validateSession();
+    if (validation.valid) {
+        return std::nullopt;
+    }
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (active_ != nullptr &&
+            active_->context.cancellation->request(
+                RequestCancelReason::SessionInvalidated)) {
+            ++cancellationsObserved_;
+        }
+    }
+    if (!sendError(0, validation.code.c_str(), validation.message)) {
+        return finishFromIo(*fatalWrite());
+    }
+    return finish(RequestSessionStatus::Invalidated,
+                  widenAscii(validation.message));
+}
+
 RequestSessionResult IpcRequestSession::run() {
     bool alreadyStarted = false;
     {
@@ -299,6 +330,7 @@ RequestSessionResult IpcRequestSession::run() {
     }
     if (config_.idleTimeout.count() <= 0 ||
         config_.writeTimeout.count() <= 0 ||
+        config_.validationInterval.count() <= 0 ||
         config_.maxRequestsPerSession == 0 ||
         config_.payload.defaultTimeout.count() <= 0 ||
         config_.payload.maxTimeout.count() <= 0 ||
@@ -310,13 +342,17 @@ RequestSessionResult IpcRequestSession::run() {
     }
     startWorker();
 
+    PipeDeadline idleDeadline =
+        std::chrono::steady_clock::now() + config_.idleTimeout;
+
     while (true) {
         if (const auto fatal = fatalWrite()) {
             return finishFromIo(*fatal);
         }
+        if (auto invalidated = finishIfInvalidated()) {
+            return *invalidated;
+        }
 
-        const PipeDeadline idleDeadline =
-            std::chrono::steady_clock::now() + config_.idleTimeout;
         PipeDeadline readDeadline = idleDeadline;
         uint64_t deadlineRequestId = 0;
         {
@@ -328,6 +364,12 @@ RequestSessionResult IpcRequestSession::run() {
                 deadlineRequestId = active_->request.requestId;
             }
         }
+        const PipeDeadline validationDeadline =
+            std::chrono::steady_clock::now() +
+            config_.validationInterval;
+        if (validationDeadline < readDeadline) {
+            readDeadline = validationDeadline;
+        }
 
         const FrameIoResult incoming = connection_.readFrame(
             readDeadline, IpcProtocol::kMaxRequestPayloadBytes);
@@ -337,7 +379,9 @@ RequestSessionResult IpcRequestSession::run() {
             {
                 std::lock_guard<std::mutex> lock(stateMutex_);
                 if (active_ != nullptr &&
-                    active_->request.requestId == deadlineRequestId) {
+                    active_->request.requestId == deadlineRequestId &&
+                    std::chrono::steady_clock::now() >=
+                        active_->context.deadline) {
                     handledDeadline = true;
                     if (active_->context.cancellation->request(
                             RequestCancelReason::Deadline)) {
@@ -350,8 +394,17 @@ RequestSessionResult IpcRequestSession::run() {
             }
             continue;
         }
+        if (incoming.status == FrameIoStatus::TimedOut &&
+            std::chrono::steady_clock::now() < idleDeadline) {
+            continue;
+        }
         if (incoming.status != FrameIoStatus::Complete) {
             return finishFromIo(incoming);
+        }
+        idleDeadline =
+            std::chrono::steady_clock::now() + config_.idleTimeout;
+        if (auto invalidated = finishIfInvalidated()) {
+            return *invalidated;
         }
 
         if (incoming.frame.type == IpcProtocol::MessageType::Request) {

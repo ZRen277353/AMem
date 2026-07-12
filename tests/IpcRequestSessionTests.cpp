@@ -74,6 +74,14 @@ public:
         return false;
     }
 
+    SessionValidation validateSession() const override {
+        if (valid_.load(std::memory_order_acquire)) {
+            return {};
+        }
+        return {false, "session_invalidated",
+                "test dispatcher session changed"};
+    }
+
     NativeIpc::IpcDispatchResult execute(
         const NativeIpc::IpcRequestDto& request,
         const NativeIpc::IpcRequestContext& context) override {
@@ -99,6 +107,10 @@ public:
         }
         const auto reason = context.cancellation->reason();
         cancelReason_.store(reason, std::memory_order_release);
+        booleanCancellation_.store(
+            context.cancellation->booleanToken()->load(
+                std::memory_order_acquire),
+            std::memory_order_release);
         NativeIpc::IpcDispatchResult result;
         result.errorCode = reason == NativeIpc::RequestCancelReason::Deadline
                                ? "deadline_exceeded"
@@ -120,11 +132,21 @@ public:
         return cancelReason_.load(std::memory_order_acquire);
     }
 
+    void invalidate() {
+        valid_.store(false, std::memory_order_release);
+    }
+
+    bool booleanCancellationObserved() const {
+        return booleanCancellation_.load(std::memory_order_acquire);
+    }
+
 private:
     HANDLE started_ = nullptr;
     std::atomic<int> dispatchCount_{0};
     std::atomic<NativeIpc::RequestCancelReason> cancelReason_{
         NativeIpc::RequestCancelReason::None};
+    std::atomic<bool> valid_{true};
+    std::atomic<bool> booleanCancellation_{false};
 };
 
 struct SharedSessionResult {
@@ -453,6 +475,7 @@ void testUnexpectedMessageAndIdleTimeout() {
         TestDispatcher dispatcher;
         NativeIpc::RequestSessionConfig config;
         config.idleTimeout = 50ms;
+        config.validationInterval = 10ms;
         SessionHarness harness(L"idle", dispatcher, config);
         harness.start();
         expect(harness.waitResult().status ==
@@ -476,6 +499,32 @@ void testStopCancelsDispatcherAndJoins() {
            "server Stop should cancel dispatch and join the worker");
 }
 
+void testSessionInvalidationCancelsAndJoins() {
+    TestDispatcher dispatcher;
+    NativeIpc::RequestSessionConfig config;
+    config.validationInterval = 10ms;
+    SessionHarness harness(L"invalidation", dispatcher, config);
+    harness.start();
+    harness.request(70, "slow");
+    expect(dispatcher.waitStarted(),
+           "invalidation test request should begin");
+    dispatcher.invalidate();
+    const auto result = harness.waitResult();
+    expect(result.status == NativeIpc::RequestSessionStatus::Invalidated,
+           "session invalidation status mismatch: " +
+               std::to_string(static_cast<int>(result.status)));
+    expect(result.cancellationsObserved == 1,
+           "session invalidation cancellation count mismatch: " +
+               std::to_string(result.cancellationsObserved));
+    expect(dispatcher.cancelReason() ==
+               NativeIpc::RequestCancelReason::SessionInvalidated,
+           "session invalidation reason mismatch: " +
+               std::to_string(
+                   static_cast<int>(dispatcher.cancelReason())));
+    expect(dispatcher.booleanCancellationObserved(),
+           "MemService-compatible cancellation token should be signalled");
+}
+
 } // namespace
 
 int main() {
@@ -491,6 +540,8 @@ int main() {
         {"unexpected message and idle timeout",
          &testUnexpectedMessageAndIdleTimeout},
         {"Stop cancellation and join", &testStopCancelsDispatcherAndJoins},
+        {"session invalidation cancellation and join",
+         &testSessionInvalidationCancelsAndJoins},
     };
 
     int failures = 0;
