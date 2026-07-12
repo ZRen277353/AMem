@@ -23,6 +23,7 @@
 
 #include "ToolExecutor.h"
 #include "AgentMemTools.h"
+#include "AgentRunContext.h"
 
 #include "../AppContext.h"
 #include "../MemoryTypes.h"
@@ -32,6 +33,7 @@
 
 #ifdef HAVE_LUAJIT
 #include "../../lua/LuaEngine.h"
+#include "../../mem/SystemMemService.h"
 #endif
 
 #include <algorithm>
@@ -1570,8 +1572,9 @@ std::string execSymbolFind(const std::string& argsJson) {
     }
 }
 
-// execute_lua
-std::string execExecuteLua(const std::string& argsJson) {
+// lua_execute / execute_lua compatibility alias
+std::string execLuaExecute(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
 #ifdef HAVE_LUAJIT
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
@@ -1580,7 +1583,51 @@ std::string execExecuteLua(const std::string& argsJson) {
         const int timeoutSeconds = optionalIntArg(
             args, "timeout_seconds", kDefaultToolLuaTimeoutSeconds,
             1, kMaxToolLuaTimeoutSeconds);
-        SocketIoTimeout::ScopedTimeout luaTimeout(timeoutSeconds);
+        if (context.cancellation &&
+            context.cancellation->load(std::memory_order_acquire)) {
+            json cancelled;
+            cancelled["success"] = false;
+            cancelled["error"] = {
+                {"code", "cancel_requested"},
+                {"message", "Lua execution was cancelled before it started"},
+                {"retryable", false},
+            };
+            cancelled["completion"] = "cancel_requested";
+            return cancelled.dump();
+        }
+
+        const Mem::OperationContext current =
+            Mem::getSystemMemService().captureContext(true);
+        if (const auto contextError = validateAgentRunContext(
+                context, current, ToolTargetPolicy::Bound)) {
+            json rejected;
+            rejected["success"] = false;
+            rejected["error"] = {
+                {"code", Mem::errorCodeName(contextError->code)},
+                {"message", contextError->message},
+                {"retryable", contextError->retryable},
+            };
+            rejected["completion"] = "rejected_before_start";
+            return rejected.dump();
+        }
+
+        const auto requestedDeadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(timeoutSeconds);
+        const auto effectiveDeadline =
+            (std::min)(requestedDeadline, context.deadline);
+        if (std::chrono::steady_clock::now() >= effectiveDeadline) {
+            json timedOut;
+            timedOut["success"] = false;
+            timedOut["error"] = {
+                {"code", "timeout"},
+                {"message", "Lua execution deadline expired before it started"},
+                {"retryable", false},
+            };
+            timedOut["completion"] = "timed_out_before_start";
+            return timedOut.dump();
+        }
+
+        SocketIoTimeout::ScopedTimeout luaTimeout(effectiveDeadline);
         auto& engine = LuaEngine::GetInstance();
         if (!engine.IsInitialized() && !engine.Initialize()) {
             return makeError("Lua engine initialization failed: " + engine.GetLastError());
@@ -1592,19 +1639,40 @@ std::string execExecuteLua(const std::string& argsJson) {
                 output,
                 static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()))) {
             json err;
-            err["error"] = engine.GetLastError();
+            const bool timedOut =
+                engine.GetLastError() == "Lua execution timed out";
+            err["success"] = false;
+            err["error"] = {
+                {"code", timedOut ? "timeout" : "internal_error"},
+                {"message", engine.GetLastError()},
+                {"retryable", false},
+            };
             err["output"] = output;
+            err["completion"] = timedOut ? "timed_out" : "completed";
             return err.dump();
         }
         json result;
+        result["success"] = true;
         result["output"] = output;
+        const bool cancelledAfterStart = context.cancellation &&
+            context.cancellation->load(std::memory_order_acquire);
+        const bool completedAfterDeadline =
+            std::chrono::steady_clock::now() >= context.deadline;
+        result["completed_after_cancel_request"] = cancelledAfterStart;
+        result["completed_after_deadline"] = completedAfterDeadline;
+        result["completion"] = cancelledAfterStart
+            ? "completed_after_cancel_request"
+            : (completedAfterDeadline
+                   ? "completed_after_deadline"
+                   : "completed");
         return makeOk(result);
     } catch (const std::exception& e) {
-        return makeError(std::string("execute_lua: ") + e.what());
+        return makeError(std::string("lua_execute: ") + e.what());
     }
 #else
+    (void)context;
     (void)argsJson;
-    return makeError("execute_lua unavailable: AMem was built without LuaJIT");
+    return makeError("lua_execute unavailable: AMem was built without LuaJIT");
 #endif
 }
 
@@ -2548,7 +2616,7 @@ constexpr const char* kSchemaSymbolFind = R"JSON({
   }
 })JSON";
 
-constexpr const char* kSchemaExecuteLua = R"JSON({
+constexpr const char* kSchemaLuaExecute = R"JSON({
   "type": "object",
   "required": ["code"],
   "properties": {
@@ -3089,14 +3157,24 @@ void ToolExecutor::initBuiltinTools() {
         false,
         ToolTargetPolicy::Bound);
 
+#ifdef HAVE_LUAJIT
+    registerTool(
+        "lua_execute",
+        "Execute Lua code inside AMem. Requires user confirmation; execution cannot be retracted after it starts.",
+        kSchemaLuaExecute,
+        ToolSafety::Write,
+        &execLuaExecute,
+        ToolTargetPolicy::Bound);
+
     registerTool(
         "execute_lua",
-        "Execute Lua code inside AMem. Requires user confirmation.",
-        kSchemaExecuteLua,
+        "Compatibility alias for lua_execute.",
+        kSchemaLuaExecute,
         ToolSafety::Write,
-        &execExecuteLua,
-        true,
-        ToolTargetPolicy::Bound);
+        &execLuaExecute,
+        ToolTargetPolicy::Bound,
+        false);
+#endif
 }
 
 } // namespace AI
