@@ -51,7 +51,8 @@ public:
     if (!runtime_) {
       runtime_ = std::make_unique<NativeAgentRuntime>(
           Mem::getSystemMemService(), kDefaultPipeName, HandshakeConfig{},
-          RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get());
+          RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get(),
+          approvalAudit_.get());
     }
     return *runtime_;
   }

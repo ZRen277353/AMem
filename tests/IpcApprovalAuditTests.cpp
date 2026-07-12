@@ -86,6 +86,31 @@ NativeIpc::IpcApprovalRecord record(uint64_t id) {
   return value;
 }
 
+NativeIpc::IpcExecutionAuditRecord executionRecord(
+    uint64_t id, bool success = true,
+    NativeIpc::RequestCompletion completion =
+        NativeIpc::RequestCompletion::Completed) {
+  NativeIpc::IpcExecutionAuditRecord value;
+  value.approvalId = id;
+  value.sessionId = 100 + id;
+  value.requestId = 200 + id;
+  value.clientName = "AMem.AuditTests";
+  value.clientVersion = "1.0";
+  value.method = "memory_write";
+  value.capability = NativeIpc::IpcCapability::TargetMutation;
+  value.targetPolicy = NativeIpc::IpcMethodTargetPolicy::Bound;
+  value.authorizedConnectionGeneration = 7;
+  value.authorizedTarget = Mem::TargetSnapshot{42, 420, 2, 7};
+  value.observedConnectionGeneration = 7;
+  value.observedTarget = Mem::TargetSnapshot{42, 420, 2, 7};
+  value.success = success;
+  value.completion = completion;
+  if (!success) {
+    value.errorCode = "completion_unknown";
+  }
+  return value;
+}
+
 std::vector<json> readValidLines(const std::filesystem::path &path) {
   std::vector<json> values;
   std::ifstream input(path, std::ios::binary);
@@ -120,7 +145,8 @@ void testBrokerTransitionsPersistBoundedMetadata() {
              snapshot.recent[1].state == "denied",
          "audit snapshot should retain ordered broker transitions");
   const auto lines = readValidLines(path);
-  expect(lines.size() == 2 && lines[0]["schema_version"] == 1 &&
+  expect(lines.size() == 2 && lines[0]["schema_version"] == 2 &&
+             lines[0]["event_type"] == "approval_transition" &&
              lines[0]["session_id"] == 9 &&
              lines[0]["request_id"] == 7 &&
              lines[0]["method"] == "memory_write" &&
@@ -130,6 +156,43 @@ void testBrokerTransitionsPersistBoundedMetadata() {
              !lines[0].contains("result") &&
              !lines[0].contains("result_json"),
          "persistent audit must contain bounded metadata without raw data");
+}
+
+void testExecutionOutcomesPersistWithoutRawData() {
+  TempDirectory directory("execution");
+  const auto path = directory.path() / "security.jsonl";
+  NativeIpc::IpcApprovalAuditLog audit(path.string(), 64u * 1024u, 10);
+
+  expect(audit.recordExecution(executionRecord(20)),
+         "successful execution outcome should persist");
+  expect(audit.recordExecution(
+             executionRecord(
+                 21, false,
+                 NativeIpc::RequestCompletion::CompletionUnknown)),
+         "uncertain execution outcome should persist");
+
+  const auto snapshot = audit.snapshot();
+  expect(snapshot.successfulWrites == 2 && snapshot.failedWrites == 0 &&
+             snapshot.recent.size() == 2 &&
+             snapshot.recent[0].eventType == "execution_outcome" &&
+             snapshot.recent[0].success == std::optional<bool>{true} &&
+             snapshot.recent[0].completion == "completed" &&
+             snapshot.recent[1].success == std::optional<bool>{false} &&
+             snapshot.recent[1].errorCode == "completion_unknown",
+         "snapshot should distinguish execution summaries from approvals");
+
+  const auto lines = readValidLines(path);
+  expect(lines.size() == 2 && lines[0]["schema_version"] == 2 &&
+             lines[0]["event_type"] == "execution_outcome" &&
+             lines[0]["success"] == true &&
+             lines[0]["completion"] == "completed" &&
+             lines[0]["target"]["pid"] == 42 &&
+             lines[0]["observed_target"]["pid"] == 42 &&
+             !lines[0].contains("params") &&
+             !lines[0].contains("result") &&
+             !lines[0].contains("result_json") &&
+             !lines[0].contains("error_message"),
+         "execution audit must exclude request and result content");
 }
 
 void testRotationReloadAndMalformedLinesStayBounded() {
@@ -152,13 +215,16 @@ void testRotationReloadAndMalformedLinesStayBounded() {
 
   {
     std::ofstream output(path, std::ios::binary | std::ios::app);
-    output << "{malformed-json}\n" << std::string(20u * 1024u, 'x') << '\n';
+    output << "{malformed-json}\n" << std::string(20u * 1024u, 'x') << '\n'
+           << R"({"schema_version":1,"timestamp_ms":1,"approval_id":777,"session_id":9,"request_id":7,"client_name":"legacy","method":"memory_write","state":"pending"})"
+           << '\n';
   }
   NativeIpc::IpcApprovalAuditLog reloaded(path.string(), 16u * 1024u, 5);
   const auto snapshot = reloaded.snapshot();
   expect(!snapshot.recent.empty() && snapshot.recent.size() <= 5 &&
-             snapshot.recent.back().approvalId != 0,
-         "reload should ignore malformed and oversized JSONL lines");
+             snapshot.recent.back().approvalId == 777 &&
+             snapshot.recent.back().eventType == "approval_transition",
+         "reload should accept schema 1 and ignore malformed oversized lines");
   expect(reloaded.append(record(101)) &&
              std::filesystem::file_size(path) <= 16u * 1024u,
          "append should replace an externally oversized active log");
@@ -239,6 +305,8 @@ int main() {
   const std::vector<std::pair<std::string, std::function<void()>>> tests = {
       {"broker transitions persist bounded metadata",
        &testBrokerTransitionsPersistBoundedMetadata},
+      {"execution outcomes persist without raw data",
+       &testExecutionOutcomesPersistWithoutRawData},
       {"rotation reload and malformed lines stay bounded",
        &testRotationReloadAndMalformedLinesStayBounded},
       {"concurrent appends are serialized", &testConcurrentAppendsAreSerialized},

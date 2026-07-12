@@ -13,6 +13,7 @@ file(READ "${SOURCE_ROOT}/ipc/NativeAgentRuntime.cpp" runtime_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcRequestSession.cpp" request_session_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalAudit.h" approval_audit_header)
+file(READ "${SOURCE_ROOT}/ipc/IpcExecutionAudit.h" execution_audit_header)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalBroker.cpp" approval_broker_source)
 file(READ "${SOURCE_ROOT}/gui/ai/ToolDefinitions.cpp" tool_source)
 file(READ "${SOURCE_ROOT}/mem/LuaJsonTool.cpp" lua_tool_source)
@@ -60,17 +61,25 @@ forbid_text("${control_source}" "raw approval result in GUI"
 require_text("${owner_source}" "stop-time approval invalidation"
     "approvalBroker->cancelAll();")
 require_text("${owner_source}" "runtime receives the system broker"
-    "RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get())")
+    "RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get(),\n          approvalAudit_.get())")
 require_text("${owner_source}" "runtime receives shared Lua host execution"
     "Mem::executeLuaJson(service_, paramsJson, context)")
 require_text("${owner_source}" "persistent approval audit injection"
     "IpcApprovalBrokerConfig{},\n                                              approvalAudit_.get())")
 require_text("${control_source}" "visible approval audit status"
     "GetSystemIpcApprovalAuditSnapshot()")
+require_text("${control_source}" "visible execution outcome status"
+    "entry.eventType == \"execution_outcome\"")
 forbid_text("${approval_audit_header}" "approval audit raw params"
     "params")
 forbid_text("${approval_audit_header}" "approval audit raw results"
     "resultJson")
+forbid_text("${execution_audit_header}" "execution audit raw params"
+    "paramsJson")
+forbid_text("${execution_audit_header}" "execution audit raw results"
+    "resultJson")
+forbid_text("${execution_audit_header}" "execution audit error details"
+    "errorMessage")
 require_text("${approval_broker_source}" "durable consumed transition"
     "const bool durable = audit(changed);")
 require_text("${approval_broker_source}" "fail-closed consumed grant"
@@ -89,6 +98,8 @@ require_text("${dispatcher_source}" "privileged approval consumption"
     "approvalBroker_->consume(")
 require_text("${dispatcher_source}" "grant-bound privileged execution"
     "return executeApproved(request, context, descriptor,")
+require_text("${dispatcher_source}" "privileged execution outcome audit"
+    "executionAuditSink_->recordExecution(record, &ignoredError)")
 forbid_text("${dispatcher_source}" "obsolete disabled execution response"
     "approval_execution_disabled")
 require_text("${tool_source}" "in-app shared Lua host tool"
@@ -108,4 +119,4 @@ if(shutdown_position EQUAL -1 OR disconnect_position EQUAL -1 OR
 endif()
 
 message(STATUS
-    "Verified native IPC is compile-time opt-in with explicit Observe-only GUI control")
+    "Verified native IPC is opt-in with Observe and per-request privileged approval")

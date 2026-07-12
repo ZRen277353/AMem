@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IpcApprovalBroker.h"
+#include "IpcExecutionAudit.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,7 @@ namespace NativeIpc {
 
 struct IpcApprovalAuditEntry {
   int64_t timestampMs = 0;
+  std::string eventType;
   uint64_t approvalId = 0;
   uint64_t sessionId = 0;
   uint64_t requestId = 0;
@@ -24,7 +26,12 @@ struct IpcApprovalAuditEntry {
   std::string state;
   uint64_t connectionGeneration = 0;
   std::optional<Mem::TargetSnapshot> target;
+  uint64_t observedConnectionGeneration = 0;
+  std::optional<Mem::TargetSnapshot> observedTarget;
   int64_t deadlineRemainingMs = 0;
+  std::optional<bool> success;
+  std::string completion;
+  std::string errorCode;
 };
 
 struct IpcApprovalAuditSnapshot {
@@ -35,7 +42,8 @@ struct IpcApprovalAuditSnapshot {
   std::vector<IpcApprovalAuditEntry> recent;
 };
 
-class IpcApprovalAuditLog final : public IIpcApprovalAuditSink {
+class IpcApprovalAuditLog final : public IIpcApprovalAuditSink,
+                                  public IIpcExecutionAuditSink {
 public:
   explicit IpcApprovalAuditLog(
       std::string filepath = "native_ipc_approval_audit.jsonl",
@@ -44,6 +52,8 @@ public:
 
   bool recordApproval(const IpcApprovalRecord &record,
                       std::string *error = nullptr) override;
+  bool recordExecution(const IpcExecutionAuditRecord &record,
+                       std::string *error = nullptr) override;
   bool append(const IpcApprovalRecord &record, std::string *error = nullptr);
   IpcApprovalAuditSnapshot snapshot() const;
 
@@ -52,6 +62,9 @@ private:
   void loadFileLocked(const std::string &filepath);
   void loadLineLocked(const std::string &line);
   void rememberLocked(IpcApprovalAuditEntry entry);
+  bool appendJson(const std::string &line,
+                  const IpcApprovalAuditEntry &entry,
+                  std::string *error);
   bool failLocked(const std::string &message, std::string *error);
 
   const std::string filepath_;

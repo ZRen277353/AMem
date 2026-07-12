@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IpcMethodCatalog.h"
+#include "IpcExecutionAudit.h"
 #include "IpcRequestSession.h"
 
 #include "mem/IMemService.h"
@@ -34,7 +35,8 @@ public:
   explicit IpcMemServiceDispatcher(
       Mem::IMemService &service, IpcApprovalBroker *approvalBroker = nullptr,
       IpcExternalSession session = {},
-      IIpcHostMethodExecutor *hostExecutor = nullptr);
+      IIpcHostMethodExecutor *hostExecutor = nullptr,
+      IIpcExecutionAuditSink *executionAuditSink = nullptr);
 
   bool resolveCapability(const std::string &method,
                          IpcCapability &capability) const override;
@@ -57,6 +59,9 @@ private:
                                      const Mem::OperationContext &context);
   IpcDispatchResult invokeHost(const IpcRequestDto &request,
                                const Mem::OperationContext &context);
+  IpcDispatchResult auditApproved(const IpcApprovalGrant &grant,
+                                  const IpcMethodDescriptor &descriptor,
+                                  IpcDispatchResult result) const;
   bool supportsExecution(const IpcMethodDescriptor &descriptor) const;
   bool beginSelection(const Mem::OperationContext &expected,
                       SessionValidation &validation);
@@ -77,6 +82,7 @@ private:
   IpcApprovalBroker *const approvalBroker_;
   const IpcExternalSession session_;
   IIpcHostMethodExecutor *const hostExecutor_;
+  IIpcExecutionAuditSink *const executionAuditSink_;
 };
 
 } // namespace NativeIpc

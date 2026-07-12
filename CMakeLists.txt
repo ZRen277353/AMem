@@ -364,7 +364,7 @@ if(ENABLE_NATIVE_IPC)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-ipc"
     )
     message(STATUS
-        "Native IPC compiled with explicit Observe-only GUI control")
+        "Native IPC compiled with explicit Observe + per-request approval control")
 else()
     message(STATUS "Native IPC transport disabled")
 endif()

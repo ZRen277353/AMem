@@ -1,4 +1,5 @@
 #include "ipc/IpcApprovalBroker.h"
+#include "ipc/IpcExecutionAudit.h"
 #include "ipc/NativeAgentRuntime.h"
 
 #include <nlohmann/json.hpp>
@@ -218,6 +219,29 @@ private:
   std::atomic<bool> cancellationObserved_{false};
   std::atomic<int> statusCalls_{0};
   std::atomic<int> writeCalls_{0};
+};
+
+class CapturingExecutionAuditSink final
+    : public NativeIpc::IIpcExecutionAuditSink {
+public:
+  bool recordExecution(const NativeIpc::IpcExecutionAuditRecord &record,
+                       std::string *error) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    records_.push_back(record);
+    if (error != nullptr) {
+      error->clear();
+    }
+    return true;
+  }
+
+  std::vector<NativeIpc::IpcExecutionAuditRecord> snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::vector<NativeIpc::IpcExecutionAuditRecord> records_;
 };
 
 class RuntimeClient final {
@@ -624,9 +648,10 @@ void testSessionInvalidationCancelsBoundApproval() {
 void testPrivilegedRequestExecutesOnlyAfterApproval() {
   StubMemService service;
   NativeIpc::IpcApprovalBroker broker;
+  CapturingExecutionAuditSink executionAudit;
   NativeIpc::NativeAgentRuntime runtime(
       service, uniquePipeName(L"approval-submit"), {}, fastSessionConfig(),
-      &broker);
+      &broker, nullptr, &executionAudit);
   startRuntime(runtime);
   RuntimeClient client(runtime.snapshot().server.pipeName);
   const json ack = client.hello(
@@ -661,7 +686,7 @@ void testPrivilegedRequestExecutesOnlyAfterApproval() {
              cancelled["completion"] == "cancelled_before_start" &&
              broker.find(pending.approvalId)->state ==
                  NativeIpc::IpcApprovalState::Cancelled &&
-             service.writeCalls() == 0,
+             service.writeCalls() == 0 && executionAudit.snapshot().empty(),
          "client Cancel must revoke pending approval without a device call");
 
   client.request(81, "memory_write",
@@ -679,10 +704,16 @@ void testPrivilegedRequestExecutesOnlyAfterApproval() {
       responseJson(client.read(IpcProtocol::kMaxFramePayloadBytes,
                                "approved execution response"),
                    IpcProtocol::MessageType::Response, 81);
+  const auto outcomes = executionAudit.snapshot();
   expect(executed["ok"] == true && executed["completion"] == "completed" &&
              broker.find(approved.approvalId)->state ==
                  NativeIpc::IpcApprovalState::Consumed &&
-             service.writeCalls() == 1,
+             service.writeCalls() == 1 && outcomes.size() == 1 &&
+             outcomes[0].approvalId == approved.approvalId &&
+             outcomes[0].sessionId == runtime.snapshot().activeSessionId &&
+             outcomes[0].requestId == 81 && outcomes[0].success &&
+             outcomes[0].completion ==
+                 NativeIpc::RequestCompletion::Completed,
          "approved request must consume once before device execution");
 
   client.request(82, "status");

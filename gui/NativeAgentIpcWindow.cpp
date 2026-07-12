@@ -231,9 +231,26 @@ std::string auditTimestamp(int64_t timestampMs) {
   return value;
 }
 
+const char *auditEventName(const std::string &eventType) {
+  return eventType == "execution_outcome" ? "执行" : "审批";
+}
+
+std::string auditStatus(const NativeIpc::IpcApprovalAuditEntry &entry) {
+  if (entry.eventType != "execution_outcome") {
+    return entry.state;
+  }
+  if (entry.success.value_or(false)) {
+    return entry.completion;
+  }
+  if (entry.errorCode.empty()) {
+    return entry.completion;
+  }
+  return entry.errorCode + " / " + entry.completion;
+}
+
 void drawApprovalAudit(
     const NativeIpc::IpcApprovalAuditSnapshot &snapshot) {
-  ImGui::SeparatorText("审批审计");
+  ImGui::SeparatorText("特权安全审计");
   ImGui::TextDisabled("%s", snapshot.filepath.c_str());
   ImGui::TextDisabled("本次写入: %llu",
                       static_cast<unsigned long long>(
@@ -248,16 +265,17 @@ void drawApprovalAudit(
     return;
   }
 
-  if (!ImGui::BeginTable("native_ipc_approval_audit", 6,
+  if (!ImGui::BeginTable("native_ipc_approval_audit", 7,
                          ImGuiTableFlags_RowBg |
                              ImGuiTableFlags_BordersInnerH |
                              ImGuiTableFlags_SizingStretchProp)) {
     return;
   }
   ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+  ImGui::TableSetupColumn("事件", ImGuiTableColumnFlags_WidthFixed, 56.0f);
   ImGui::TableSetupColumn("客户端", ImGuiTableColumnFlags_WidthStretch, 1.2f);
   ImGui::TableSetupColumn("方法", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-  ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+  ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthStretch, 1.1f);
   ImGui::TableSetupColumn("会话", ImGuiTableColumnFlags_WidthFixed, 70.0f);
   ImGui::TableSetupColumn("请求", ImGuiTableColumnFlags_WidthFixed, 70.0f);
   ImGui::TableHeadersRow();
@@ -272,14 +290,23 @@ void drawApprovalAudit(
     const std::string timestamp = auditTimestamp(entry.timestampMs);
     ImGui::TextUnformatted(timestamp.c_str());
     ImGui::TableSetColumnIndex(1);
-    ImGui::TextUnformatted(entry.clientName.c_str());
+    ImGui::TextUnformatted(auditEventName(entry.eventType));
     ImGui::TableSetColumnIndex(2);
-    ImGui::TextUnformatted(entry.method.c_str());
+    ImGui::TextUnformatted(entry.clientName.c_str());
     ImGui::TableSetColumnIndex(3);
-    ImGui::TextUnformatted(entry.state.c_str());
+    ImGui::TextUnformatted(entry.method.c_str());
     ImGui::TableSetColumnIndex(4);
-    ImGui::Text("%llu", static_cast<unsigned long long>(entry.sessionId));
+    const std::string status = auditStatus(entry);
+    if (entry.eventType == "execution_outcome" && entry.success.has_value()) {
+      ImGui::TextColored(*entry.success ? ColorScheme::Success
+                                        : ColorScheme::Error,
+                         "%s", status.c_str());
+    } else {
+      ImGui::TextUnformatted(status.c_str());
+    }
     ImGui::TableSetColumnIndex(5);
+    ImGui::Text("%llu", static_cast<unsigned long long>(entry.sessionId));
+    ImGui::TableSetColumnIndex(6);
     ImGui::Text("%llu", static_cast<unsigned long long>(entry.requestId));
   }
   ImGui::EndTable();

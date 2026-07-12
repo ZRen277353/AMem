@@ -468,6 +468,41 @@ private:
   bool released_ = false;
 };
 
+class CapturingExecutionAuditSink final
+    : public NativeIpc::IIpcExecutionAuditSink {
+public:
+  explicit CapturingExecutionAuditSink(bool persist = true)
+      : persist_(persist) {}
+
+  bool recordExecution(const NativeIpc::IpcExecutionAuditRecord &record,
+                       std::string *error) override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      records_.push_back(record);
+    }
+    if (persist_) {
+      if (error != nullptr) {
+        error->clear();
+      }
+      return true;
+    }
+    if (error != nullptr) {
+      *error = "injected execution audit failure";
+    }
+    return false;
+  }
+
+  std::vector<NativeIpc::IpcExecutionAuditRecord> records() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_;
+  }
+
+private:
+  const bool persist_;
+  mutable std::mutex mutex_;
+  std::vector<NativeIpc::IpcExecutionAuditRecord> records_;
+};
+
 NativeIpc::IpcRequestDto request(uint64_t id,
                                  std::string method,
                                  const json& params = json::object()) {
@@ -747,9 +782,11 @@ void testConsumedAuditFailurePreventsExecution() {
 void testCancellationAfterConsumeStopsBeforeSend() {
   StubMemService service;
   BlockingConsumedAuditSink sink;
+  CapturingExecutionAuditSink executionAudit;
   NativeIpc::IpcApprovalBroker broker({}, &sink);
   NativeIpc::IpcMemServiceDispatcher dispatcher(
-      service, &broker, {93, "AMem.DispatcherTests", "1.0"});
+      service, &broker, {93, "AMem.DispatcherTests", "1.0"}, nullptr,
+      &executionAudit);
   auto requestContext = context();
   auto future = std::async(std::launch::async, [&] {
     return dispatcher.execute(
@@ -770,11 +807,54 @@ void testCancellationAfterConsumeStopsBeforeSend() {
   requestContext.cancellation->request(NativeIpc::RequestCancelReason::Client);
   sink.release();
   const auto result = future.get();
+  const auto outcomes = executionAudit.records();
   expect(auditEntered && !result.ok && result.errorCode == "cancelled" &&
              result.completion ==
                  NativeIpc::RequestCompletion::CancelledBeforeSend &&
-             service.calls["writeMemory"] == 0,
+             service.calls["writeMemory"] == 0 && outcomes.size() == 1 &&
+             !outcomes[0].success &&
+             outcomes[0].completion ==
+                 NativeIpc::RequestCompletion::CancelledBeforeSend &&
+             outcomes[0].errorCode == "cancelled",
          "cancellation after consume must stop before the service boundary");
+}
+
+void testExecutionAuditFailureDoesNotRewriteReceipt() {
+  StubMemService service;
+  NativeIpc::IpcApprovalBroker broker;
+  CapturingExecutionAuditSink executionAudit(false);
+  NativeIpc::IpcMemServiceDispatcher dispatcher(
+      service, &broker, {99, "AMem.DispatcherTests", "1.0"}, nullptr,
+      &executionAudit);
+  auto requestContext = context();
+  auto future = std::async(std::launch::async, [&] {
+    return dispatcher.execute(
+        request(22, "memory_write",
+                {{"address", "0x1000"}, {"data_hex", "90"}}),
+        requestContext);
+  });
+  expect(waitUntil([&] { return broker.snapshot().size() == 1; }),
+         "execution audit failure fixture should reach approval");
+  const auto pending = broker.snapshot().front();
+  expect(broker
+             .decide(pending.approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve,
+                     service.captureContext(true))
+             .ok,
+         "execution audit failure fixture should approve");
+  const auto result = future.get();
+  const auto outcomes = executionAudit.records();
+  expect(result.ok &&
+             result.completion == NativeIpc::RequestCompletion::Completed &&
+             service.calls["writeMemory"] == 1 && outcomes.size() == 1 &&
+             outcomes[0].approvalId == pending.approvalId &&
+             outcomes[0].sessionId == 99 && outcomes[0].requestId == 22 &&
+             outcomes[0].method == "memory_write" && outcomes[0].success &&
+             outcomes[0].authorizedTarget ==
+                 service.captureContext(true).target &&
+             outcomes[0].observedTarget ==
+                 service.captureContext(true).target,
+         "post-effect audit failure must retain the confirmed device receipt");
 }
 
 void testApprovedHostMethodUsesInjectedExecutor() {
@@ -810,8 +890,10 @@ void testApprovedHostMethodUsesInjectedExecutor() {
 void testProcessSelectionAdvancesBaselineSafely() {
   StubMemService service;
   NativeIpc::IpcApprovalBroker broker;
+  CapturingExecutionAuditSink executionAudit;
   NativeIpc::IpcMemServiceDispatcher dispatcher(
-      service, &broker, {95, "AMem.DispatcherTests", "1.0"});
+      service, &broker, {95, "AMem.DispatcherTests", "1.0"}, nullptr,
+      &executionAudit);
   service.setBlockOpenAfterTarget(true);
   auto requestContext = context();
   auto future = std::async(std::launch::async, [&] {
@@ -833,10 +915,14 @@ void testProcessSelectionAdvancesBaselineSafely() {
   service.setBlockOpenAfterTarget(false);
   const auto selected = future.get();
   const auto baseline = dispatcher.baselineContext();
+  const auto outcomes = executionAudit.records();
   expect(
       targetChanged && transitionValidation.valid && selected.ok &&
           baseline.target && baseline.target->pid == 84 &&
-          dispatcher.validateSession().valid,
+          dispatcher.validateSession().valid && outcomes.size() == 1 &&
+          outcomes[0].authorizedTarget &&
+          outcomes[0].authorizedTarget->pid == 42 &&
+          outcomes[0].observedTarget && outcomes[0].observedTarget->pid == 84,
       "selection transition should tolerate only its controlled target change");
 
   const auto read = dispatcher.execute(
@@ -911,8 +997,10 @@ void testCompletedAfterDeadlineRemainsSuccessful() {
   StubMemService service;
   service.setWriteCompletedAfterDeadline(true);
   NativeIpc::IpcApprovalBroker broker;
+  CapturingExecutionAuditSink executionAudit;
   NativeIpc::IpcMemServiceDispatcher dispatcher(
-      service, &broker, {98, "AMem.DispatcherTests", "1.0"});
+      service, &broker, {98, "AMem.DispatcherTests", "1.0"}, nullptr,
+      &executionAudit);
   auto requestContext = context();
   auto future = std::async(std::launch::async, [&] {
     return dispatcher.execute(
@@ -932,11 +1020,15 @@ void testCompletedAfterDeadlineRemainsSuccessful() {
   const auto result = future.get();
   std::string payload;
   std::string error;
+  const auto outcomes = executionAudit.records();
   expect(result.ok &&
              result.completion ==
                  NativeIpc::RequestCompletion::CompletedAfterDeadline &&
              NativeIpc::BuildResponsePayload(result, payload, error) &&
-             json::parse(payload)["completion"] == "completed_after_deadline",
+             json::parse(payload)["completion"] == "completed_after_deadline" &&
+             outcomes.size() == 1 && outcomes[0].success &&
+             outcomes[0].completion ==
+                 NativeIpc::RequestCompletion::CompletedAfterDeadline,
          "confirmed mutation after deadline must remain a successful receipt");
 }
 
@@ -1009,6 +1101,8 @@ int main() {
        &testConsumedAuditFailurePreventsExecution},
       {"cancellation after consume stops before send",
        &testCancellationAfterConsumeStopsBeforeSend},
+      {"execution audit failure preserves receipt",
+       &testExecutionAuditFailureDoesNotRewriteReceipt},
       {"approved host method uses injected executor",
        &testApprovedHostMethodUsesInjectedExecutor},
       {"process selection advances baseline safely",

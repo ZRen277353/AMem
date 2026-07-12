@@ -151,10 +151,12 @@ bool applySelectionCompletion(IpcDispatchResult &result,
 
 IpcMemServiceDispatcher::IpcMemServiceDispatcher(
     Mem::IMemService &service, IpcApprovalBroker *approvalBroker,
-    IpcExternalSession session, IIpcHostMethodExecutor *hostExecutor)
+    IpcExternalSession session, IIpcHostMethodExecutor *hostExecutor,
+    IIpcExecutionAuditSink *executionAuditSink)
     : service_(service), tools_(service),
       baseline_(service.captureContext(true)), approvalBroker_(approvalBroker),
-      session_(std::move(session)), hostExecutor_(hostExecutor) {}
+      session_(std::move(session)), hostExecutor_(hostExecutor),
+      executionAuditSink_(executionAuditSink) {}
 
 Mem::OperationContext IpcMemServiceDispatcher::baselineContext() const {
   std::lock_guard<std::mutex> lock(baselineMutex_);
@@ -377,18 +379,23 @@ IpcDispatchResult IpcMemServiceDispatcher::executeApproved(
     const IpcRequestDto &request, const IpcRequestContext &context,
     const IpcMethodDescriptor &descriptor, const IpcApprovalGrant &grant) {
   if (context.cancellationRequested()) {
-    return executionCancellation(context.cancellation->reason());
+    return auditApproved(grant, descriptor,
+                         executionCancellation(context.cancellation->reason()));
   }
   if (context.deadlineExceeded()) {
-    return executionCancellation(RequestCancelReason::Deadline);
+    return auditApproved(
+        grant, descriptor,
+        executionCancellation(RequestCancelReason::Deadline));
   }
   if (grant.sessionId != session_.sessionId ||
       grant.requestId != request.requestId || grant.method != request.method ||
       grant.capability != descriptor.capability ||
       grant.targetPolicy != descriptor.targetPolicy) {
-    return localError("approval_grant_mismatch",
-                      "approval grant does not match the active request",
-                      RequestCompletion::RejectedBeforeStart);
+    return auditApproved(
+        grant, descriptor,
+        localError("approval_grant_mismatch",
+                   "approval grant does not match the active request",
+                   RequestCompletion::RejectedBeforeStart));
   }
 
   Mem::OperationContext operation;
@@ -404,8 +411,9 @@ IpcDispatchResult IpcMemServiceDispatcher::executeApproved(
   if (selection) {
     SessionValidation validation;
     if (!beginSelection(operation, validation)) {
-      return validationFailure(validation,
-                               RequestCompletion::RejectedBeforeStart);
+      return auditApproved(
+          grant, descriptor,
+          validationFailure(validation, RequestCompletion::RejectedBeforeStart));
     }
   }
 
@@ -425,7 +433,53 @@ IpcDispatchResult IpcMemServiceDispatcher::executeApproved(
                           "selection adapter returned invalid JSON",
                           RequestCompletion::CompletionUnknown);
     }
-    return finishSelection(result, operation);
+    result = finishSelection(result, operation);
+  }
+  return auditApproved(grant, descriptor, std::move(result));
+}
+
+IpcDispatchResult IpcMemServiceDispatcher::auditApproved(
+    const IpcApprovalGrant &grant, const IpcMethodDescriptor &descriptor,
+    IpcDispatchResult result) const {
+  if (executionAuditSink_ == nullptr) {
+    return result;
+  }
+
+  IpcExecutionAuditRecord record;
+  record.approvalId = grant.approvalId;
+  record.sessionId = grant.sessionId;
+  record.requestId = grant.requestId;
+  record.clientName = session_.clientName;
+  record.clientVersion = session_.clientVersion;
+  record.method = descriptor.name;
+  record.capability = descriptor.capability;
+  record.targetPolicy = descriptor.targetPolicy;
+  record.authorizedConnectionGeneration = grant.connectionGeneration;
+  record.authorizedTarget = grant.target;
+  record.success = result.ok;
+  record.completion = result.completion;
+  if (!result.ok) {
+    record.errorCode =
+        result.errorCode.empty() || result.errorCode.size() > kMaxErrorCodeBytes
+            ? "invalid_error_code"
+            : result.errorCode;
+  }
+
+  try {
+    const Mem::OperationContext observed = service_.captureContext(true);
+    record.observedConnectionGeneration = observed.connectionGeneration;
+    record.observedTarget = observed.target;
+  } catch (...) {
+    record.observedConnectionGeneration = 0;
+    record.observedTarget.reset();
+  }
+
+  try {
+    std::string ignoredError;
+    executionAuditSink_->recordExecution(record, &ignoredError);
+  } catch (...) {
+    // An outcome already exists and may represent a sent mutation. Audit
+    // failure cannot rewrite that completion or roll the operation back.
   }
   return result;
 }

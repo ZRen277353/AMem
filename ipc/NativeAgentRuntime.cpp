@@ -14,10 +14,11 @@ NativeAgentRuntime::NativeAgentRuntime(Mem::IMemService &service,
                                        HandshakeConfig handshakeConfig,
                                        RequestSessionConfig requestConfig,
                                        IpcApprovalBroker *approvalBroker,
-                                       IIpcHostMethodExecutor *hostExecutor)
+                                       IIpcHostMethodExecutor *hostExecutor,
+                                       IIpcExecutionAuditSink *executionAuditSink)
     : service_(service), approvalBroker_(approvalBroker),
-      hostExecutor_(hostExecutor), handshakeConfig_(handshakeConfig),
-      requestConfig_(requestConfig),
+      hostExecutor_(hostExecutor), executionAuditSink_(executionAuditSink),
+      handshakeConfig_(handshakeConfig), requestConfig_(requestConfig),
       server_(std::move(pipeName), [this](HANDLE pipe, HANDLE stopEvent) {
         handleClient(pipe, stopEvent);
       }) {}
@@ -116,7 +117,7 @@ void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
     IpcMemServiceDispatcher dispatcher(
         service_, approvalBroker_,
         {sessionId, handshakeResult.clientName, handshakeResult.clientVersion},
-        hostExecutor_);
+        hostExecutor_, executionAuditSink_);
     IpcRequestSession session(connection, dispatcher,
                               handshakeResult.grantedCapabilities,
                               requestConfig_);
