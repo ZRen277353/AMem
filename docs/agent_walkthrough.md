@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 54 个可执行名称，其中 30 个为隐藏兼容 alias，provider 实际收到 24 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。LuaJIT 构建的工具注册表包含 57 个可执行名称，其中 33 个为隐藏兼容 alias，provider 实际收到 24 个定义；无 LuaJIT 时分别为 55/32/23，两个 Lua 名称均不注册。
 
 ### 1.2 加载 provider 配置
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-二十一个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+二十三个已迁移 canonical 工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-module/pointer/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 以最多 100 项分页。旧 scan/symbol/breakpoint 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。Lua 仍只有 Controller 出队和结果回收保护。
+driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 以最多 100 项分页。旧 scan/symbol/breakpoint 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。`lua_execute` 在 host 边界复核 target，使用 Agent absolute deadline，并只把开始后的取消作为回执标记。
 
 ### 5.3 受管工具队列
 
@@ -311,7 +311,7 @@ executor 返回 JSON 字符串。`ToolExecutor::extractToolError()` 会识别：
 - 失败：写失败 audit，本批剩余工具标 skipped。
 - 批次结束：`ReadyForFollowUp`。
 
-`AgentRunner::makeToolMessage()` 会把 arguments 和 result/details 完整写入会话。敏感 card、Lua 和内存数据因此会明文落盘并可能在下一次模型请求中发送到 provider。
+`AgentRunner::makeToolMessage()` 通常会把 arguments 和 result/details 完整写入会话。driver card 是当前例外：原始参数仅在进程内用于执行和当前 tool-call 连续性，审批、审计和 `ChatSession` JSON 使用 `[REDACTED]`。Lua、地址、内存和其他工具数据仍会明文落盘并可能在下一次模型请求中发送到 provider。
 
 ## 6. 回喂模型
 
@@ -451,11 +451,11 @@ MCP client
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
 | 地址字符串 `"1234"` | 规范 raw/typed memory、pointer offsets 和 breakpoint 地址拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 24 个广告定义 / 54 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | LuaJIT: 24 广告 / 57 可执行 / 33 隐藏；无 LuaJIT: 23/55/32 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
-静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `read_disassembly`/`symbol_resolve`/`breakpoint_hits` 也没有同名 IPC 方法。无 LuaJIT 时三层还会以“返回 unavailable / 未注册 / 仍展示工具”三种方式表现。不要再用“暴露全部 C++ 能力”描述 MCP。
+静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 也没有同名 IPC 方法。无 LuaJIT 时内置 Agent 不注册任何 Lua 工具，IPC 不注册该方法，而 MCP 仍可能展示工具。不要再用“暴露全部 C++ 能力”描述 MCP。
 
 ### 9.2 IPC 安全
 
@@ -540,7 +540,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 19 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 21 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

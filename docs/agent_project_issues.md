@@ -27,9 +27,9 @@
 | A-08 | P1 | 未修复 | 复合工具和进程切换不是事务，可被其他前端插入 |
 | A-09 | P1 | 未修复 | HTTP、模型内容、工具输出和会话载入缺少总量上限 |
 | A-10 | P1 | 待安全决策 | “OpenAI” provider 默认指向第三方兼容网关 |
-| A-11 | P1 | 未修复 | 会话明文保存敏感工具参数、结果和脚本 |
+| A-11 | P1 | 部分修复 | driver card 已脱敏；其他敏感工具参数、结果和脚本仍明文保存 |
 | A-12 | P2 | 未修复 | 全局 prompt/token 设置会被会话文件反向覆盖 |
-| A-13 | P2 | 未修复 | `symbol_*` 安全分类、共享状态语义和默认 prompt 不一致 |
+| A-13 | P2 | 已修复 | `symbol_*` 按当前二元安全模型统一分类、事务语义和默认 prompt |
 | A-14 | P2 | 未修复 | 内置 Agent 与 IPC/MCP 的地址字符串进制语义不同 |
 | A-15 | P2 | 未修复 | 设置草稿不完整，且无法从 UI 删除 provider key |
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
@@ -74,11 +74,11 @@
 
 **影响**
 
-已迁移工具、module/pointer lookup、canonical scan/symbol/breakpoint 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；canonical breakpoint 在 service send 边界消费 target，并保留确认/未知回执。但隐藏 scan/symbol/breakpoint aliases 和 Lua 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；canonical breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
-- 下一步迁移 Lua、driver/disassembly 等剩余规范名称，使实际 service/host/socket 边界使用传入的 `OperationContext`，并逐步删除隐藏 legacy executor。
+- 下一步迁移/删除隐藏 legacy executor，使每个实际 service/host/socket 边界使用传入的 `OperationContext`；规范目录已完成，不再新增第二套模型可见名称。
 - 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
 - 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
 
@@ -227,11 +227,11 @@ DPAPI 只保护 `ai_config.json` 中的 provider API key。`ChatSession` 会明�
 
 **影响**
 
-`init_driver` 卡密、Lua 代码、地址、内存内容、符号和断点寄存器可能进入 `ai_sessions/*.json`。这些内容还会在后续回合发送给远端 provider。
+driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit 和 `ai_sessions/*.json` 脱敏，原值只为执行和当前 tool-call 连续性暂存在进程内。Lua 代码、地址、内存内容、符号和断点寄存器仍可能进入会话文件，并在后续回合发送给远端 provider，因此本项仍未关闭。
 
 **建议**
 
-- 为敏感参数定义字段级 redaction，例如 card/key/token 永不进入 history。
+- 把现有 driver card 字段级 redaction 扩展为 catalog 元数据，覆盖后续所有 card/key/token，而不是继续维护工具名特判。
 - 提供“不持久化工具结果”或加密会话选项，并在 UI 说明远端 provider 数据边界。
 - 对内存/寄存器结果保存摘要或用户明确选择的片段。
 
@@ -301,16 +301,16 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 当前静态提取结果：
 
-- 内置 Agent：54 个可执行名称，其中 30 个隐藏兼容 alias，向 provider 广告 24 个定义。
+- 内置 Agent（LuaJIT）：57 个可执行名称，其中 33 个隐藏兼容 alias，向 provider 广告 24 个定义；无 LuaJIT 时为 55/32/23。
 - IPC：29 个方法。
 - MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
-- 内置 Agent 独有 `read_disassembly`、`symbol_resolve` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
-- 无 LuaJIT 时，内置 `execute_lua` 仍存在并返回 unavailable；IPC 不注册该方法，而 MCP 仍对模型暴露工具。
+- 内置 Agent 独有 canonical `disassemble`、`symbol_resolve` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
+- 无 LuaJIT 时，内置 `lua_execute`/`execute_lua` 均不注册；IPC 不注册该方法，而 MCP 仍对模型暴露工具。
 - 名称别名包括 `get_server_version`/`get_version`、`read_breakpoint_info`/`read_bp_info`。
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-`status`、`process_list`、`process_open`、module/pointer/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；scan/breakpoint mutation 返回明确 completion，breakpoint hits 有有限分页；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion，breakpoint hits 有有限分页；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。但隐藏 legacy 工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 
@@ -392,7 +392,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 19 个测试组，覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 21 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。

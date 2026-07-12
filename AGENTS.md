@@ -40,7 +40,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the current no-device C++ test. Its 19 groups cover address and scalar codecs, native `MemService` adapters, module/pointer resolution, native scan/symbol sessions and breakpoint receipts/hit paging, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the current no-device C++ test. Its 21 groups cover address and scalar codecs, native `MemService` adapters, driver initialization receipts and card redaction, module/pointer/disassembly, native scan/symbol sessions and breakpoint receipts/hit paging, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ### MCP Server
 
@@ -180,8 +180,8 @@ ChatWindow
 - `AgentRunner` owns the model -> tool -> model state machine, budgets, and approval gating. It must remain free of ImGui calls.
 - `AgentTaskExecutor` owns a bounded serial queue and one joinable worker. It fixes the absolute deadline at enqueue, propagates cancellation, calls `ToolExecutor` synchronously, and joins during shutdown.
 - `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, synchronous executor call, and result normalization.
-- `ToolDefinitions.cpp` currently has 54 executable names. Thirty legacy aliases are hidden from providers, leaving 24 advertised definitions.
-- The native slice (`mem/`, `AgentMemTools`) owns status/process/open, module/pointer/symbol resolution, scan/symbol sessions, breakpoint mutations/hits, raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
+- With LuaJIT, `ToolDefinitions.cpp` has 57 executable names: 33 hidden legacy aliases and 24 advertised definitions. Without `HAVE_LUAJIT`, neither Lua name is registered, leaving 55 executable / 32 hidden / 23 advertised.
+- The native slice (`mem/`, `AgentMemTools`) owns status/driver/process/open, module/pointer/disassembly/symbol resolution, scan/symbol sessions, breakpoint mutations/hits, raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
 - `ChatSession::getMessagesForRequest()` is the required provider boundary; it cleans and pairs tool calls/results.
 
 ### Tool Safety
@@ -210,7 +210,7 @@ Do not add new detached threads. Extend the owned task model and keep completion
 
 `AgentRunContext` captures the connection generation and `{pid, handle, processRevision}`. The approval dialog shows expected generation, PID, and revision; approval, dequeue, and result collection revalidate them. `process_open` uses `Selection` policy and explicitly advances the run context only when its returned snapshot is still current.
 
-This closes the boundary only for operations migrated to `MemService`, including module/pointer/symbol resolution, canonical scan/symbol/breakpoint operations, and raw/typed memory read/write. `pointer_resolve` holds one read transaction across module lookup and every dereference. Canonical scan tools bind `{target, scanEpoch}` and report confirmed completion after cancellation/deadline; an unconfirmed sent scan is `completion_unknown`. Canonical symbol tools bind module lookup, initialization, and list/find to one transaction and return a module-bound epoch. Canonical breakpoint mutations bind the target at send and preserve confirmed/unknown completion; hit pages are target-bound. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late mutation receipts still need independent audit visibility.
+This closes the boundary only for operations migrated to `MemService`, including driver initialization, module/pointer/disassembly/symbol resolution, canonical scan/symbol/breakpoint operations, and raw/typed memory read/write. `driver_initialize` is connection-bound and distinguishes unsent, rejected, completion-unknown, and confirmed-after-cancel/deadline outcomes. `pointer_resolve` holds one read transaction across module lookup and every dereference. Canonical scan tools bind `{target, scanEpoch}` and report confirmed completion after cancellation/deadline; an unconfirmed sent scan is `completion_unknown`. Canonical symbol tools bind module lookup, initialization, and list/find to one transaction and return a module-bound epoch. Canonical breakpoint mutations bind the target at send and preserve confirmed/unknown completion; hit pages are target-bound. `lua_execute` revalidates the target at its host-execution boundary and never extends the task's absolute deadline, but cannot retract a script after it starts. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late mutation receipts still need independent audit visibility.
 
 ### Limits
 
@@ -235,7 +235,7 @@ Files are relative to the process working directory:
 - `ai_sessions/index.json`: session metadata.
 - `ai_sessions/<id>.json`: plain chat/tool history.
 
-Do not claim that all AI data is encrypted. Session files can contain driver cards, Lua code, addresses, memory bytes, registers, tool arguments, and tool results. That history can also be sent to the active remote provider in later turns.
+Do not claim that all AI data is encrypted. `driver_initialize`/`init_driver` card fields are redacted from approval display, tool audit, and session JSON while the original remains transiently available for execution/provider continuity. Session files can still contain Lua code, addresses, memory bytes, registers, other tool arguments, and tool results, and that history can be sent to the active remote provider in later turns.
 
 Loaders must parse into temporary state and preserve the original on failure. Current loaders do not all meet that rule, and `ChatSession` does not use the same atomic install helper as the other managers.
 
@@ -276,7 +276,7 @@ External assistant -> FastMCP tool -> IpcClient -> GUI IPC -> socket command
 
 Keep `mcp/amem_mcp/constants.py` synchronized with C++ scan flags, value types, and memory region enums.
 
-The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 24 advertised definitions and 54 executable names (30 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; canonical in-app `read_disassembly`/`symbol_resolve`/`breakpoint_hits` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
+The exposed surfaces are intentionally overlapping, not identical: with LuaJIT the in-app registry has 24 advertised definitions and 57 executable names (33 hidden aliases); without it the counts are 23/55/32. IPC has 29 methods and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; canonical in-app `disassemble`/`symbol_resolve`/`breakpoint_hits` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
 
 Address parsing currently differs:
 
@@ -299,6 +299,7 @@ Python HTTP timeout does not cancel the detached C++ handler. A retry can overla
 - `LuaAPI_Assembly.cpp`
 
 Lua is reachable from GUI windows, the in-app AI tool, and IPC. Treat arbitrary Lua as privileged write/stateful execution.
+The in-app canonical name is `lua_execute`; hidden `execute_lua` compatibility is registered only with `HAVE_LUAJIT`. Its timeout is bounded by the Agent task deadline, and cancellation after execution starts is only reported on the receipt, not treated as a hard stop.
 
 ## Required Engineering Patterns
 

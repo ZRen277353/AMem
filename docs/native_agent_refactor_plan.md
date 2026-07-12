@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，原生 module/pointer/scan/symbol/breakpoint/raw/typed memory、连接生命周期、run target 与受管工具 worker 已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、Lua host boundary、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,12 +10,12 @@
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成十个纵向切片：
+截至 2026-07-12 已完成十三个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
 - `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
-- `status`、`process_list`、`process_open`、module/pointer/symbol resolution、canonical scan/symbol/breakpoint、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
+- `status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/symbol/breakpoint、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
 - raw write 保留 request-started/response-received/written-byte 状态，区分发送前取消、`completion_unknown`、部分写和 deadline/cancel 后确认完成。
 - `ValueCodec` 统一 byte/word/dword/qword/xor/float/double 的别名、范围、little-endian 编解码和精确文本；typed write 复用 raw write 回执。
 - module list 统一分页和大小上限；module resolve 按完整名、basename、唯一子串依次匹配并拒绝歧义。协议入口限制单名 4096 bytes 和累计 16 MiB。
@@ -23,13 +23,16 @@
 - scan mutation 统一推进单调 epoch；`scan_start` 在一个事务内执行 range+scan，refine/results/clear 要求最新 epoch，results 绑定 count+page，clear 用 count=0 确认。长扫描通过 DEBUG stop 响应 cancellation，sent-without-terminal 保留 `completion_unknown`。
 - symbol init 在取得 transaction gate 后推进单调 epoch；`symbol_resolve`/`symbol_list` 在一个 MAIN transaction 内完成 module 唯一匹配、init 与 find/page，续页要求最新 epoch。旧 GUI/IPC/隐藏 alias init 会使 native session 失效。
 - breakpoint set/remove/suspend/resume 使用统一 tracked receipt，区分未发送、server reject、发送后未知和确认后 cancel/deadline；设备确认与 cleanup tracker 在同一 MAIN transaction 更新，disconnect 清本地 tracker。hits 以 100 项分页并把 64 位寄存器转为字符串。
+- `disassemble` 统一校验 ARM64 固定宽度 `count * 4`、拒绝短读，返回 little-endian encoding 和明确的 `decoded=false`；旧 `read_disassembly` 仅作隐藏 alias。
+- `driver_initialize` 在 service/send 边界绑定 connection generation，区分未发送、server reject、`completion_unknown` 与确认后 cancel/deadline；`card`/`card_name` 在审批、审计和会话 JSON 中统一脱敏，原值仅瞬时用于执行/provider 连续性。
+- `lua_execute` 与隐藏 `execute_lua` 仅在 `HAVE_LUAJIT` 时注册；执行前复核 target/generation，Lua timeout 不得延长 task absolute deadline，开始后取消只记录回执而不声称硬中止。
 - `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
-- 旧名称仍可执行但不再向 provider 广告。当前注册表有 54 个可执行名称，其中 30 个隐藏 alias，模型收到 24 个定义。
-- `NativeAgentMemTests` 的 19 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
+- 旧名称仍可执行但不再向 provider 广告。LuaJIT 构建当前有 57 个可执行名称、33 个隐藏 alias、24 个广告定义；无 LuaJIT 时为 55/32/23。
+- `NativeAgentMemTests` 的 21 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：Lua/driver/disassembly 等剩余规范工具迁移、Stop 后已发送操作的独立可见审计、GUI/IPC scan/symbol/breakpoint 调用迁移、MCP/IPC 删除。隐藏 legacy 工具目前仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
+尚未完成：Stop 后已发送操作的独立可见审计、GUI/IPC scan/symbol/breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
 
 ## 1. 结论
 
@@ -280,7 +283,7 @@ public:
 | `scan_refine` | `scan_next` | 过滤当前 scan session |
 | `scan_results` | `get_scan_count`, `get_scan_results` | 结果页包含 total |
 | `scan_clear` | `clear_scan` | 清理当前 scan session |
-| `disassemble` | `read_disassembly` | 返回 bytes、encoding 和可用时的 ARM64 文本 |
+| `disassemble` | `read_disassembly` | 当前返回 bytes、little-endian encoding 和 `decoded=false`；不伪造 mnemonic |
 | `breakpoint_set` | `set_breakpoint` | 目标状态变更，始终审批 |
 | `breakpoint_remove` | `remove_breakpoint` | 目标状态变更，始终审批 |
 | `breakpoint_hits` | `read_breakpoint_info` | 读取命中和寄存器信息 |
@@ -301,7 +304,8 @@ public:
 | `Observe` | status、list、read、disassemble | 无审批，仍校验 target |
 | `SessionMutation` | scan start/refine/clear、symbol cache 初始化 | 默认无需逐次审批，但记录审计并可由设置提升为需审批 |
 | `TargetSelection` | process open/switch | 始终审批 |
-| `TargetMutation` | memory write、breakpoint、freeze、driver init | 始终审批并绑定 target snapshot |
+| `ConnectionMutation` | driver init | 始终审批并绑定 connection generation |
+| `TargetMutation` | memory write、breakpoint、freeze | 始终审批并绑定 target snapshot |
 | `HostExecution` | Lua | 始终审批，可在构建或设置中彻底禁用 |
 
 每个 tool descriptor 还应声明：
@@ -313,7 +317,7 @@ public:
 - `featureGate`
 - 输入和输出预算
 
-审批记录至少保存 tool 名、规范化参数摘要、effect、runId、target snapshot、决定和时间。内存写入数据可以按安全设置做摘要或脱敏，但不能只记录“用户已同意”而缺少目标。
+审批记录至少保存 tool 名、脱敏后的规范化参数摘要、effect、runId、target snapshot、决定和时间。driver card/key/token 必须永不进入显示或持久审计；内存写入数据可以按安全设置做摘要或脱敏，但不能只记录“用户已同意”而缺少目标。
 
 ## 7. IPC 取舍与新协议
 
@@ -437,7 +441,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - 加入 `AgentRunContext`、effect metadata 和 target-bound approval。
 - 使用 joinable `AgentTaskExecutor`，删除工具路径两层 detached。
 - 先注册规范工具，同时将 alias 设为 hidden compatibility entry。
-- 扫描、符号和断点状态操作已迁入 service 事务边界；继续迁移剩余规范工具。
+- 24 个目标规范名称均已落地；扫描、符号、断点、driver 和 disassembly 已迁入 service 边界，Lua 已加入 host boundary/feature gate。下一步迁移或删除隐藏 legacy executor。
 
 退出条件：Agent 工具实现中没有 raw socket command 或 `AppContext::Get()`；Stop 和 teardown 测试通过。
 
@@ -576,4 +580,10 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十批加入 `MemService` breakpoint mutation/hit page，注册 `breakpoint_set`/`breakpoint_remove`/`breakpoint_hits`/`breakpoint_suspend`/`breakpoint_resume`，并隐藏五个旧名称。mutation 统一 target snapshot 和 request-started/response-received/applied 回执；设备确认与 cleanup tracker 在同一 transaction 内更新，cleanup 持 gate 避免并发 set 漏项，disconnect 清除本地旧 tracker。hits 在 socket 层按块读取并仅保留请求页，Agent 边界用字符串保存 64 位寄存器/时间精度。
 
-十个切片均已通过 Debug/Release 应用构建和 19 组无设备测试。下一批应迁移 `disassemble`、`driver_initialize` 和 `lua_execute`，完成模型可见规范目录；随后实现 Stop 后已发送操作的独立审计，再推进 GUI/IPC/MCP 收敛。
+第十一批加入 `MemService::disassemble` 与 canonical `disassemble`，隐藏 `read_disassembly`。ARM64 请求固定读取 `count * 4` 字节，短读视为协议错误；当前返回结构化 little-endian encoding 与 `decoded=false`，不在无解码器证据时伪造 mnemonic。
+
+第十二批加入 connection-bound `MemService::initializeDriver` 与 canonical `driver_initialize`，隐藏 `init_driver`。tracked socket receipt 区分 request started、response received、server accepted/rejected 和 completion unknown；`ToolCallSecurity` 为执行参数保留瞬时原值，但审批显示、tool audit 和 session persistence 只使用脱敏副本。
+
+第十三批加入 canonical `lua_execute` 并隐藏 `execute_lua`，两者只在 `HAVE_LUAJIT` 时注册。host 执行前复核 target/generation，实际 Lua hook deadline 取参数 timeout 与 Agent absolute deadline 的较早值；脚本开始后不承诺硬取消，晚到取消/超时按完成回执记录。
+
+十三个切片均已通过 Debug/Release 应用构建和 21 组无设备测试，模型可见规范目录已完成。下一批应实现 Stop 后已发送操作的独立审计，再推进 GUI 调用迁移、隐藏 alias 删除以及 IPC/MCP 收敛。

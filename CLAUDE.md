@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 19 no-device C++ groups for address/scalar codecs, native `MemService` adapters, module/pointer resolution, native scan/symbol sessions, breakpoint receipts/hit paging, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, and `AgentTaskExecutor` queue/cancellation/shutdown behavior. Provider, IPC, real transport, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` contains 21 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/hit paging, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, and `AgentTaskExecutor` queue/cancellation/shutdown behavior. Provider, IPC, real transport, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ### MCP server (Python)
 
@@ -110,7 +110,7 @@ MCP ▶ IPC ───┘        (the protocol layer)
 The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatWindow`'s constructor (idempotent `initBuiltin*` calls).
 
 - **Providers**: `AIProvider` is the abstract interface (`sendCompletion` runs async on a background thread). Built-ins `ClaudeProvider`, `OpenAIProvider`, `DeepSeekProvider` are registered in `ProviderRegistry`. `HttpClient` wraps cpp-httplib (HTTPS via OpenSSL).
-- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `AgentTaskExecutor` (bounded queue + one joinable worker) → synchronous `ToolExecutor` (thread-safe registry + validated execution). The registry has **54 executable names**, with 30 hidden aliases and 24 definitions advertised to providers. `status`/process/open, module/pointer/symbol resolution, canonical scan/symbol/breakpoint operations, and raw/typed memory operations go through `mem/` + `AgentMemTools`; remaining tools still wrap `client_singleton.h` directly.
+- **Agent loop**: `ChatWindow` (UI) → `AgentController` (provider lookup, request construction, async dispatch, run state) → `AgentRunner` (the model→tool→model loop, step/tool budgets, approval gating) → `AgentTaskExecutor` (bounded queue + one joinable worker) → synchronous `ToolExecutor` (thread-safe registry + validated execution). With LuaJIT the registry has **57 executable names**, with 33 hidden aliases and 24 definitions advertised to providers; without it the counts are 55/32/23. `status`/driver/process/open, module/pointer/disassembly/symbol resolution, canonical scan/symbol/breakpoint operations, and raw/typed memory operations go through `mem/` + `AgentMemTools`; Lua is validated at its host-execution boundary, while remaining legacy tools still wrap `client_singleton.h` directly.
 - **Tool safety**: every tool is classified `ToolSafety::ReadOnly` or `Write`. Write currently means target/host mutation and requires explicit UI approval unless `autoApproveWrites` is set. Canonical `symbol_resolve`/`symbol_list` are ReadOnly because they do not modify target memory; their internal active-table mutation is serialized and epoch-bound. `symbol_init`, `symbol_find`, and `resolve_symbol` are hidden compatibility names, and the default prompt is aligned with the canonical surface.
 - **Threading model**: providers and the tool worker post results to the ImGui main thread via `UIMessageQueue` (message kinds: `Token`, `Completion`, `Error`, `ToolResult`), consumed in `ChatWindow::pollMessages()`. Never touch ImGui/run state from a worker. Tool execution is owned and joinable; HTTP workers and IPC handlers are still detached, so application-wide teardown is not fully closed. Do not add more detached work.
 - **Streaming completion**: HTTP 2xx is insufficient. Claude/DeepSeek set terminal state but never validate it, and OpenAI does not track it, so a truncated SSE stream can currently be committed as success. New provider work must require a legal terminal before tool execution.
@@ -119,7 +119,7 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
 - **Persistence** (all relative to the process working directory; this is only next to the exe when launched from there):
   - `ai_config.json` — provider configs; **API keys are encrypted with Windows DPAPI** (`ApiKeyStore`, base64 over the encrypted blob). Keys are per-Windows-user and never bundled.
   - `ai_settings.json` — non-secret, hand-editable settings (`AiSettings`): system prompt, proxy, etc. `DefaultSystemPrompt.h` seeds an AMem-specific prompt on first run.
-  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — **plaintext** chat/tool history (`SessionManager` + `ChatSession`; max 1000 messages after load/truncation). It can contain cards, Lua, addresses, memory data, and complete tool arguments/results.
+  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — **plaintext** chat/tool history (`SessionManager` + `ChatSession`; max 1000 messages after load/truncation). Driver card fields are redacted before display/audit/persistence, but files can still contain Lua, addresses, memory data, and other complete tool arguments/results.
   - Legacy migrations run once on startup: `ai_config.dat`→`ai_config.json`, `ai_session.json`→`ai_sessions/`.
 - **Provider trust**: `OpenAIProvider` currently defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS alone does not establish that the recipient is the provider the user intended.
 
@@ -135,11 +135,11 @@ A standalone Python package (`amem_mcp`, FastMCP-based) that proxies MCP tool ca
 
 The MCP path does not pass through `AgentRunner` approval. Canonical in-app raw/typed memory addresses, `pointer_resolve` offsets, and breakpoint addresses now require `0x`; hidden and unmigrated in-app tools still treat many unprefixed strings as hexadecimal, while IPC/MCP treats them as decimal. Require explicit `0x` strings until every parser is unified.
 
-The surfaces overlap but are not identical: the in-app registry has 24 advertised definitions / 54 executable names, IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
+The surfaces overlap but are not identical: with LuaJIT the in-app registry has 24 advertised definitions / 57 executable names / 33 hidden aliases; without it the counts are 23/55/32. IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
 
 ### Lua scripting (`lua/`, gated by `HAVE_LUAJIT`)
 
-`LuaEngine` (singleton) owns the LuaJIT state. `LuaAPI*.cpp` expose C++ bindings: `LuaAPI_Memory` (memory/scan/breakpoints), `LuaAPI_ImGui` (drawing), `LuaAPI_Assembly`. Lua is reachable from the GUI (`LuaScriptWindow`, `LuaImGuiWindow`), from the AI tools, and from the IPC `execute_lua` method.
+`LuaEngine` (singleton) owns the LuaJIT state. `LuaAPI*.cpp` expose C++ bindings: `LuaAPI_Memory` (memory/scan/breakpoints), `LuaAPI_ImGui` (drawing), `LuaAPI_Assembly`. Lua is reachable from the GUI (`LuaScriptWindow`, `LuaImGuiWindow`), from the feature-gated canonical AI tool `lua_execute` (hidden alias `execute_lua`), and from the IPC `execute_lua` method. Agent Lua execution is target-bound, cannot extend the absolute task deadline, and cannot be retracted after it starts.
 
 ### Version system
 

@@ -258,18 +258,18 @@ Idle
 5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
 6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
 
-当前注册表有 **54 个可执行名称**。其中 30 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 24 个定义。当前目录如下（H=hidden）：
+当前 LuaJIT 构建的注册表有 **57 个可执行名称**。其中 33 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 24 个定义。无 `HAVE_LUAJIT` 时 canonical/alias Lua 均不注册，目录为 55 个可执行、32 个隐藏、23 个广告定义。当前 LuaJIT 目录如下（H=hidden）：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
-| 状态/驱动 | `status` R, `get_status` H, `get_server_version` H, `get_architecture` H, `init_driver` W |
-| 内存读 | `memory_read` R, `read_memory` H, `memory_read_value` R, `read_value` H, `read_disassembly` R |
+| 状态/驱动 | `status` R, `get_status` H, `get_server_version` H, `get_architecture` H, `driver_initialize` W, `init_driver` H |
+| 内存读 | `memory_read` R, `read_memory` H, `memory_read_value` R, `read_value` H, `disassemble` R, `read_disassembly` H |
 | 内存写 | `memory_write` W, `write_bytes` H, `memory_write_value` W, `write_value` H |
 | 扫描 | `scan_start` W, `scan_refine` W, `scan_results` R, `scan_clear` W, `scan_set_range` H, `scan_value` H, `scan_next` H, `scan_fuzzy` H, `scan_hex` H, `get_scan_count` H, `get_scan_results` H, `clear_scan` H |
 | 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `pointer_resolve` R, `resolve_offset_chain` H |
 | 断点 | `breakpoint_set` W, `breakpoint_remove` W, `breakpoint_hits` R, `breakpoint_suspend` W, `breakpoint_resume` W, `set_breakpoint` H, `remove_breakpoint` H, `read_breakpoint_info` H, `suspend_breakpoint` H, `resume_breakpoint` H |
 | 符号 | `symbol_resolve` R, `symbol_list` R, `resolve_symbol` H, `symbol_init` H, `symbol_find` H |
-| 脚本 | `execute_lua` W |
+| 脚本 | `lua_execute` W, `execute_lua` H（两者均受 `HAVE_LUAJIT` 约束） |
 
 当前二元安全模型把 `Write` 定义为需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称需要写审批。未来扩展 effect 元数据时应把它们标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
 
@@ -289,7 +289,7 @@ Idle
 - 独立持久 effect 审计
 - endpoint/provider 数据去向
 
-二十一个已迁移工具（`status`、`process_list`、`process_open`、module/pointer resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit page 在 service/Agent 边界限制为 100 项。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
+二十三个 canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit page 在 service/Agent 边界限制为 100 项。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -346,7 +346,7 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 | `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；加载失败处理仍可能覆盖文件 |
 | `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；损坏与缺失当前都可能写默认值 |
 | `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏时可能重建为空索引并孤立会话文件 |
-| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；可能包含卡密、Lua、地址和内存数据 |
+| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；driver card 字段会脱敏，但仍可能包含 Lua、地址、内存数据和其他完整参数/结果 |
 
 ### 9.1 全局设置与会话字段冲突
 
@@ -415,11 +415,12 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent | 24 个广告定义 / 54 个可执行名称 | 30 个旧名称仅作隐藏兼容 |
+| 内置 Agent（LuaJIT） | 24 个广告定义 / 57 个可执行名称 | 33 个旧名称仅作隐藏兼容 |
+| 内置 Agent（无 LuaJIT） | 23 个广告定义 / 55 个可执行名称 | 32 个旧名称仅作隐藏兼容；Lua 不注册 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
-内置 Agent 另有 `read_disassembly`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时三层对 `execute_lua` 的可见性也不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
+内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`/`execute_lua`，而 IPC/MCP 的行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
 ### 10.3 当前 IPC 安全边界
 
@@ -488,7 +489,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 19 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 21 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪
