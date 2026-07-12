@@ -106,6 +106,29 @@ Mem::TargetSnapshot AppContext::snapshotTarget(
     return snapshot;
 }
 
+bool AppContext::matchesStableTarget(
+    const Mem::TargetSnapshot& expected,
+    uint64_t connectionGeneration) const {
+    if (expected.connectionGeneration != connectionGeneration) {
+        return false;
+    }
+
+    const uint64_t revisionBefore =
+        processRevision.load(std::memory_order_acquire);
+    if ((revisionBefore & 1u) != 0u ||
+        revisionBefore != expected.processRevision) {
+        return false;
+    }
+    const int pid = selectedPid.load(std::memory_order_relaxed);
+    const int handle = processHandle.load(std::memory_order_relaxed);
+    const uint64_t revisionAfter =
+        processRevision.load(std::memory_order_acquire);
+    return revisionBefore == revisionAfter &&
+           (revisionAfter & 1u) == 0u &&
+           pid == expected.pid &&
+           handle == expected.processHandle;
+}
+
 void AppContext::ModuleCache::refresh() {
     std::lock_guard<std::mutex> lock(mutex);
 

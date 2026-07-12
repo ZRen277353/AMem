@@ -254,6 +254,10 @@ static bool read_u64(uint64_t address, uint64_t &value, PortType port) {
 bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleName,
                               uint64_t baseOffset, const std::vector<uint64_t> &offsets,
                               bool derefFinal, PortType port) {
+    SocketCommand::TransactionLease transaction(port);
+    if (!transaction)
+        return false;
+
     uint64_t base = 0;
     if (!GetModuleBaseByName(moduleName, base, port))
         return false;

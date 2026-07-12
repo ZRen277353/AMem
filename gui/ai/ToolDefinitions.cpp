@@ -58,7 +58,6 @@ constexpr size_t kMaxToolStringParamBytes = 4096;
 constexpr size_t kMaxToolHexStringBytes = 16 * 1024;
 constexpr size_t kMaxToolLuaCodeBytes = 256 * 1024;
 constexpr size_t kMaxToolScanHexBytes = 4096;
-constexpr size_t kMaxToolOffsetChainLength = 1024;
 constexpr int kDefaultToolLuaTimeoutSeconds = 30;
 constexpr int kMaxToolLuaTimeoutSeconds = 300;
 constexpr int kKnownMemoryTypeMask =
@@ -1253,43 +1252,16 @@ std::string execGetModuleBase(const std::string& argsJson,
     return getAgentMemTools().moduleResolve(argsJson, true, context);
 }
 
-// resolve_offset_chain
-std::string execResolveOffsetChain(const std::string& argsJson) {
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string moduleName = requiredStringArg(
-            args, {"module", "module_name"}, "module", kMaxToolStringParamBytes);
-        const uint64_t baseOffset = parseAddressJson(args.at("base_offset"));
-        std::vector<uint64_t> offsets;
-        if (args.contains("offsets") && !args["offsets"].is_null()) {
-            if (!args["offsets"].is_array()) {
-                throw std::runtime_error("offsets must be an array");
-            }
-            if (args["offsets"].size() > kMaxToolOffsetChainLength) {
-                throw std::runtime_error("offsets chain is too long");
-            }
-            for (const auto& off : args["offsets"]) {
-                offsets.push_back(parseAddressJson(off));
-            }
-        }
-        const bool derefFinal = optionalBoolArg(args, "deref_final", true);
+// canonical pointer_resolve
+std::string execPointerResolve(const std::string& argsJson,
+                               const Mem::OperationContext& context) {
+    return getAgentMemTools().pointerResolve(argsJson, false, context);
+}
 
-        uint64_t address = 0;
-        if (!ResolveModuleOffsetChain(address,
-                                      moduleName,
-                                      baseOffset,
-                                      offsets,
-                                      derefFinal,
-                                      PORT_MAIN)) {
-            return makeError("socket communication error: resolve_offset_chain");
-        }
-        json result;
-        result["module"] = moduleName;
-        result["address"] = toHexAddress(address);
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("resolve_offset_chain: ") + e.what());
-    }
+// hidden resolve_offset_chain compatibility alias
+std::string execResolveOffsetChain(const std::string& argsJson,
+                                   const Mem::OperationContext& context) {
+    return getAgentMemTools().pointerResolve(argsJson, true, context);
 }
 
 // read_disassembly
@@ -2124,6 +2096,33 @@ constexpr const char* kSchemaGetModuleBase = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaPointerResolve = R"JSON({
+  "type": "object",
+  "required": ["module_name", "base_offset"],
+  "properties": {
+    "module_name": {
+      "type": "string",
+      "description": "Exact module name, basename, or unique substring",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "base_offset": {
+      "type": "string",
+      "description": "Explicit 0x-prefixed offset from the module base"
+    },
+    "offsets": {
+      "type": "array",
+      "description": "Pointer offsets as explicit 0x-prefixed strings",
+      "items": { "type": "string" },
+      "maxItems": 1024
+    },
+    "deref_final": {
+      "type": "boolean",
+      "description": "Dereference the address after applying all offsets (default true)"
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaResolveOffsetChain = R"JSON({
   "type": "object",
   "required": ["base_offset"],
@@ -2652,13 +2651,21 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
+        "pointer_resolve",
+        "Resolve a module-relative pointer chain in one target-bound read transaction.",
+        kSchemaPointerResolve,
+        ToolSafety::ReadOnly,
+        &execPointerResolve,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "resolve_offset_chain",
-        "Resolve a module-relative pointer chain to a final address.",
+        "Compatibility alias for pointer_resolve.",
         kSchemaResolveOffsetChain,
         ToolSafety::ReadOnly,
         &execResolveOffsetChain,
-        true,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Bound,
+        false);
 
     registerTool(
         "read_disassembly",

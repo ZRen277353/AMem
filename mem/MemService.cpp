@@ -86,6 +86,68 @@ std::optional<Error> validateModules(
     return std::nullopt;
 }
 
+std::optional<Error> findResolvedModule(
+    const std::vector<ModuleInfo>& modules,
+    const std::string& normalizedQuery,
+    const ModuleInfo*& resolved) {
+    std::vector<const ModuleInfo*> fullMatches;
+    std::vector<const ModuleInfo*> baseNameMatches;
+    std::vector<const ModuleInfo*> substringMatches;
+    for (const auto& module : modules) {
+        const std::string fullName = lowerAscii(module.name);
+        if (fullName == normalizedQuery) {
+            fullMatches.push_back(&module);
+        }
+        if (lowerAscii(moduleBaseName(module.name)) == normalizedQuery) {
+            baseNameMatches.push_back(&module);
+        }
+        if (fullName.find(normalizedQuery) != std::string::npos) {
+            substringMatches.push_back(&module);
+        }
+    }
+
+    const std::vector<const ModuleInfo*>* matches = nullptr;
+    if (!fullMatches.empty()) {
+        matches = &fullMatches;
+    } else if (!baseNameMatches.empty()) {
+        matches = &baseNameMatches;
+    } else {
+        matches = &substringMatches;
+    }
+    if (matches->empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "module_name did not match a loaded module", false};
+    }
+    if (matches->size() != 1) {
+        return Error{
+            ErrorCode::InvalidArgument,
+            "module_name is ambiguous; use module_list with a narrower filter",
+            false};
+    }
+    resolved = matches->front();
+    return std::nullopt;
+}
+
+bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& result) {
+    if (base > (std::numeric_limits<uint64_t>::max)() - offset) {
+        return false;
+    }
+    result = base + offset;
+    return true;
+}
+
+std::optional<uint64_t> decodePointer(
+    const std::vector<unsigned char>& bytes) {
+    if (bytes.size() != sizeof(uint64_t)) {
+        return std::nullopt;
+    }
+    uint64_t value = 0;
+    for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+        value |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+    }
+    return value;
+}
+
 } // namespace
 
 MemService::MemService(IMemBackend& backend) : backend_(backend) {}
@@ -477,50 +539,168 @@ Result<ResolvedModule> MemService::resolveModule(
         return failureFrom<ResolvedModule>(*error, start);
     }
 
-    std::vector<const ModuleInfo*> fullMatches;
-    std::vector<const ModuleInfo*> baseNameMatches;
-    std::vector<const ModuleInfo*> substringMatches;
-    for (const auto& module : modules) {
-        const std::string fullName = lowerAscii(module.name);
-        if (fullName == query) {
-            fullMatches.push_back(&module);
-        }
-        if (lowerAscii(moduleBaseName(module.name)) == query) {
-            baseNameMatches.push_back(&module);
-        }
-        if (fullName.find(query) != std::string::npos) {
-            substringMatches.push_back(&module);
-        }
-    }
-
-    const std::vector<const ModuleInfo*>* matches = nullptr;
-    if (!fullMatches.empty()) {
-        matches = &fullMatches;
-    } else if (!baseNameMatches.empty()) {
-        matches = &baseNameMatches;
-    } else {
-        matches = &substringMatches;
-    }
-    if (matches->empty()) {
-        return Result<ResolvedModule>::failure(
-            ErrorCode::InvalidArgument,
-            "module_name did not match a loaded module",
-            false,
-            elapsedMilliseconds(start));
-    }
-    if (matches->size() != 1) {
-        return Result<ResolvedModule>::failure(
-            ErrorCode::InvalidArgument,
-            "module_name is ambiguous; use module_list with a narrower filter",
-            false,
-            elapsedMilliseconds(start));
+    const ModuleInfo* matched = nullptr;
+    if (const auto error = findResolvedModule(modules, query, matched)) {
+        return failureFrom<ResolvedModule>(*error, start);
     }
 
     ResolvedModule result;
-    result.module = *matches->front();
+    result.module = *matched;
     result.target = *context.target;
     return Result<ResolvedModule>::success(
         std::move(result), elapsedMilliseconds(start));
+}
+
+Result<PointerResolution> MemService::resolvePointer(
+    const OperationContext& context,
+    const PointerResolveRequest& request) {
+    const auto start = Clock::now();
+    if (request.moduleName.size() > kMaxTextParameterBytes) {
+        return Result<PointerResolution>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    const std::string query = lowerAscii(trimAscii(request.moduleName));
+    if (query.empty()) {
+        return Result<PointerResolution>::failure(
+            ErrorCode::InvalidArgument,
+            "module_name must not be empty",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.offsets.size() > kMaxPointerOffsetCount) {
+        return Result<PointerResolution>::failure(
+            ErrorCode::InvalidArgument,
+            "pointer offset chain exceeds 1024 entries",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<PointerResolution>(*error, start);
+    }
+
+    auto transaction = backend_.beginReadTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<PointerResolution>(*error, start);
+        }
+        return Result<PointerResolution>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the pointer read transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    Error operationError;
+    bool failed = false;
+    std::vector<ModuleInfo> modules;
+    if (!transaction->fetchModules(modules)) {
+        operationError = Error{
+            ErrorCode::ProtocolError,
+            "failed to fetch modules inside the pointer transaction", true};
+        failed = true;
+    }
+    if (!failed) {
+        if (const auto error = validateContext(context, true, false, true)) {
+            operationError = *error;
+            failed = true;
+        } else if (const auto error = validateModules(modules)) {
+            operationError = *error;
+            failed = true;
+        }
+    }
+
+    const ModuleInfo* matched = nullptr;
+    if (!failed) {
+        if (const auto error = findResolvedModule(modules, query, matched)) {
+            operationError = *error;
+            failed = true;
+        }
+    }
+
+    PointerResolution resolution;
+    if (!failed) {
+        resolution.module = *matched;
+        resolution.baseOffset = request.baseOffset;
+        if (!addAddressOffset(resolution.module.base,
+                              request.baseOffset,
+                              resolution.startAddress)) {
+            operationError = Error{
+                ErrorCode::InvalidArgument,
+                "module base plus base_offset overflows the uint64 address space",
+                false};
+            failed = true;
+        } else {
+            resolution.address = resolution.startAddress;
+        }
+    }
+
+    auto dereference = [&](uint64_t readAddress,
+                           uint64_t offset,
+                           bool addOffset) -> bool {
+        if (const auto error = validateContext(context, true, false, true)) {
+            operationError = *error;
+            return false;
+        }
+
+        std::vector<unsigned char> bytes;
+        if (!transaction->readMemory(readAddress, sizeof(uint64_t), bytes)) {
+            operationError = Error{
+                ErrorCode::ProtocolError,
+                "failed to read a pointer inside the pointer transaction",
+                true};
+            return false;
+        }
+        const auto pointer = decodePointer(bytes);
+        if (!pointer) {
+            operationError = Error{
+                ErrorCode::ProtocolError,
+                "pointer read returned an invalid byte count", false};
+            return false;
+        }
+
+        uint64_t next = *pointer;
+        if (addOffset && !addAddressOffset(*pointer, offset, next)) {
+            operationError = Error{
+                ErrorCode::InvalidArgument,
+                "pointer value plus offset overflows the uint64 address space",
+                false};
+            return false;
+        }
+        resolution.address = next;
+        ++resolution.dereferenceCount;
+        return true;
+    };
+
+    if (!failed) {
+        for (uint64_t offset : request.offsets) {
+            if (!dereference(resolution.address, offset, true)) {
+                failed = true;
+                break;
+            }
+        }
+    }
+    if (!failed && request.dereferenceFinal) {
+        if (!dereference(resolution.address, 0, false)) {
+            failed = true;
+        } else {
+            resolution.dereferencedFinal = true;
+        }
+    }
+
+    transaction.reset();
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<PointerResolution>(*error, start);
+    }
+    if (failed) {
+        return failureFrom<PointerResolution>(operationError, start);
+    }
+
+    resolution.target = *context.target;
+    return Result<PointerResolution>::success(
+        std::move(resolution), elapsedMilliseconds(start));
 }
 
 Result<MemoryBlock> MemService::readMemory(

@@ -25,6 +25,9 @@ public:
     Result<ResolvedModule> resolveModule(
         const OperationContext& context,
         const ModuleResolveRequest& request) override;
+    Result<PointerResolution> resolvePointer(
+        const OperationContext& context,
+        const PointerResolveRequest& request) override;
     Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) override;

@@ -26,6 +26,9 @@ public:
     std::string moduleResolve(const std::string& argsJson,
                               bool allowLegacyArguments,
                               const Mem::OperationContext& context);
+    std::string pointerResolve(const std::string& argsJson,
+                               bool allowLegacyArguments,
+                               const Mem::OperationContext& context);
     std::string memoryRead(const std::string& argsJson,
                            bool allowLegacyAddress,
                            const Mem::OperationContext& context);

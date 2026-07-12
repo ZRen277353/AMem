@@ -78,6 +78,16 @@ size_t optionalSize(const json& args,
     return static_cast<size_t>(value);
 }
 
+bool optionalBool(const json& args, const char* key, bool fallback) {
+    if (!args.contains(key) || args.at(key).is_null()) {
+        return fallback;
+    }
+    if (!args.at(key).is_boolean()) {
+        throw std::runtime_error(std::string(key) + " must be a boolean");
+    }
+    return args.at(key).get<bool>();
+}
+
 std::string optionalString(const json& args, const char* key) {
     if (!args.contains(key) || args[key].is_null()) {
         return {};
@@ -168,6 +178,23 @@ Mem::Result<uint64_t> parseAddressArgument(const json& value,
         allowLegacyAddress
             ? "address must be a non-negative integer or hexadecimal string"
             : "address must be an explicit 0x-prefixed hexadecimal string");
+}
+
+std::string pointerModuleNameArgument(const json& args,
+                                      bool allowLegacyArguments) {
+    const char* key = "module_name";
+    if (allowLegacyArguments && !args.contains(key) &&
+        args.contains("module")) {
+        key = "module";
+    }
+    const std::string name = optionalString(args, key);
+    if (name.empty()) {
+        throw std::runtime_error(
+            allowLegacyArguments
+                ? "module_name or module must be a non-empty string"
+                : "module_name must be a non-empty string");
+    }
+    return name;
 }
 
 std::string writeHexArgument(const json& args, bool allowLegacyArguments) {
@@ -516,6 +543,78 @@ std::string AgentMemTools::moduleResolve(
     } catch (const std::exception& error) {
         return exceptionResult(
             allowLegacyArguments ? "get_module_base" : "module_resolve",
+            error);
+    }
+}
+
+std::string AgentMemTools::pointerResolve(
+    const std::string& argsJson,
+    bool allowLegacyArguments,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("base_offset")) {
+            throw std::runtime_error("base_offset is required");
+        }
+
+        Mem::PointerResolveRequest request;
+        request.moduleName =
+            pointerModuleNameArgument(args, allowLegacyArguments);
+        const auto baseOffset = parseAddressArgument(
+            args.at("base_offset"), allowLegacyArguments);
+        if (!baseOffset.ok()) {
+            return errorResult(baseOffset.error(), baseOffset.durationMs());
+        }
+        request.baseOffset = baseOffset.value();
+
+        if (args.contains("offsets") && !args.at("offsets").is_null()) {
+            if (!args.at("offsets").is_array()) {
+                throw std::runtime_error("offsets must be an array");
+            }
+            if (args.at("offsets").size() > Mem::kMaxPointerOffsetCount) {
+                throw std::runtime_error("offsets chain is too long");
+            }
+            request.offsets.reserve(args.at("offsets").size());
+            for (const auto& value : args.at("offsets")) {
+                const auto offset =
+                    parseAddressArgument(value, allowLegacyArguments);
+                if (!offset.ok()) {
+                    return errorResult(offset.error(), offset.durationMs());
+                }
+                request.offsets.push_back(offset.value());
+            }
+        }
+        request.dereferenceFinal =
+            optionalBool(args, "deref_final", true);
+        if (allowLegacyArguments && request.offsets.empty()) {
+            // The old helper returned module_base + base_offset immediately
+            // for an empty chain, regardless of deref_final.
+            request.dereferenceFinal = false;
+        }
+
+        const auto response = service_.resolvePointer(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::PointerResolution& value = response.value();
+        json output;
+        output["success"] = true;
+        output["query"] = request.moduleName;
+        output["module"] = value.module.name;
+        output["module_base"] = Mem::formatAddress(value.module.base);
+        output["base_offset"] = Mem::formatAddress(value.baseOffset);
+        output["start_address"] = Mem::formatAddress(value.startAddress);
+        output["address"] = Mem::formatAddress(value.address);
+        output["dereference_count"] = value.dereferenceCount;
+        output["dereferenced_final"] = value.dereferencedFinal;
+        output["meta"] = resultMeta(response.durationMs(),
+                                    value.target.connectionGeneration,
+                                    &value.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult(
+            allowLegacyArguments ? "resolve_offset_chain" : "pointer_resolve",
             error);
     }
 }

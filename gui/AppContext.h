@@ -26,6 +26,8 @@ public:
     void clearProcessForDisconnect();
     void cleanupCurrentProcessServices();
     Mem::TargetSnapshot snapshotTarget(uint64_t connectionGeneration) const;
+    bool matchesStableTarget(const Mem::TargetSnapshot& expected,
+                             uint64_t connectionGeneration) const;
     bool hasProcess() const {
         return selectedPid.load(std::memory_order_relaxed) != 0 &&
                processHandle.load(std::memory_order_relaxed) != 0;

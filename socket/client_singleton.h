@@ -33,6 +33,12 @@ private:
   std::mutex m_debug_mutex;
   std::mutex m_error_mutex;
 
+  // Higher-level operations hold these gates across multiple commands.
+  // Recursion lets the owning thread reuse the normal command helpers.
+  std::recursive_timed_mutex m_main_transaction_mutex;
+  std::recursive_timed_mutex m_debug_transaction_mutex;
+  std::recursive_timed_mutex m_error_transaction_mutex;
+
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
   WinSocketClientMgr &operator=(const WinSocketClientMgr &) = delete;
@@ -55,6 +61,8 @@ public:
 
   // 获取对应端口的锁
   std::mutex *GetMutex(PortType type);
+
+  std::recursive_timed_mutex *GetTransactionMutex(PortType type);
 
   // 连接到服务器的所有端口
   bool ConnectMultiPort(const std::string &host, uint16_t Port);

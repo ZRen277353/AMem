@@ -23,6 +23,9 @@ public:
     virtual Result<ResolvedModule> resolveModule(
         const OperationContext& context,
         const ModuleResolveRequest& request) = 0;
+    virtual Result<PointerResolution> resolvePointer(
+        const OperationContext& context,
+        const PointerResolveRequest& request) = 0;
     virtual Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) = 0;

@@ -5,16 +5,66 @@
 #include "socket_request_manager.h"
 #include <functional>
 #include <chrono>
+#include <mutex>
 
 namespace SocketCommand {
+
+// Holds the connection lifecycle lease and a re-entrant per-port gate. A
+// normal command owns it briefly; compound operations may keep one alive
+// while calling the same command helpers multiple times on the same thread.
+class TransactionLease {
+public:
+    explicit TransactionLease(PortType port)
+        : requestLease_(GetSocketMgr().AcquireRequestLease()) {
+        if (!requestLease_) {
+            return;
+        }
+
+        auto* mutex = GetSocketMgr().GetTransactionMutex(port);
+        if (!mutex) {
+            return;
+        }
+        transactionLock_ =
+            std::unique_lock<std::recursive_timed_mutex>(*mutex,
+                                                         std::defer_lock);
+        if (SocketIoTimeout::HasThreadTimeout()) {
+            const auto remaining = std::chrono::milliseconds(
+                SocketIoTimeout::GetRemainingTimeoutMs());
+            if (!transactionLock_.try_lock_for(remaining)) {
+                return;
+            }
+        } else {
+            transactionLock_.lock();
+        }
+        valid_ = requestLease_.isCurrent();
+    }
+
+    explicit operator bool() const {
+        return valid_ && requestLease_.isCurrent();
+    }
+
+    uint64_t generation() const {
+        return requestLease_.generation();
+    }
+
+    TransactionLease(TransactionLease&&) = delete;
+    TransactionLease& operator=(TransactionLease&&) = delete;
+    TransactionLease(const TransactionLease&) = delete;
+    TransactionLease& operator=(const TransactionLease&) = delete;
+
+private:
+    DeviceSession::RequestLease requestLease_;
+    std::unique_lock<std::recursive_timed_mutex> transactionLock_;
+    bool valid_ = false;
+};
 
 // 需要进程句柄的命令（大多数）
 // fn(WindowsSocketClient* client, int handle) -> bool
 template<typename Func>
 bool execute(PortType port, Func&& fn) {
     auto& socketMgr = GetSocketMgr();
-    auto lease = socketMgr.AcquireRequestLease();
-    if (!lease)
+    TransactionLease transaction(port);
+    if (!transaction)
         return false;
     auto* client = socketMgr.GetClient(port);
     if (!client)
@@ -25,7 +75,7 @@ bool execute(PortType port, Func&& fn) {
     auto* portMutex = socketMgr.GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            if (!lease.isCurrent() || !client->IsConnected())
+            if (!transaction || !client->IsConnected())
                 return false;
             return fn(client, handle);
         });
@@ -36,8 +86,8 @@ bool execute(PortType port, Func&& fn) {
 template<typename Func>
 bool executeNoHandle(PortType port, Func&& fn) {
     auto& socketMgr = GetSocketMgr();
-    auto lease = socketMgr.AcquireRequestLease();
-    if (!lease)
+    TransactionLease transaction(port);
+    if (!transaction)
         return false;
     auto* client = socketMgr.GetClient(port);
     if (!client)
@@ -45,7 +95,7 @@ bool executeNoHandle(PortType port, Func&& fn) {
     auto* portMutex = socketMgr.GetMutex(port);
     return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            if (!lease.isCurrent() || !client->IsConnected())
+            if (!transaction || !client->IsConnected())
                 return false;
             return fn(client);
         });
@@ -55,8 +105,8 @@ bool executeNoHandle(PortType port, Func&& fn) {
 template<typename Func>
 int executeWithResult(PortType port, Func&& fn, int failureValue = 0) {
     auto& socketMgr = GetSocketMgr();
-    auto lease = socketMgr.AcquireRequestLease();
-    if (!lease)
+    TransactionLease transaction(port);
+    if (!transaction)
         return failureValue;
     auto* client = socketMgr.GetClient(port);
     if (!client)
@@ -68,7 +118,7 @@ int executeWithResult(PortType port, Func&& fn, int failureValue = 0) {
     auto* portMutex = socketMgr.GetMutex(port);
     bool success = SocketRequestManager::GetInstance().ExecuteRequestWithLock(
         portMutex, [&]() -> bool {
-            if (!lease.isCurrent() || !client->IsConnected())
+            if (!transaction || !client->IsConnected())
                 return false;
             return fn(client, handle, result);
         });

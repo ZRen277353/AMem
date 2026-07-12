@@ -115,6 +115,23 @@ struct ResolvedModule {
     TargetSnapshot target;
 };
 
+struct PointerResolveRequest {
+    std::string moduleName;
+    uint64_t baseOffset = 0;
+    std::vector<uint64_t> offsets;
+    bool dereferenceFinal = true;
+};
+
+struct PointerResolution {
+    ModuleInfo module;
+    uint64_t baseOffset = 0;
+    uint64_t startAddress = 0;
+    uint64_t address = 0;
+    size_t dereferenceCount = 0;
+    bool dereferencedFinal = false;
+    TargetSnapshot target;
+};
+
 struct MemoryReadRequest {
     uint64_t address = 0;
     uint32_t size = 0;
@@ -187,6 +204,7 @@ inline constexpr size_t kMaxProcessPageSize = 1000;
 inline constexpr size_t kMaxModulePageSize = 1000;
 inline constexpr size_t kMaxModuleResultCount = 65536;
 inline constexpr size_t kMaxModuleNameBytesTotal = 16u * 1024u * 1024u;
+inline constexpr size_t kMaxPointerOffsetCount = 1024;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
 inline constexpr size_t kMaxScalarTypeNameBytes = 64;
 inline constexpr size_t kMaxScalarValueTextBytes = 256;

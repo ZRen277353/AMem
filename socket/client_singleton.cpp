@@ -1,6 +1,6 @@
 #include "client_singleton.h"
 #include "client.hpp"
-#include "socket_request_manager.h"
+#include "SocketCommand.h"
 #include "../gui/AppContext.h"
 #include <iostream>
 #include <string>
@@ -41,6 +41,16 @@ std::mutex *WinSocketClientMgr::GetMutex(PortType type) {
   case PORT_MAIN:  return &m_main_mutex;
   case PORT_DEBUG: return &m_debug_mutex;
   case PORT_ERROR: return &m_error_mutex;
+  default:         return nullptr;
+  }
+}
+
+std::recursive_timed_mutex *WinSocketClientMgr::GetTransactionMutex(
+    PortType type) {
+  switch (type) {
+  case PORT_MAIN:  return &m_main_transaction_mutex;
+  case PORT_DEBUG: return &m_debug_transaction_mutex;
+  case PORT_ERROR: return &m_error_transaction_mutex;
   default:         return nullptr;
   }
 }
@@ -106,20 +116,8 @@ int GetCurrentPid() {
 
 bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
   outHandle = 0;
-  auto& socketMgr = GetSocketMgr();
-  auto lease = socketMgr.AcquireRequestLease();
-  if (!lease)
-    return false;
-
-  auto client = socketMgr.GetClient(type);
-  if (!client)
-    return false;
-
-  auto portMutex = socketMgr.GetMutex(type);
-  return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
-      portMutex, [&]() -> bool {
-        if (!lease.isCurrent() || !client->IsConnected())
-          return false;
+  return SocketCommand::executeNoHandle(
+      type, [&](WindowsSocketClient* client) -> bool {
 #pragma pack(1)
         struct { unsigned char command; int pid; } op;
 #pragma pack()
@@ -153,21 +151,8 @@ bool EnsureOpenHandle(int &outHandle, PortType type) {
 bool CloseProcessHandle(int handle, PortType type) {
   if (handle == 0)
     return true;
-
-  auto& socketMgr = GetSocketMgr();
-  auto lease = socketMgr.AcquireRequestLease();
-  if (!lease)
-    return false;
-
-  auto client = socketMgr.GetClient(type);
-  if (!client)
-    return false;
-
-  auto portMutex = socketMgr.GetMutex(type);
-  return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
-      portMutex, [&]() -> bool {
-        if (!lease.isCurrent() || !client->IsConnected())
-          return false;
+  return SocketCommand::executeNoHandle(
+      type, [&](WindowsSocketClient* client) -> bool {
         unsigned char command = CMD_CLOSEHANDLE;
         if (!client->Send(&command, sizeof(command)))
           return false;

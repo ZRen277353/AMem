@@ -13,7 +13,7 @@ inline constexpr const char* kDefaultSystemPrompt =
 
 Tool groups:
 - Status: status.
-- Process/module: process_list(filter?, offset?, count?), process_open(pid), module_list(filter?, offset?, count?), module_resolve(module_name), resolve_offset_chain(module, base_offset, offsets?, deref_final?).
+- Process/module: process_list(filter?, offset?, count?), process_open(pid), module_list(filter?, offset?, count?), module_resolve(module_name), pointer_resolve(module_name, base_offset, offsets?, deref_final?).
 - Memory: memory_read(address, size=256), memory_read_value(address, data_type="dword"), memory_write(address, data_hex), memory_write_value(address, value, data_type="dword").
 - Scan: scan_set_range(memory_type="all"), scan_value(value or value_hex, data_type="dword", scan_type="exact", value2? for between), scan_next(value or value_hex, data_type="dword", scan_type="exact", value2? for between; omit value for increased/decreased/changed/unchanged), scan_fuzzy(data_type="dword", scan_type="unknown"), scan_hex(hex_pattern), get_scan_count, get_scan_results(offset=0, count=100), clear_scan.
 - Breakpoints: set_breakpoint(address, bp_type=2, bp_size=4), remove_breakpoint(address), read_breakpoint_info(address), suspend_breakpoint(address), resume_breakpoint(address). Breakpoint constants are 1=read, 2=write, 3=readwrite, 4=execute. Execute breakpoints always use size 4.

@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -86,6 +87,17 @@ public:
     int writeCalls = 0;
     int readCalls = 0;
     int fetchModuleCalls = 0;
+    int beginReadTransactionCalls = 0;
+    int transactionFetchCalls = 0;
+    int transactionReadCalls = 0;
+    bool transactionActive = false;
+    bool allTransactionOperationsGuarded = true;
+    bool transactionBlockedCompetitor = false;
+    bool beginReadTransactionSucceeds = true;
+    std::timed_mutex transactionMutex;
+    std::unordered_map<uint64_t, uint64_t> pointerMemory;
+    int cancelAfterTransactionReads = 0;
+    Mem::CancellationToken transactionCancellation;
     uint64_t lastReadAddress = 0;
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
@@ -164,6 +176,73 @@ public:
         return true;
     }
 
+    class ReadTransaction final : public Mem::IMemReadTransaction {
+    public:
+        explicit ReadTransaction(FakeBackend& backend)
+            : backend_(backend), lock_(backend.transactionMutex) {
+            backend_.transactionActive = true;
+        }
+
+        ~ReadTransaction() override {
+            backend_.transactionActive = false;
+        }
+
+        bool fetchModules(std::vector<Mem::ModuleInfo>& output) override {
+            ++backend_.transactionFetchCalls;
+            backend_.allTransactionOperationsGuarded =
+                backend_.allTransactionOperationsGuarded &&
+                backend_.transactionActive;
+            return backend_.fetchModules(output);
+        }
+
+        bool readMemory(uint64_t address,
+                        uint32_t size,
+                        std::vector<unsigned char>& output) override {
+            ++backend_.transactionReadCalls;
+            backend_.allTransactionOperationsGuarded =
+                backend_.allTransactionOperationsGuarded &&
+                backend_.transactionActive;
+            if (backend_.transactionReadCalls == 1) {
+                bool competitorAcquired = false;
+                std::thread competitor([&] {
+                    competitorAcquired =
+                        backend_.transactionMutex.try_lock_for(
+                            std::chrono::milliseconds(5));
+                    if (competitorAcquired) {
+                        backend_.transactionMutex.unlock();
+                    }
+                });
+                competitor.join();
+                backend_.transactionBlockedCompetitor =
+                    !competitorAcquired;
+            }
+            const bool result = backend_.readMemory(address, size, output);
+            if (backend_.cancelAfterTransactionReads > 0 &&
+                backend_.transactionReadCalls >=
+                    backend_.cancelAfterTransactionReads &&
+                backend_.transactionCancellation) {
+                backend_.transactionCancellation->store(
+                    true, std::memory_order_release);
+            }
+            return result;
+        }
+
+    private:
+        FakeBackend& backend_;
+        std::unique_lock<std::timed_mutex> lock_;
+    };
+
+    std::unique_ptr<Mem::IMemReadTransaction> beginReadTransaction(
+        const Mem::OperationContext& context) override {
+        ++beginReadTransactionCalls;
+        if (!beginReadTransactionSucceeds || !context.target ||
+            context.connectionGeneration != generation ||
+            targetSnapshot() != *context.target) {
+            return nullptr;
+        }
+        return std::make_unique<ReadTransaction>(*this);
+    }
+
     bool readMemory(uint64_t address,
                     uint32_t size,
                     std::vector<unsigned char>& output) override {
@@ -173,9 +252,18 @@ public:
         if (!readMemorySucceeds) {
             return false;
         }
-        const size_t resultSize = (std::min)(
-            static_cast<size_t>(size), memory.size());
-        output.assign(memory.begin(), memory.begin() + resultSize);
+        const auto pointer = pointerMemory.find(address);
+        if (size == sizeof(uint64_t) && pointer != pointerMemory.end()) {
+            output.resize(sizeof(uint64_t));
+            for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+                output[i] = static_cast<unsigned char>(
+                    (pointer->second >> (i * 8u)) & 0xFFu);
+            }
+        } else {
+            const size_t resultSize = (std::min)(
+                static_cast<size_t>(size), memory.size());
+            output.assign(memory.begin(), memory.begin() + resultSize);
+        }
         if (changeTargetAfterRead) {
             target.processRevision += 2;
         }
@@ -674,6 +762,144 @@ void testModuleListAndResolve() {
            "module transport failure should be structured and retryable");
 }
 
+void testPointerResolveTransaction() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    backend.pointerMemory = {
+        {0x5010, 0x6000},
+        {0x6020, 0x7000},
+        {0x7030, 0x8000},
+    };
+
+    Mem::PointerResolveRequest request;
+    request.moduleName = "libgame.so";
+    request.baseOffset = 0x10;
+    request.offsets = {0x20, 0x30};
+    request.dereferenceFinal = true;
+    const auto resolved = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(resolved.ok() &&
+               resolved.value().module.name == "/data/app/libgame.so" &&
+               resolved.value().startAddress == 0x5010 &&
+               resolved.value().address == 0x8000 &&
+               resolved.value().dereferenceCount == 3 &&
+               resolved.value().dereferencedFinal &&
+               backend.beginReadTransactionCalls == 1 &&
+               backend.transactionFetchCalls == 1 &&
+               backend.transactionReadCalls == 3 &&
+               backend.allTransactionOperationsGuarded &&
+               backend.transactionBlockedCompetitor,
+           "pointer resolve must keep module lookup and every read in one transaction");
+
+    const int readsBeforeAddressOnly = backend.transactionReadCalls;
+    request.offsets.clear();
+    request.dereferenceFinal = false;
+    const auto addressOnly = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(addressOnly.ok() && addressOnly.value().address == 0x5010 &&
+               addressOnly.value().dereferenceCount == 0 &&
+               backend.transactionReadCalls == readsBeforeAddressOnly,
+           "pointer resolve should return module_base + base_offset without reads when requested");
+
+    request.dereferenceFinal = true;
+    const auto directPointer = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(directPointer.ok() && directPointer.value().address == 0x6000 &&
+               directPointer.value().dereferenceCount == 1,
+           "canonical empty pointer chains should honor deref_final");
+
+    request.moduleName = "libgame";
+    const int readsBeforeAmbiguous = backend.transactionReadCalls;
+    const auto ambiguous = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(!ambiguous.ok() &&
+               ambiguous.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.transactionReadCalls == readsBeforeAmbiguous,
+           "pointer resolve must reject ambiguous modules before reading memory");
+
+    request.moduleName = "libgame.so";
+    request.baseOffset = 0x10;
+    request.offsets.assign(Mem::kMaxPointerOffsetCount + 1, 0);
+    const int transactionsBeforeOversize = backend.beginReadTransactionCalls;
+    const auto oversize = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(!oversize.ok() &&
+               oversize.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.beginReadTransactionCalls == transactionsBeforeOversize,
+           "oversized pointer chains must fail before acquiring a transaction");
+
+    request.offsets = {2};
+    request.dereferenceFinal = false;
+    backend.pointerMemory[0x5010] =
+        (std::numeric_limits<uint64_t>::max)() - 1;
+    const auto pointerOverflow = service.resolvePointer(
+        service.captureContext(true), request);
+    expect(!pointerOverflow.ok() &&
+               pointerOverflow.error().code ==
+                   Mem::ErrorCode::InvalidArgument,
+           "pointer plus offset overflow must fail deterministically");
+
+    FakeBackend baseOverflowBackend;
+    Mem::MemService baseOverflowService(baseOverflowBackend);
+    baseOverflowBackend.modules[1].base =
+        (std::numeric_limits<uint64_t>::max)() - 0x100;
+    baseOverflowBackend.modules[1].size = 0x80;
+    request.baseOffset = 0x200;
+    request.offsets.clear();
+    const auto baseOverflow = baseOverflowService.resolvePointer(
+        baseOverflowService.captureContext(true), request);
+    expect(!baseOverflow.ok() &&
+               baseOverflow.error().code ==
+                   Mem::ErrorCode::InvalidArgument &&
+               baseOverflowBackend.transactionReadCalls == 0,
+           "module base plus base_offset overflow must fail before reading");
+    request.baseOffset = 0x10;
+
+    FakeBackend changedTargetBackend;
+    Mem::MemService changedTargetService(changedTargetBackend);
+    changedTargetBackend.pointerMemory[0x5010] = 0x6000;
+    changedTargetBackend.changeTargetAfterModuleFetch = true;
+    request.offsets.clear();
+    request.dereferenceFinal = true;
+    const auto changedTarget = changedTargetService.resolvePointer(
+        changedTargetService.captureContext(true), request);
+    expect(!changedTarget.ok() &&
+               changedTarget.error().code == Mem::ErrorCode::TargetChanged,
+           "pointer transaction results must be rejected after target change");
+
+    FakeBackend changedGenerationBackend;
+    Mem::MemService changedGenerationService(changedGenerationBackend);
+    changedGenerationBackend.pointerMemory[0x5010] = 0x6000;
+    changedGenerationBackend.changeGenerationAfterModuleFetch = true;
+    const auto changedGeneration = changedGenerationService.resolvePointer(
+        changedGenerationService.captureContext(true), request);
+    expect(!changedGeneration.ok() &&
+               changedGeneration.error().code ==
+                   Mem::ErrorCode::ConnectionChanged,
+           "pointer transaction must stop when its connection generation changes");
+
+    FakeBackend cancelledBackend;
+    Mem::MemService cancelledService(cancelledBackend);
+    cancelledBackend.pointerMemory = {
+        {0x5010, 0x6000},
+        {0x6020, 0x7000},
+    };
+    Mem::OperationContext cancelledContext =
+        cancelledService.captureContext(true);
+    cancelledContext.cancellation =
+        std::make_shared<std::atomic<bool>>(false);
+    cancelledBackend.transactionCancellation = cancelledContext.cancellation;
+    cancelledBackend.cancelAfterTransactionReads = 1;
+    request.offsets = {0x20, 0x30};
+    request.dereferenceFinal = false;
+    const auto cancelled = cancelledService.resolvePointer(
+        cancelledContext, request);
+    expect(!cancelled.ok() &&
+               cancelled.error().code == Mem::ErrorCode::CancelRequested &&
+               cancelledBackend.transactionReadCalls == 1,
+           "pointer transaction must observe cancellation between reads");
+}
+
 void testHiddenToolRegistration() {
     auto& registry = AI::ToolExecutor::getInstance();
     registry.registerTool("test_visible_tool", "visible", "{}",
@@ -1165,6 +1391,53 @@ void testAgentAdapter() {
                    "invalid_argument",
            "module_resolve adapter should preserve ambiguity errors");
 
+    backend.pointerMemory = {
+        {0x5010, 0x6000},
+        {0x6020, 0x7000},
+    };
+    const json pointer = json::parse(
+        tools.pointerResolve(
+            R"({"module_name":"libgame.so","base_offset":"0x10","offsets":["0x20"],"deref_final":true})",
+            false,
+            targetContext));
+    expect(pointer.at("success").get<bool>() &&
+               pointer.at("module") == "/data/app/libgame.so" &&
+               pointer.at("start_address") == "0x5010" &&
+               pointer.at("address") == "0x7000" &&
+               pointer.at("dereference_count") == 2 &&
+               pointer.at("dereferenced_final").get<bool>(),
+           "pointer_resolve adapter should expose the transactional result");
+
+    const json strictPointerOffset = json::parse(
+        tools.pointerResolve(
+            R"({"module_name":"libgame.so","base_offset":"10","offsets":[]})",
+            false,
+            targetContext));
+    expect(!strictPointerOffset.at("success").get<bool>() &&
+               strictPointerOffset.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical pointer_resolve should require 0x-prefixed offsets");
+
+    const json legacyPointer = json::parse(
+        tools.pointerResolve(
+            R"({"module":"libgame.so","base_offset":16,"offsets":[32],"deref_final":false})",
+            true,
+            targetContext));
+    expect(legacyPointer.at("success").get<bool>() &&
+               legacyPointer.at("address") == "0x6020" &&
+               legacyPointer.at("dereference_count") == 1,
+           "hidden resolve_offset_chain should retain legacy names and integer offsets");
+
+    const json legacyEmptyPointer = json::parse(
+        tools.pointerResolve(
+            R"({"module":"libgame.so","base_offset":16,"offsets":[],"deref_final":true})",
+            true,
+            targetContext));
+    expect(legacyEmptyPointer.at("success").get<bool>() &&
+               legacyEmptyPointer.at("address") == "0x5010" &&
+               legacyEmptyPointer.at("dereference_count") == 0,
+           "hidden resolve_offset_chain should retain empty-chain behavior");
+
     backend.connected = false;
     const json disconnected = json::parse(
         tools.processList("{}", connectionContext));
@@ -1475,6 +1748,7 @@ int main() {
         {"memory write completion contract", &testMemoryWriteCompletionContract},
         {"typed memory service", &testTypedMemoryService},
         {"module list and resolve", &testModuleListAndResolve},
+        {"pointer resolve transaction", &testPointerResolveTransaction},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},

@@ -3,6 +3,7 @@
 #include "MemService.h"
 #include "../gui/AppContext.h"
 #include "../socket/client_singleton.h"
+#include "../socket/SocketCommand.h"
 
 #include <utility>
 
@@ -20,6 +21,58 @@ const char* architectureName(int type) {
         default:              return "Unknown";
     }
 }
+
+bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
+    std::vector<ModuleInfoItem> items;
+    if (!FetchModuleList(items, PORT_MAIN)) {
+        return false;
+    }
+
+    modules.clear();
+    modules.reserve(items.size());
+    for (auto& item : items) {
+        ModuleInfo module;
+        module.base = item.base;
+        module.size = item.size > 0
+            ? static_cast<uint64_t>(item.size)
+            : 0;
+        module.type = item.type;
+        module.flag = item.flag;
+        module.name = std::move(item.name);
+        modules.push_back(std::move(module));
+    }
+    return true;
+}
+
+class SystemReadTransaction final : public IMemReadTransaction {
+public:
+    explicit SystemReadTransaction(const OperationContext& context)
+        : lease_(PORT_MAIN) {
+        valid_ = static_cast<bool>(lease_) && context.target &&
+                 lease_.generation() == context.connectionGeneration &&
+                 AppContext::Get().matchesStableTarget(
+                     *context.target, lease_.generation());
+    }
+
+    bool valid() const {
+        return valid_ && static_cast<bool>(lease_);
+    }
+
+    bool fetchModules(std::vector<ModuleInfo>& modules) override {
+        return valid() && fetchSystemModules(modules);
+    }
+
+    bool readMemory(uint64_t address,
+                    uint32_t size,
+                    std::vector<unsigned char>& bytes) override {
+        return valid() &&
+               ReadProcessMemoryBytes(address, size, bytes, PORT_MAIN);
+    }
+
+private:
+    SocketCommand::TransactionLease lease_;
+    bool valid_ = false;
+};
 
 class SystemMemBackend final : public IMemBackend {
 public:
@@ -83,25 +136,16 @@ public:
     }
 
     bool fetchModules(std::vector<ModuleInfo>& modules) override {
-        std::vector<ModuleInfoItem> items;
-        if (!FetchModuleList(items, PORT_MAIN)) {
-            return false;
-        }
+        return fetchSystemModules(modules);
+    }
 
-        modules.clear();
-        modules.reserve(items.size());
-        for (auto& item : items) {
-            ModuleInfo module;
-            module.base = item.base;
-            module.size = item.size > 0
-                ? static_cast<uint64_t>(item.size)
-                : 0;
-            module.type = item.type;
-            module.flag = item.flag;
-            module.name = std::move(item.name);
-            modules.push_back(std::move(module));
+    std::unique_ptr<IMemReadTransaction> beginReadTransaction(
+        const OperationContext& context) override {
+        auto transaction = std::make_unique<SystemReadTransaction>(context);
+        if (!transaction->valid()) {
+            return nullptr;
         }
-        return true;
+        return transaction;
     }
 
     bool readMemory(uint64_t address,
