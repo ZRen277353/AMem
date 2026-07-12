@@ -17,6 +17,9 @@
 #ifdef HAVE_AI_CHAT
 #include "ai/ChatWindow.h"
 #endif
+#ifdef HAVE_NATIVE_IPC
+#include "NativeAgentIpcWindow.h"
+#endif
 #include "ServerConnectWindow.h"
 #include <algorithm>
 #include <sstream>
@@ -73,6 +76,10 @@ void CEWindow::drawMenuBar()
             ImGui::Separator();
             if (ImGui::MenuItem("AI 聊天"))
                 openAIChatWindow();
+#endif
+#ifdef HAVE_NATIVE_IPC
+            if (ImGui::MenuItem("Native Agent IPC"))
+                openNativeAgentIpcWindow();
 #endif
             ImGui::EndMenu();
         }
@@ -285,5 +292,12 @@ void CEWindow::openLogWindow()
 void CEWindow::openAIChatWindow()
 {
     Gui::getOrCreate<AI::ChatWindow>();
+}
+#endif
+
+#ifdef HAVE_NATIVE_IPC
+void CEWindow::openNativeAgentIpcWindow()
+{
+    Gui::getOrCreate<NativeAgentIpcWindow>();
 }
 #endif

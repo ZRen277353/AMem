@@ -37,6 +37,9 @@ private:
 #ifdef HAVE_AI_CHAT
     void openAIChatWindow();
 #endif
+#ifdef HAVE_NATIVE_IPC
+    void openNativeAgentIpcWindow();
+#endif
 
     // 状态变量
     bool openProcessModal = false;

@@ -14,6 +14,9 @@
 #include "ai/AgentTaskExecutor.h"
 #include "ai/HttpClient.h"
 #endif
+#ifdef HAVE_NATIVE_IPC
+#include "ipc/SystemNativeAgentRuntime.h"
+#endif
 
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -128,6 +131,11 @@ int main(int, char**)
 
 #ifdef HAVE_LEGACY_HTTP_IPC
     IpcServer::GetInstance().Stop();
+#endif
+
+#ifdef HAVE_NATIVE_IPC
+    // Stop the explicit Observe-only pipe before device lifecycle teardown.
+    NativeIpc::ShutdownSystemNativeAgentRuntime();
 #endif
 
 #ifdef HAVE_AI_CHAT

@@ -1,0 +1,196 @@
+#include "NativeAgentIpcWindow.h"
+
+#include "ColorScheme.h"
+#include "Gui.h"
+#include "imgui.h"
+#include "ipc/NativeAgentRuntime.h"
+#include "ipc/SystemNativeAgentRuntime.h"
+
+#include <windows.h>
+
+#include <string>
+
+namespace {
+
+std::string utf8(const std::wstring &value) {
+  if (value.empty()) {
+    return {};
+  }
+  const int required = ::WideCharToMultiByte(
+      CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+      static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+  if (required <= 0) {
+    return "<unavailable>";
+  }
+  std::string result(static_cast<size_t>(required), '\0');
+  if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                            static_cast<int>(value.size()), result.data(),
+                            required, nullptr, nullptr) != required) {
+    return "<unavailable>";
+  }
+  return result;
+}
+
+const char *serverStateName(NativeIpc::ServerState state) {
+  switch (state) {
+  case NativeIpc::ServerState::Stopped:
+    return "已停止";
+  case NativeIpc::ServerState::Listening:
+    return "监听中";
+  case NativeIpc::ServerState::Connected:
+    return "已连接";
+  case NativeIpc::ServerState::Stopping:
+    return "停止中";
+  case NativeIpc::ServerState::Failed:
+    return "失败";
+  }
+  return "未知";
+}
+
+const char *phaseName(NativeIpc::RuntimePhase phase) {
+  switch (phase) {
+  case NativeIpc::RuntimePhase::Idle:
+    return "空闲";
+  case NativeIpc::RuntimePhase::Handshaking:
+    return "握手中";
+  case NativeIpc::RuntimePhase::Serving:
+    return "服务中";
+  case NativeIpc::RuntimePhase::Stopping:
+    return "停止中";
+  case NativeIpc::RuntimePhase::Failed:
+    return "失败";
+  }
+  return "未知";
+}
+
+const char *handshakeStatusName(NativeIpc::HandshakeStatus status) {
+  switch (status) {
+  case NativeIpc::HandshakeStatus::Established:
+    return "已建立";
+  case NativeIpc::HandshakeStatus::Rejected:
+    return "已拒绝";
+  case NativeIpc::HandshakeStatus::Closed:
+    return "已关闭";
+  case NativeIpc::HandshakeStatus::Cancelled:
+    return "已取消";
+  case NativeIpc::HandshakeStatus::TimedOut:
+    return "超时";
+  case NativeIpc::HandshakeStatus::ProtocolError:
+    return "协议错误";
+  case NativeIpc::HandshakeStatus::IoError:
+    return "I/O 错误";
+  }
+  return "未知";
+}
+
+const char *sessionStatusName(NativeIpc::RequestSessionStatus status) {
+  switch (status) {
+  case NativeIpc::RequestSessionStatus::Closed:
+    return "已关闭";
+  case NativeIpc::RequestSessionStatus::Cancelled:
+    return "已取消";
+  case NativeIpc::RequestSessionStatus::IdleTimedOut:
+    return "空闲超时";
+  case NativeIpc::RequestSessionStatus::RequestLimitReached:
+    return "请求数已达上限";
+  case NativeIpc::RequestSessionStatus::Invalidated:
+    return "目标已失效";
+  case NativeIpc::RequestSessionStatus::ProtocolError:
+    return "协议错误";
+  case NativeIpc::RequestSessionStatus::IoError:
+    return "I/O 错误";
+  }
+  return "未知";
+}
+
+bool isRunning(NativeIpc::ServerState state) {
+  return state == NativeIpc::ServerState::Listening ||
+         state == NativeIpc::ServerState::Connected;
+}
+
+void textRow(const char *label, const char *value) {
+  ImGui::TableNextRow();
+  ImGui::TableSetColumnIndex(0);
+  ImGui::TextDisabled("%s", label);
+  ImGui::TableSetColumnIndex(1);
+  ImGui::TextUnformatted(value);
+}
+
+void countRow(const char *label, uint64_t value) {
+  ImGui::TableNextRow();
+  ImGui::TableSetColumnIndex(0);
+  ImGui::TextDisabled("%s", label);
+  ImGui::TableSetColumnIndex(1);
+  ImGui::Text("%llu", static_cast<unsigned long long>(value));
+}
+
+} // namespace
+
+NativeAgentIpcWindow::NativeAgentIpcWindow() { name = "Native Agent IPC"; }
+
+void NativeAgentIpcWindow::onDraw() {
+  NativeIpc::NativeAgentRuntime &runtime =
+      NativeIpc::GetSystemNativeAgentRuntime();
+  NativeIpc::NativeAgentRuntimeSnapshot snapshot = runtime.snapshot();
+  const bool running = isRunning(snapshot.server.state);
+
+  const ImVec4 statusColor =
+      running ? ColorScheme::SuccessBright : ColorScheme::TextDisabled;
+  ImGui::TextColored(statusColor, "%s", serverStateName(snapshot.server.state));
+  ImGui::SameLine();
+  if (running) {
+    if (ImGui::Button("停止")) {
+      runtime.stop();
+      Gui::log("Native Agent IPC 已停止");
+      snapshot = runtime.snapshot();
+    }
+  } else if (ImGui::Button("启用")) {
+    std::wstring error;
+    if (runtime.start(error)) {
+      Gui::log("Native Agent IPC 已启用（Observe）");
+    } else {
+      const std::string message = utf8(error);
+      Gui::log("Native Agent IPC 启用失败: %s", message.c_str());
+    }
+    snapshot = runtime.snapshot();
+  }
+
+  ImGui::Separator();
+  if (ImGui::BeginTable("native_ipc_status", 2,
+                        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                            ImGuiTableFlags_SizingStretchProp)) {
+    ImGui::TableSetupColumn("项目", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+    ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthStretch);
+    textRow("权限", "Observe");
+    textRow("特权能力", "禁用");
+    textRow("运行阶段", phaseName(snapshot.phase));
+    const std::string pipeName = utf8(snapshot.server.pipeName);
+    textRow("管道", pipeName.c_str());
+    countRow("已接受连接", snapshot.server.acceptedConnections);
+    countRow("已建立会话", snapshot.establishedSessions);
+    countRow("已完成会话", snapshot.completedSessions);
+    if (!snapshot.activeClientName.empty()) {
+      textRow("当前客户端", snapshot.activeClientName.c_str());
+      textRow("客户端版本", snapshot.activeClientVersion.empty()
+                                ? "未提供"
+                                : snapshot.activeClientVersion.c_str());
+    }
+    if (snapshot.lastHandshakeStatus) {
+      textRow("最近握手", handshakeStatusName(*snapshot.lastHandshakeStatus));
+    }
+    if (snapshot.lastSessionStatus) {
+      textRow("最近会话", sessionStatusName(*snapshot.lastSessionStatus));
+    }
+    countRow("最近请求", snapshot.lastRequestFrames);
+    countRow("最近调度", snapshot.lastDispatchedRequests);
+    countRow("最近响应", snapshot.lastResponsesSent);
+    countRow("最近取消", snapshot.lastCancellationsObserved);
+    ImGui::EndTable();
+  }
+
+  if (!snapshot.lastError.empty()) {
+    const std::string error = utf8(snapshot.lastError);
+    ImGui::Separator();
+    ImGui::TextColored(ColorScheme::Error, "%s", error.c_str());
+  }
+}

@@ -337,8 +337,28 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
 endif()
 
 if(ENABLE_NATIVE_IPC)
+    add_library(NativeIpcGuiControl STATIC
+        gui/NativeAgentIpcWindow.cpp
+        ipc/SystemNativeAgentRuntime.cpp
+    )
+    target_include_directories(NativeIpcGuiControl PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/imgui
+        ${CMAKE_SOURCE_DIR}/gui
+    )
+    target_link_libraries(NativeIpcGuiControl PUBLIC
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcGuiControl PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcGuiControl PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcGuiControl PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-ipc"
+    )
     message(STATUS
-        "Native IPC transport compiled; runtime start remains disabled")
+        "Native IPC compiled with explicit Observe-only GUI control")
 else()
     message(STATUS "Native IPC transport disabled")
 endif()
@@ -377,7 +397,7 @@ endif()
 
 if(ENABLE_NATIVE_IPC)
     target_compile_definitions(ImGuiProject PRIVATE HAVE_NATIVE_IPC)
-    target_link_libraries(ImGuiProject NativeIpcTransport)
+    target_link_libraries(ImGuiProject NativeIpcTransport NativeIpcGuiControl)
 endif()
 
 if(HAVE_AI_CHAT)
