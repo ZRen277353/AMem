@@ -123,19 +123,25 @@ void testResponseEnvelopeAndCompletionNames() {
     NativeIpc::IpcDispatchResult failure;
     failure.errorCode = "cancelled";
     failure.errorMessage = "request cancellation was observed";
+    failure.retryable = true;
     failure.completion = NativeIpc::RequestCompletion::CancelRequested;
     expect(NativeIpc::BuildResponsePayload(failure, payload, error),
            "failure response should serialize: " + error);
     const json failureJson = json::parse(payload);
     expect(failureJson["ok"] == false &&
                failureJson["completion"] == "cancel_requested" &&
-               failureJson["error"]["code"] == "cancelled",
+               failureJson["error"]["code"] == "cancelled" &&
+               failureJson["error"]["retryable"] == true,
            "failure response fields should be stable");
 
     expect(std::string(NativeIpc::RequestCompletionName(
                NativeIpc::RequestCompletion::CompletionUnknown)) ==
                "completion_unknown",
            "completion names must match native operation outcomes");
+    expect(std::string(NativeIpc::RequestCompletionName(
+               NativeIpc::RequestCompletion::RejectedBeforeStart)) ==
+               "rejected_before_start",
+           "approval rejection must have a stable completion name");
 }
 
 void testResponseValidationAndLimits() {

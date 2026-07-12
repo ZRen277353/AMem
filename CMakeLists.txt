@@ -307,6 +307,7 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
         ipc/IpcFramedConnection.cpp
         ipc/IpcHandshakeSession.cpp
+        ipc/IpcMemServiceDispatcher.cpp
         ipc/IpcMethodCatalog.cpp
         ipc/IpcProtocol.cpp
         ipc/IpcRequestProtocol.cpp
@@ -320,7 +321,10 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     target_include_directories(NativeIpcTransport PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party
     )
-    target_link_libraries(NativeIpcTransport PUBLIC advapi32)
+    target_link_libraries(NativeIpcTransport PUBLIC
+        NativeMemJsonTools
+        advapi32
+    )
     if(MSVC)
         target_compile_options(NativeIpcTransport PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -450,6 +454,27 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcMemServiceDispatcherTests
+        tests/IpcMemServiceDispatcherTests.cpp
+        mem/Address.cpp
+        mem/ValueCodec.cpp
+    )
+    target_include_directories(NativeIpcMemServiceDispatcherTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(NativeIpcMemServiceDispatcherTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcMemServiceDispatcherTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcMemServiceDispatcherTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcMemServiceDispatcherTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_mem_dispatcher COMMAND NativeIpcMemServiceDispatcherTests)
+
     add_executable(NativeIpcMethodCatalogTests
         tests/IpcMethodCatalogTests.cpp
     )

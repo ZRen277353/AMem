@@ -42,6 +42,7 @@ bool ValidateCancelPayload(const std::string& payload,
                            std::string& error);
 
 enum class RequestCompletion {
+    RejectedBeforeStart,
     CancelledBeforeStart,
     CancelledBeforeSend,
     CancelRequested,
@@ -57,6 +58,7 @@ struct IpcDispatchResult {
     std::string resultJson = "null";
     std::string errorCode;
     std::string errorMessage;
+    bool retryable = false;
     RequestCompletion completion = RequestCompletion::Completed;
 };
 

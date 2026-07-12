@@ -158,6 +158,8 @@ bool ValidateCancelPayload(const std::string& payload,
 
 const char* RequestCompletionName(RequestCompletion completion) {
     switch (completion) {
+    case RequestCompletion::RejectedBeforeStart:
+        return "rejected_before_start";
     case RequestCompletion::CancelledBeforeStart:
         return "cancelled_before_start";
     case RequestCompletion::CancelledBeforeSend:
@@ -208,6 +210,7 @@ bool BuildResponsePayload(const IpcDispatchResult& result,
         response["error"] = {
             {"code", result.errorCode},
             {"message", result.errorMessage},
+            {"retryable", result.retryable},
         };
     }
     return dumpBounded(response, maxPayloadBytes, payload, error);
