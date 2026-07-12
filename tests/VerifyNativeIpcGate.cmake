@@ -12,6 +12,7 @@ file(READ "${SOURCE_ROOT}/ipc/IpcHandshakeSession.cpp" handshake_source)
 file(READ "${SOURCE_ROOT}/ipc/NativeAgentRuntime.cpp" runtime_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcRequestSession.cpp" request_session_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
+file(READ "${SOURCE_ROOT}/ipc/IpcApprovalAudit.h" approval_audit_header)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -30,7 +31,7 @@ endfunction()
 require_text("${cmake_source}" "default-off native IPC option"
     "option(ENABLE_NATIVE_IPC \"Compile native Named Pipe transport\" OFF)")
 require_text("${cmake_source}" "native IPC framed transport sources"
-    "add_library(NativeIpcTransport STATIC\n        ipc/IpcApprovalBroker.cpp\n        ipc/IpcFramedConnection.cpp\n        ipc/IpcHandshakeSession.cpp\n        ipc/IpcMemServiceDispatcher.cpp\n        ipc/IpcMethodCatalog.cpp\n        ipc/IpcProtocol.cpp\n        ipc/IpcRequestProtocol.cpp\n        ipc/IpcRequestSession.cpp\n        ipc/NamedPipeServer.cpp")
+    "add_library(NativeIpcTransport STATIC\n        ipc/IpcApprovalAudit.cpp\n        ipc/IpcApprovalBroker.cpp\n        ipc/IpcFramedConnection.cpp\n        ipc/IpcHandshakeSession.cpp\n        ipc/IpcMemServiceDispatcher.cpp\n        ipc/IpcMethodCatalog.cpp\n        ipc/IpcProtocol.cpp\n        ipc/IpcRequestProtocol.cpp\n        ipc/IpcRequestSession.cpp\n        ipc/NamedPipeServer.cpp")
 require_text("${cmake_source}" "owned native Agent runtime source"
     "ipc/NativeAgentRuntime.cpp")
 require_text("${cmake_source}" "explicit native IPC GUI control target"
@@ -57,6 +58,14 @@ require_text("${owner_source}" "stop-time approval invalidation"
     "approvalBroker->cancelAll();")
 require_text("${owner_source}" "runtime receives the system broker"
     "RequestSessionConfig{}, approvalBroker_.get())")
+require_text("${owner_source}" "persistent approval audit injection"
+    "IpcApprovalBrokerConfig{},\n                                              approvalAudit_.get())")
+require_text("${control_source}" "visible approval audit status"
+    "GetSystemIpcApprovalAuditSnapshot()")
+forbid_text("${approval_audit_header}" "approval audit raw params"
+    "params")
+forbid_text("${approval_audit_header}" "approval audit raw results"
+    "resultJson")
 require_text("${runtime_source}" "session-scoped approval cancellation"
     "approvalBroker_->cancelSession(sessionId);")
 forbid_text("${runtime_source}" "runtime privileged submission"

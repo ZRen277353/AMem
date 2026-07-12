@@ -81,8 +81,10 @@ struct IpcApprovalResult {
 class IIpcApprovalAuditSink {
 public:
   virtual ~IIpcApprovalAuditSink() = default;
-  // The sink must outlive the broker. Calls occur without the broker mutex.
-  virtual void recordApproval(const IpcApprovalRecord &record) = 0;
+  // The sink must outlive the broker. Calls occur without the broker mutex;
+  // false means this transition was not durably recorded.
+  virtual bool recordApproval(const IpcApprovalRecord &record,
+                              std::string *error = nullptr) = 0;
 };
 
 struct IpcApprovalBrokerConfig {
@@ -120,8 +122,8 @@ private:
 
   IpcApprovalResult failure(const char *code, const char *message) const;
   void pruneTerminalLocked();
-  void audit(const IpcApprovalRecord &record) const;
-  void audit(const std::vector<IpcApprovalRecord> &records) const;
+  bool audit(const IpcApprovalRecord &record) const;
+  bool audit(const std::vector<IpcApprovalRecord> &records) const;
 
   const IpcApprovalBrokerConfig config_;
   IIpcApprovalAuditSink *const auditSink_;

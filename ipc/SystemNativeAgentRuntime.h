@@ -1,6 +1,6 @@
 #pragma once
 
-#include "IpcApprovalBroker.h"
+#include "IpcApprovalAudit.h"
 
 #include <vector>
 
@@ -12,6 +12,7 @@ class NativeAgentRuntime;
 // does not create either service when native IPC was never opened or used.
 NativeAgentRuntime &GetSystemNativeAgentRuntime();
 IpcApprovalBroker &GetSystemIpcApprovalBroker();
+IpcApprovalAuditSnapshot GetSystemIpcApprovalAuditSnapshot();
 std::vector<IpcApprovalRecord> RefreshSystemIpcApprovals();
 IpcApprovalResult DecideSystemIpcApproval(uint64_t approvalId,
                                           IpcApprovalDecision decision);

@@ -363,22 +363,26 @@ void IpcApprovalBroker::pruneTerminalLocked() {
   }
 }
 
-void IpcApprovalBroker::audit(const IpcApprovalRecord &record) const {
+bool IpcApprovalBroker::audit(const IpcApprovalRecord &record) const {
   if (auditSink_ == nullptr) {
-    return;
+    return true;
   }
   try {
-    auditSink_->recordApproval(record);
+    std::string error;
+    return auditSink_->recordApproval(record, &error);
   } catch (...) {
     // Audit failures never turn a denied/invalidated request into approval.
+    return false;
   }
 }
 
-void IpcApprovalBroker::audit(
+bool IpcApprovalBroker::audit(
     const std::vector<IpcApprovalRecord> &records) const {
+  bool complete = true;
   for (const auto &record : records) {
-    audit(record);
+    complete = audit(record) && complete;
   }
+  return complete;
 }
 
 } // namespace NativeIpc

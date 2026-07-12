@@ -47,12 +47,17 @@ submission(std::string method, uint64_t sessionId = 1, uint64_t requestId = 1,
 
 class AuditSink final : public NativeIpc::IIpcApprovalAuditSink {
 public:
-  void recordApproval(const NativeIpc::IpcApprovalRecord &record) override {
+  bool recordApproval(const NativeIpc::IpcApprovalRecord &record,
+                      std::string *error) override {
+    if (error != nullptr) {
+      error->clear();
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     records_.push_back(record);
     if (broker_ != nullptr) {
       observedSnapshotSizes_.push_back(broker_->snapshot().size());
     }
+    return true;
   }
 
   std::vector<NativeIpc::IpcApprovalRecord> records() const {

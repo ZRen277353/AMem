@@ -305,6 +305,7 @@ endif()
 
 if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
+        ipc/IpcApprovalAudit.cpp
         ipc/IpcApprovalBroker.cpp
         ipc/IpcFramedConnection.cpp
         ipc/IpcHandshakeSession.cpp
@@ -476,6 +477,25 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcApprovalAuditTests
+        tests/IpcApprovalAuditTests.cpp
+    )
+    target_include_directories(NativeIpcApprovalAuditTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(NativeIpcApprovalAuditTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcApprovalAuditTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcApprovalAuditTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcApprovalAuditTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_approval_audit COMMAND NativeIpcApprovalAuditTests)
+
     add_executable(NativeIpcApprovalBrokerTests
         tests/IpcApprovalBrokerTests.cpp
     )

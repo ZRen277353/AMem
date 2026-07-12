@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -217,6 +218,73 @@ void drawPendingApprovals(
   ImGui::EndTable();
 }
 
+std::string auditTimestamp(int64_t timestampMs) {
+  const std::time_t seconds = static_cast<std::time_t>(timestampMs / 1000);
+  std::tm local{};
+  if (::localtime_s(&local, &seconds) != 0) {
+    return "-";
+  }
+  char value[32]{};
+  if (std::strftime(value, sizeof(value), "%m-%d %H:%M:%S", &local) == 0) {
+    return "-";
+  }
+  return value;
+}
+
+void drawApprovalAudit(
+    const NativeIpc::IpcApprovalAuditSnapshot &snapshot) {
+  ImGui::SeparatorText("审批审计");
+  ImGui::TextDisabled("%s", snapshot.filepath.c_str());
+  ImGui::TextDisabled("本次写入: %llu",
+                      static_cast<unsigned long long>(
+                          snapshot.successfulWrites));
+  ImGui::SameLine();
+  ImGui::TextDisabled("失败: %llu",
+                      static_cast<unsigned long long>(snapshot.failedWrites));
+  if (!snapshot.lastError.empty()) {
+    ImGui::TextColored(ColorScheme::Error, "%s", snapshot.lastError.c_str());
+  }
+  if (snapshot.recent.empty()) {
+    return;
+  }
+
+  if (!ImGui::BeginTable("native_ipc_approval_audit", 6,
+                         ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_BordersInnerH |
+                             ImGuiTableFlags_SizingStretchProp)) {
+    return;
+  }
+  ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+  ImGui::TableSetupColumn("客户端", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("方法", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+  ImGui::TableSetupColumn("会话", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+  ImGui::TableSetupColumn("请求", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+  ImGui::TableHeadersRow();
+
+  const size_t first = snapshot.recent.size() > 20
+                           ? snapshot.recent.size() - 20
+                           : 0;
+  for (size_t index = snapshot.recent.size(); index > first; --index) {
+    const auto &entry = snapshot.recent[index - 1];
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    const std::string timestamp = auditTimestamp(entry.timestampMs);
+    ImGui::TextUnformatted(timestamp.c_str());
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(entry.clientName.c_str());
+    ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(entry.method.c_str());
+    ImGui::TableSetColumnIndex(3);
+    ImGui::TextUnformatted(entry.state.c_str());
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%llu", static_cast<unsigned long long>(entry.sessionId));
+    ImGui::TableSetColumnIndex(5);
+    ImGui::Text("%llu", static_cast<unsigned long long>(entry.requestId));
+  }
+  ImGui::EndTable();
+}
+
 } // namespace
 
 NativeAgentIpcWindow::NativeAgentIpcWindow() { name = "Native Agent IPC"; }
@@ -294,4 +362,5 @@ void NativeAgentIpcWindow::onDraw() {
   }
 
   drawPendingApprovals(NativeIpc::RefreshSystemIpcApprovals());
+  drawApprovalAudit(NativeIpc::GetSystemIpcApprovalAuditSnapshot());
 }
