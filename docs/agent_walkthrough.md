@@ -27,14 +27,15 @@
 ```text
 legacy ai_config.dat rename
   -> ApiKeyStore::loadFromFile("ai_config.json")
-  -> seedDefaultsIfEmpty()
-  -> saveToFile("ai_config.json")
+  -> only Missing: seedDefaultsIfEmpty() + saveToFile("ai_config.json")
+  -> Loaded: commit validated temporary configs
+  -> Invalid/IoError: preserve file and prior in-memory state
   -> configure live providers
 ```
 
 API key 在文件中是 DPAPI 密文，endpoint/model 是明文。
 
-这里有一个重要失败路径：`loadFromFile()` 的返回值当前没有被检查。若文件存在但 JSON 损坏，内存配置已清空，随后 save 可覆盖原文件。合法 JSON 中字段类型错误还可能从 `json::value()` 抛出。排查“升级后 key 消失”或“打开 AI Chat 就异常”时，先检查这一段，见 A-04。
+`loadFromFile()` 返回统一的 `PersistenceLoadResult`。解析和字段类型/范围校验都在临时对象中完成，只有 `Loaded` 才提交；只有 `Missing` 才播种并保存默认配置。`Invalid`/`IoError` 会记录错误并保留原文件及旧内存状态，不再从启动路径抛出字段类型异常。A-04 已关闭。
 
 设置 UI 还有相反方向的问题：已保存 provider key 无法通过清空输入框删除。key 为空时 Save 会跳过该 provider，`ApiKeyStore::removeConfig()` 没有 UI 入口。实现“Forget provider”时需要显式删除并清零明文 edit buffer。
 
@@ -57,19 +58,23 @@ API key 在文件中是 DPAPI 密文，endpoint/model 是明文。
 - `ChatSession`
 - `ChatWindow` 的预算和代理编辑字段
 
-`loadOrDefault()` 当前把“不存在”和“损坏”都当成加载失败，并会写默认文件。不要把它当成无损恢复机制。
+`loadOrDefault()` 同样返回 `Loaded`/`Missing`/`Invalid`/`IoError`，完整校验临时 snapshot 后提交；只有真正缺失时才写默认文件，损坏或 I/O 失败不会覆盖原文件。
 
 ### 1.4 初始化会话
 
 ```text
 SessionManager::init("ai_sessions", "ai_session.json")
-  -> load index
+  -> load and validate index into temporary state
+  -> Invalid: preserve index as .corrupt* and scan valid session JSON
+  -> preservation failure/IoError: disable automatic index write-back
   -> optional legacy migration
   -> choose/create active id
   -> ChatSession::load(active session file)
 ```
 
 注意顺序：全局 prompt/token 已先写进 `session_`，随后 `ChatSession::load()` 又从会话文件读取同名字段。因此已有会话值会覆盖全局值。切换会话也一样；新会话只清消息，会继承之前留在 `session_` 的值。见 A-12。
+
+会话加载也先校验临时状态。损坏活动会话不会绑定到 `ChatSession`，退出、切换或下一条消息调用 `saveBound()` 时不会覆盖它；窗口会保留原文件并创建新的可写会话。所有会话写入复用 `utils::installTempFile()`。
 
 ## 2. 用户发送消息
 
@@ -418,6 +423,8 @@ GUI 的 connect/disconnect/auto-reconnect 现在委托 `MultiPortClientManager`�
 
 最新用户回合即使超 token limit 也会保留。单条巨大消息不会被该策略删除。
 
+普通消息保存只作用于有效绑定。退出和会话切换使用 `saveBound()`，加载失败留下的损坏路径不会被随后写回；新建/缺失会话则建立可写绑定。这个一致性修复没有增加文件总大小、单消息或会话载入分配上限，A-09 仍未关闭。
+
 `estimateTokenCount()` 是 UTF-8 字节数/4 的启发式值，未使用 provider 声明的 64k/128k/200k context，也未计工具定义和输出预算。它适合 UI 粗略提示，不适合作为 provider 请求一定有效的证明。
 
 ### 8.2 请求历史和磁盘历史不同
@@ -578,11 +585,11 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 的 14 组覆盖完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE、分片与 partial error retention。当前共 19 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 的 14 组覆盖完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE、分片与 partial error retention。`native_persistence_recovery` 的 4 组覆盖损坏索引恢复以及 API key、settings、session 事务式加载，连续 50/50 通过。当前共 20 项 CTest；fresh Release `ENABLE_NATIVE_IPC=ON` 在 AI Chat 关闭和开启两种配置下均为 20/20，并完成产品链接。其余测试优先从无设备依赖的边界开始：
 
 1. 用本机假 provider HTTP/TLS 覆盖真实 content receiver、状态码和 full-response 解析。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
-3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
+3. 对持久化文件/消息大小上限和原子安装失败增加故障注入；损坏/错误类型 JSON 的事务恢复已有回归。
 4. 用真实 Android 设备记录三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复结果。
 5. 用真实 GUI approval click 与 Android device 覆盖 privileged adapter/send-boundary；persistent security audit、fail-closed consume、execution outcome、session/request cancel 与 GUI status gate 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。

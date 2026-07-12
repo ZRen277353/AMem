@@ -20,7 +20,7 @@
 | A-01 | P0 | 已修复 | legacy HTTP/CORS 控制面已删除；Native IPC 使用 DACL、Observe-only Hello 与逐请求审批 |
 | A-02 | P0 | 已修复 | 当前内置工具均在 service/host send 边界消费 run target；退役 executor 已删除 |
 | A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
-| A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
+| A-04 | P0 | 已修复 | 配置/会话事务式加载；损坏索引可保留并扫描重建，失败绑定不会写回 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
 | A-06 | P1 | 已修复 | legacy detached handler 已删除；Native IPC exact I/O、取消与 join 已覆盖 |
 | A-07 | P1 | 已修复 | Stop 保留真实取消语义；mutation 晚到回执在 UI callback 前进入独立审计 |
@@ -65,28 +65,19 @@
 - 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
 - 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
 
-### A-04：配置/索引损坏可导致启动异常或覆盖原文件
+### A-04：配置/索引损坏可导致启动异常或覆盖原文件（已修复）
 
-**证据**
+**关闭证据**
 
-- `ApiKeyStore::loadFromFile()` 先清空 `configs_`；解析失败返回 `false`。`ChatWindow` 忽略返回值，随后立即 `seedDefaultsIfEmpty()` 和 `saveToFile()`，可把损坏的 `ai_config.json` 覆盖为空配置。
-- `ApiKeyStore`、`AiSettings`、`SessionManager` 的多个 `json::value()` 位于 parse catch 之外。合法 JSON 中字段类型错误会抛 `type_error`，可逃出启动路径。
-- `AiSettings::loadOrDefault()` 不区分“文件不存在”和“文件损坏”，两者都会写默认值。
-- `SessionManager::init()` 忽略 `loadIndexUnlocked()` 失败；损坏索引会被空索引覆盖，使已有 `ai_sessions/*.json` 成为孤儿。
-- `ChatSession::load()` 失败后仍绑定原路径；下一条消息可能覆盖损坏会话。
-- `ChatSession::saveUnlocked()` 没有复用 `installTempFile()`；Windows rename 失败后退化为 `copy_file(...overwrite_existing)`，不能保证崩溃时原文件完整。
+- `ApiKeyStore`、`AiSettings`、`SessionManager`、`ChatSession` 统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid`、`IoError`；JSON 解析、字段类型和范围检查全部在临时状态完成，只有成功才一次性提交。
+- 启动路径不再放任字段类型异常逃出。只有真正 `Missing` 的配置/设置文件会创建默认值；`Invalid`/`IoError` 保留原文件和原内存状态。
+- 损坏会话索引先保留为不覆盖已有备份的 `.corrupt*`，再扫描合法会话 JSON 重建 metadata。原索引无法保留时自动写回被禁止，避免以恢复名义覆盖证据。
+- `ChatSession` 写入统一使用 `utils::installTempFile()`；`saveBound()` 只写成功加载或明确新建的绑定。损坏活动会话保持原路径不动，UI 创建新的可写会话。
+- `native_persistence_recovery` 的 4 组测试覆盖损坏索引恢复、API key/settings 的事务式加载、会话加载与原子安装绑定；连续 50/50 通过，完整套件增至 20/20 CTest。
 
-**影响**
+**剩余边界**
 
-可能丢失 provider 密钥配置、全局设置和会话索引，也可能因类型异常导致 AI Chat 初始化失败或应用退出。
-
-**建议**
-
-- 先解析、校验到临时对象，全部成功后再替换内存状态。
-- 区分 `Missing`、`Invalid`、`IoError`，只有 `Missing` 才自动写默认文件。
-- 损坏文件保留原件或改名为带时间戳的 `.corrupt`，UI/日志明确提示。
-- 索引损坏时扫描会话目录重建元数据。
-- `ChatSession` 统一使用经过 Windows 覆盖场景验证的原子安装助手。
+A-04 只关闭“损坏加载覆盖原件/异常逃逸”问题。持久化文件、单消息和会话载入的总量/分配上限仍属于 A-09；会话中的 `systemPrompt`/`tokenLimit` 仍会覆盖全局设置，A-12 未修复。
 
 ### A-05：HTTP worker 的完成回调未纳入排空计数
 
@@ -286,11 +277,11 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试。Debug/Release 当前各有 19 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
+仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试；persistence recovery 有 4 组并连续 50/50 通过。当前共 20 项 CTest；本切片 fresh Release AI-off/AI-on 均为 20/20，并完成产品链接。
 
 - 三类 provider 的真实 HTTP/TLS 与 full-response 端到端解析。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
-- config/index 损坏与错误字段类型。
+- 持久化文件、单消息和会话载入的大小/分配上限，以及原子安装故障注入。
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
 - Native IPC GUI approval click 与真实设备 privileged operation。
 - 不同 Windows 用户/session 与真实 remote client 的 native transport 负向测试。
@@ -305,6 +296,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 | 项目 | 当前实现 |
 |------|----------|
+| A-04 配置/索引损坏覆盖原件 | 四类 loader 临时解析后提交并区分五种状态；只有缺失才写默认值，损坏索引保留后扫描重建，失败会话不绑定写回，统一使用原子安装助手 |
 | Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
 | A-01 legacy HTTP 无鉴权/CORS 控制面 | `ipc/IpcServer.*`、端口启动、CMake 选项和 compile macro 已删除；静态 gate 阻止恢复旧 HTTP server |
 | A-06 legacy detached handler/partial send | legacy handler 已随 HTTP server 删除；Native IPC 使用 owned/joinable handler、overlapped exact I/O、Stop event 与 `CancelIoEx` |
@@ -339,7 +331,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
 - Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权；尚未完成跨用户/session 与真实 remote client 负向验证。
 - execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
-- `installTempFile()` 已用于 `ApiKeyStore`、`AiSettings`、`SessionManager`，但 `ChatSession` 仍有独立且较弱的替换路径。
+- 四类持久化 loader 已事务化且 `ChatSession` 已统一使用 `installTempFile()`；这不提供 A-09 所需的文件/消息总量上限，也不解决 A-12 的全局/会话设置所有权。
 - `DeviceSession` 已删除待处理字节清理恢复路径；client 与 multi-port manager 测试证明 partial I/O、timeout/EOF、迟到字节隔离和 lifecycle 互斥，但 Android 端 driver/process/scan/breakpoint 状态恢复仍没有自动承诺。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
@@ -347,7 +339,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 1. 保持 Native IPC compile/runtime default-off；补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability。
 2. 为已落地的 poison/lifecycle gate 增加真实 Android 设备压力与恢复记录。
-3. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。
+3. 为持久化文件、单消息和会话载入增加端到端大小/分配上限，并补原子安装故障注入。
 4. 收敛 detached HTTP worker 生命周期，并建立真实 provider HTTP/TLS 与 full-response 回归测试。
 5. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。
 6. 增加端到端资源/context 上限和列表分页。

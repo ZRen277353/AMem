@@ -345,10 +345,10 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 | 文件 | 管理者 | 内容 | 安全/一致性说明 |
 |------|--------|------|-----------------|
-| `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；加载失败处理仍可能覆盖文件 |
-| `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；损坏与缺失当前都可能写默认值 |
-| `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏时可能重建为空索引并孤立会话文件 |
-| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；driver card 字段会脱敏，但仍可能包含 Lua、地址、内存数据和其他完整参数/结果 |
+| `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；无效/I/O 失败保留原文件和内存快照，只有缺失才写默认值 |
+| `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；临时解析/完整校验后一次提交，只有缺失才写默认值 |
+| `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏索引先保留为 `.corrupt*`，再扫描合法会话重建；备份失败时禁止自动写回 |
+| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；失败加载不绑定损坏路径，写入使用统一原子安装；仍可能包含 Lua、地址、内存数据和其他完整参数/结果 |
 | `ai_mutation_audit.jsonl` / `.1` | `AgentMutationAuditLog` | mutation/session-effect 完成摘要 | 明文、字段脱敏；64 KiB/record，4 MiB active + 一个轮转备份 |
 | `native_ipc_approval_audit.jsonl` / `.1` | `IpcApprovalAuditLog` | Native IPC approval 状态转换 | 明文；无 params/results；16 KiB/record，4 MiB active + 一个轮转备份 |
 
@@ -360,9 +360,9 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 ### 9.2 写盘保证
 
-`ApiKeyStore`、`AiSettings`、`SessionManager` 使用 `utils::installTempFile()`。`ChatSession` 使用自己的 `.tmp` + rename，失败后覆盖 copy。后者在 Windows 常见目标已存在场景中不是严格原子替换。
+`ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 统一使用 `utils::installTempFile()`。加载入口统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid` 或 `IoError`，先把 JSON 完整解析并校验到临时状态，成功后才替换内存状态；只有 `Missing` 会自动创建默认文件。
 
-任何加载器都应先完整解析到临时对象，失败时保留原文件和原内存状态。当前实现尚未全部满足。
+索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。A-04 因此关闭。该修复不限制持久化文件总大小或单消息分配（A-09），也不改变会话 prompt/token 覆盖全局设置的所有权问题（A-12）。
 
 ### 9.3 远端 provider 边界
 
@@ -500,11 +500,11 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试，覆盖 SSE 分片/多行、`[DONE]`、EOF flush、callback exception、完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE 与 partial tool-call error retention。连同四个静态 gate，Debug/Release 当前各有 19 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试，覆盖 SSE 分片/多行、`[DONE]`、EOF flush、callback exception、完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE 与 partial tool-call error retention。persistence recovery 的 4 组覆盖损坏索引恢复以及 API key、settings、session 的事务式加载，连续 50/50 通过。连同四个静态 gate，当前共 20 项 CTest；本切片 fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 均为 20/20，并完成产品链接。以下路径仍缺测试：
 
 - provider 真实 HTTP/TLS 与 full-response 端到端解析
 - ChatSession 通用工具配对与预算裁剪
-- config/index 损坏恢复
+- 持久化文件/单消息的大小和分配上限，以及原子安装故障注入
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - Native IPC GUI approval click 与真实 Android privileged device/host operation

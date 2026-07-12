@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成四十个纵向切片：
+截至 2026-07-13 已完成四十一个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -35,6 +35,7 @@
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - provider SSE parser 已提取为纯组件并保留 `[DONE]`；Claude/OpenAI/DeepSeek 共用 terminal tracker 验证 start/terminal/malformed，截断 partial 只作为 `InvalidResponse` 展示且不执行工具。
+- 四类 AI 持久化 loader 统一五态结果并先校验临时状态再提交；损坏索引保留后扫描会话重建，失败会话不绑定写回，所有 session 保存使用统一原子安装助手。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
 - legacy `ipc/IpcServer.*`、CMake option/macro、main 启停和 loopback HTTP listener 已删除；`native_agent_no_legacy_http_ipc` 静态 gate 阻止旧 server/CORS/端口入口回归。
@@ -58,9 +59,9 @@
 - `process_open` 在 mutex 保护下执行 controlled selection；只有 adapter 返回 snapshot、当前 service snapshot 与 grant generation/旧 baseline 全部一致时才推进 external session baseline。
 - Native IPC completion 新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，保留 deadline 后设备已确认完成的成功回执。
 - security audit schema 2 在同一有界 JSONL 中区分 `approval_transition` 与 `execution_outcome`；outcome 只含 authorized/observed target、success、completion 与 bounded error code，schema 1 继续可加载。post-effect 写盘失败进入 GUI health，但不覆盖真实设备回执。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket client 有 4 组，multi-port manager 有 6 组；provider stream 有 14 组。共 19 项 CTest，Debug/Release 全部通过；两个 socket suite 各连续 100 次通过，fresh AI-off/AI-on 产品完整链接均通过。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket client 有 4 组，multi-port manager 有 6 组；provider stream 有 14 组；persistence recovery 有 4 组并连续 50/50 通过。当前共 20 项 CTest；两个 socket suite 各连续 100 次通过，本切片 fresh Release AI-off/AI-on 均为 20/20 并完成产品链接。
 
-尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；真实 Android 三端口 timeout/reconnect 与远端状态恢复；真实 provider HTTP/TLS。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 和 provider stream terminal validation 已完成。A-01、A-06、A-14、A-17、A-18、A-19、A-20 已关闭。
+尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；真实 Android 三端口 timeout/reconnect 与远端状态恢复；真实 provider HTTP/TLS。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport、provider stream terminal validation 和事务式 persistence recovery 已完成。A-01、A-04、A-06、A-14、A-17、A-18、A-19、A-20 已关闭；A-09 的总量上限和 A-12 的设置所有权仍未关闭。
 
 ## 1. 结论
 
@@ -537,7 +538,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 变更：
 
-- 修复截断 SSE 成功、provider context 预算、配置损坏覆盖、会话明文策略和设置所有权。
+- 修复截断 SSE 成功、provider context 预算、配置损坏覆盖、会话明文策略和设置所有权。（截断 SSE 与配置损坏覆盖已完成；其余仍待完成。）
 - 将 HTTP provider worker 也改为受管生命周期。
 - 为响应、历史和工具输出建立端到端预算。
 
@@ -688,4 +689,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第四十批关闭 provider 截断流成功问题。`SSEParser` 从 `HttpClient.cpp` 提取为纯组件，不再吞掉 `[DONE]`；`StreamTerminalTracker` 统一记录合法 start、terminal 与首个 malformed/schema error。Claude 要求 `message_start`/`message_stop`，OpenAI/DeepSeek 要求合法 `choices` 起始并接受非空 `finish_reason` 或 `[DONE]`。三个 provider 对 HTTP 2xx 强制验证，失败时保留 partial content/tool calls 供 UI 展示，但 `CompletionResponse.error` 阻止工具执行。新增 14 组 `native_provider_stream_terminal`，Debug/Release 完整 19/19 CTest；隔离 `ENABLE_NATIVE_IPC=ON` fresh full product link：AI-off `29480448` bytes / `D4783B1C77C609DB02DAFE3C2A3E6333DA775438A943DC4D0C2A02CC7041C01B`，AI-on `35746816` bytes / `3A65E74C75E4D5B6E1730F48D9CDE1796A8A6F78A0C9EA18BD5113A563FA7406`。
 
-四十个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并记录真实设备三端口 timeout/reconnect 后的 driver/process/scan/breakpoint 状态。provider 后续仍需收敛 detached HTTP worker、输入总量和 context 预算，并补真实 HTTP/TLS。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
+第四十一批关闭 A-04。新增统一 `PersistenceLoadStatus`：`Loaded`、`Missing`、`Recovered`、`Invalid`、`IoError`；`ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 都在临时状态中完整解析/校验后提交，只有缺失才创建默认文件。损坏索引保留为 `.corrupt*` 后扫描合法会话重建，无法保留原件时禁止自动写回；失败会话不再绑定原路径，`saveBound()` 防止退出/切换覆盖，写入统一走 `installTempFile()`。新增 `native_persistence_recovery` 4 组测试并连续 50/50 通过，完整套件 20/20。隔离 `ENABLE_NATIVE_IPC=ON` fresh Release full product link：AI-off `29480448` bytes / `FC54C68056BC718FFE5A3F7640A5E2E11A261912EE01642E010A6C6232EB8587`，AI-on `35794944` bytes / `5FB98A4BB85B0D3338861BCC8A662969CBB0329E010A316C6E6F8928513AF7BB`。
+
+四十一个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并记录真实设备三端口 timeout/reconnect 后的 driver/process/scan/breakpoint 状态。provider 后续仍需收敛 detached HTTP worker、输入总量和 context 预算，并补真实 HTTP/TLS；persistence 仍需 A-09 的文件/消息总量上限和 A-12 的全局/会话设置所有权。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
