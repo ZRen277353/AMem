@@ -3,9 +3,9 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/Observe-dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的 privileged 外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、12 个 Observe `MemService` dispatch、owned runtime、显式 GUI control 和 privileged broker core 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 Observe。privileged approval integration 未落地，因此三类特权 capability 始终 denied。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
 
 ## 1. 系统总览
 
@@ -47,7 +47,7 @@ Opt-in HTTP IPC :28100 ---------+
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
-| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity`, `IpcServer` | native frame/I/O/Hello/request/Observe runtime、隔离的 privileged approval/audit core；默认关闭的回环 HTTP JSON 入口 |
+| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity`, `IpcServer` | native frame/I/O/Hello/request runtime、逐请求 privileged approval/execution；默认关闭的回环 HTTP JSON 入口 |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
@@ -409,21 +409,25 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 `IpcRequestProtocol` 固定 Request JSON 为 `{method, params, timeout_ms?}`。`method` 必填、1..128 bytes 且无 ASCII control，`params` 必须是 object，unknown fields 直接拒绝；`timeout_ms` 默认 30 秒、范围 1..300000。Cancel payload 必须是空 object `{}`。Response 使用 `ok`、统一 `completion` 和 `result`/`error` envelope；dispatcher 返回的 JSON、error token 和最终 payload 在写入前再次验证并受 4 MiB 上限约束。
 
-`IpcRequestSession` 在 `HelloAck` 后维持 reader loop，同一连接只允许一个 active request；第二个并发请求返回 `session_busy`。request id 在连接生命周期内只能使用一次，最多记住 1024 个 unique id，达到上限后返回 `session_request_limit` 并要求 reconnect，避免无界去重集合。method 所需 capability 由 server-owned `IIpcRequestDispatcher::resolveCapability()` 决定，client payload 不能自报；当前 Hello 只 grant Observe，因此 privileged method 在 fake dispatcher 边界也会在执行前被拒绝。
+`IpcRequestSession` 在 `HelloAck` 后维持 reader loop，同一连接只允许一个 active request；第二个并发请求返回 `session_busy`。request id 在连接生命周期内只能使用一次，最多记住 1024 个 unique id，达到上限后返回 `session_request_limit` 并要求 reconnect，避免无界去重集合。method 所需 capability 由 server-owned `IIpcRequestDispatcher::resolveCapability()` 决定，client payload 不能自报。Hello 只 grant Observe；缺失 privileged capability 的 method 只有在 dispatcher 明确 `canSubmitForApproval()` 时才进入 worker，否则在 dispatch 前拒绝。
 
 handler/caller thread 持续读取 Request/Cancel，一个 owned joinable worker 串行调用 dispatcher。相对 `timeout_ms` 在接收时固定为 `steady_clock` absolute deadline；deadline、client Cancel、session invalidation 和 server Stop 向同一个 cancellation context 发信号。Cancel 没有独立成功 ack，active request 的最终 Response 承载真实 completion；unknown/invalid Cancel 返回 Error。取消仍是 cooperative。session idle timeout 为 5 分钟，response write timeout 为 5 秒，dispatcher validity 默认每 250 ms 复核。session invalidation、request-limit 或 protocol-error 在发送终止 Error 后做最多 100 ms、可由 Stop 取消的 drain，避免立即 disconnect 截断已写 payload；它不是无限 `FlushFileBuffers`。
 
 `IpcMethodCatalog` 与内置 Agent 的 24 个 canonical name 由 `native_agent_catalog` 同时校验。分类固定为 12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution；target policy 为 3 None、20 Bound、1 Selection。只有 12 个 Observe descriptor 标记为 `executableWithoutApproval`；`driver_initialize` 与 Lua 归入 HostExecution，scan mutation 与 breakpoint/memory write 归入 TargetMutation。
 
-原 `AgentMemTools` 实现已提升为 `mem/MemJsonTools`，AI 保留 type alias。`IpcMemServiceDispatcher` 复用这一单一 parser/result adapter 执行 12 个 Observe method，不复制地址、scalar、分页或结果格式。dispatcher 建立时用 `IMemService::captureContext(true)` 固定 `{connectionGeneration, target}`，在 request 前后和 reader polling 边界比较当前 snapshot；变化时发送 request-id 0 的 session Error、以 `SessionInvalidated` signal 取消 active `OperationContext` 并 join worker。deadline 和 cancellation 通过同一个原子 token 进入 service。未绑定 broker/session 的 direct dispatcher 对 privileged method 返回 `approval_required`；runtime-bound dispatcher 只提交审批 metadata，仍在参数解析/service 前终止。
+原 `AgentMemTools` 实现已提升为 `mem/MemJsonTools`，AI 保留 type alias。`IpcMemServiceDispatcher` 复用这一单一 parser/result adapter 执行 12 个 Observe method 和 11 个 privileged `MemService` method，不复制地址、scalar、分页或结果格式。`lua_execute` 的参数、target 复核和结果格式提取到共享 `mem/LuaJsonTool`；产品通过注入的 `IIpcHostMethodExecutor` 调用它，未启用 LuaJIT 时该方法不具备可执行 adapter。dispatcher 建立时用 `IMemService::captureContext(true)` 固定 `{connectionGeneration, target}`，在 request 前后和 reader polling 边界比较当前 snapshot；变化时发送 request-id 0 的 session Error、以 `SessionInvalidated` signal 取消 active `OperationContext` 并 join worker。deadline 和 cancellation 通过同一个原子 token 进入 service。未绑定 broker/session 的 direct dispatcher 对 privileged method 返回 `approval_required`。
 
 `NativePipeSecurity` 生成 protected DACL，仅向当前进程用户 SID 和 SYSTEM 授予 pipe read/write，不授予 owner/DACL 修改权。`NamedPipeServer` 固定 `\\.\pipe\AMem.NativeAgent.v1`，使用 `PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE` 和 `nMaxInstances=1`；同一个 server handle 在连接间复用。overlapped accept 与 client handler 串行运行在一个 owned thread 上，`stop()` 先发 stop event、对活动 handle 调用 `CancelIoEx`，再 join。状态快照提供 stopped/listening/connected/stopping/failed、累计连接数、名称和错误。
 
-`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> broker -> approval audit；broker 每次状态转换在锁外同步写 `native_ipc_approval_audit.jsonl`。日志记录 timestamp、client/method/capability/state、session/request、generation/target 和当时剩余 deadline，不含 params/result；单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 显示最近 20 条、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。broker core 已能安全产生 durable one-shot grant，但 dispatcher 尚不调用 consume 或执行 privileged adapter/send boundary；产品批准仍返回 `approval_execution_disabled`。
+`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> host executor -> broker -> approval audit；broker 每次状态转换在锁外同步写 `native_ipc_approval_audit.jsonl`。日志记录 timestamp、client/method/capability/state、session/request、generation/target 和当时剩余 deadline，不含 params/result；单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 显示最近 20 条、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。产品批准不再返回 `approval_execution_disabled`：dispatcher 消费 durable one-shot grant，在 adapter/send 前再次检查 Cancel/deadline，并验证 grant 与活动 request metadata 一致。
 
 `IpcApprovalBroker` 已固定 privileged authorization 的纯状态机。submission 只接受 server session/request id、bounded client identity、catalog method 和显式 operation snapshot/deadline；capability/target policy 由 `IpcMethodCatalog` 决定，Observe 与 unknown method 不能入队。record 不含 params/result，live/history 各自有界。pending 可转 approved/denied/invalidated/expired/cancelled；approved 仍是 live/revocable 状态。`consume()` 在 mutex 内重新匹配 session/request/deadline/generation/target 并先把 record 置为 consumed；随后在锁外同步审计，只有 durable success 才构造 grant。失败返回 `approval_audit_failed`，record 保持 consumed，重试只得到 `approval_not_approved`。consume 与 session Cancel 的竞态只有一个 terminal winner。
 
-system owner 延迟持有 audit、broker 和 runtime。控制窗口先 expire/invalidate，再显示 pending decision 与 persistent audit health；Stop/session/request cancellation 均产生状态转换。submit/decide/cancel 的 audit failure 保持既有 safe authorization 结论并进入可见计数，只有 consume 把 durability 作为 grant 的必要条件。静态 gate 固定 fail-closed consume，同时禁止 dispatcher consume 并保持 Hello Observe-only。因此本批仍不改变 capability 面。
+system owner 延迟持有 audit、broker、host executor 和 runtime。控制窗口先 expire/invalidate，再显示 pending decision 与 persistent audit health；Stop/session/request cancellation 均产生状态转换。submit/decide/cancel 的 audit failure 保持既有 safe authorization 结论并进入可见计数，只有 consume 把 durability 作为 grant 的必要条件。静态 gate 固定 fail-closed consume、grant-bound dispatcher execution、共享 Lua target 复核和 Observe-only Hello。Hello 的 capability 面未扩大，授权粒度改为逐请求。
+
+`process_open` 是唯一允许改变 external session baseline 的 method。dispatcher 在 `baselineMutex_` 下标记 controlled selection，要求 grant snapshot 与旧 baseline 完全匹配；adapter 成功后解析返回的新 target，并同时确认 service 当前 snapshot、connection generation 与返回值一致，才原子推进 baseline。失败、返回值不完整或并发目标变化不会推进 baseline，并以结构化错误终止或使 session 失效。
+
+Native response completion 现在区分 `timed_out_before_start`、已开始但超时的 `timed_out` 和设备已确认完成的 `completed_after_deadline`。后者保留成功回执，不能因 deadline 已过而改写成“未执行”。同理，grant consume 后但 adapter/send 前的 Cancel 返回 `cancelled_before_send`，已经发送的操作继续依赖底层回执表达确定性。
 
 ### 10.2 Legacy HTTP 协议
 
@@ -530,7 +534,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 5 组 approval-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、6 组 dispatcher 与 10 组 runtime 测试。approval 测试覆盖 persistent bounds/failure、identity/context revalidation、fail-closed burning、审计阻塞与 consume/Cancel race；audit 50/50、broker 100/100。连同四个静态 gate，Debug/Release 当前各有 16 项 CTest。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 5 组 approval-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、14 组 dispatcher 与 10 组 runtime 测试。approval/dispatcher 测试覆盖 persistent bounds/failure、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、11 个 service adapter、注入 Lua host、controlled selection 和 deadline completion；audit 50/50、broker 100/100、dispatcher/runtime 各 50/50。连同四个静态 gate，Debug/Release 当前各有 16 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
@@ -538,7 +542,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - legacy IPC HTTP parser/auth/sendAll
-- Native IPC GUI click、dispatcher consume adapter 与真实 send-boundary executor 集成
+- Native IPC GUI approval click、真实 Android privileged device/host operation 与最终 execution-outcome audit
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - fake transport partial I/O、迟到响应和三端口 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐
