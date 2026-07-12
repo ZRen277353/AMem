@@ -43,6 +43,61 @@ Role stringToRole(const std::string& s, Role fallback = Role::User) {
     return fallback;
 }
 
+bool isRetiredToolName(const std::string& name) {
+    static const std::unordered_set<std::string> retired = {
+        "get_status", "get_server_version", "get_architecture",
+        "init_driver", "read_memory", "read_value", "write_bytes",
+        "write_value", "scan_set_range", "scan_value", "scan_next",
+        "scan_fuzzy", "scan_hex", "get_scan_count", "get_scan_results",
+        "clear_scan", "get_module_list", "list_modules", "get_module_base",
+        "get_process_list", "list_processes", "open_process",
+        "resolve_offset_chain", "read_disassembly", "set_breakpoint",
+        "remove_breakpoint", "read_breakpoint_info", "suspend_breakpoint",
+        "resume_breakpoint", "resolve_symbol", "symbol_init", "symbol_find",
+        "execute_lua",
+    };
+    return retired.find(name) != retired.end();
+}
+
+bool hasRetiredToolCall(const std::vector<ToolCall>& calls) {
+    return std::any_of(calls.begin(), calls.end(),
+        [](const ToolCall& call) { return isRetiredToolName(call.name); });
+}
+
+ChatMessage historicalToolGroup(
+    const ChatMessage& assistant,
+    const std::vector<ChatMessage>& toolResults) {
+    ChatMessage history;
+    history.role = Role::Assistant;
+    history.timestamp = assistant.timestamp;
+    history.durationMs = assistant.durationMs;
+
+    std::ostringstream text;
+    if (!assistant.content.empty()) {
+        text << assistant.content << "\n\n";
+    }
+    text << "Historical tool execution (retired tools are not available for new calls):";
+    for (const auto& call : assistant.toolCalls) {
+        text << "\n\nTool: " << call.name;
+        const std::string& arguments = toolCallArgumentsForDisplay(call);
+        if (!arguments.empty()) {
+            text << "\nArguments: " << arguments;
+        }
+        const auto result = std::find_if(
+            toolResults.begin(), toolResults.end(),
+            [&call](const ChatMessage& message) {
+                return message.toolCallId == call.id;
+            });
+        if (result != toolResults.end()) {
+            text << "\nResult: " << result->content;
+        } else {
+            text << "\nResult: [not recorded]";
+        }
+    }
+    history.content = text.str();
+    return history;
+}
+
 // ---- JSON (de)serialization of a single message ----------------------------
 
 nlohmann::json messageToJson(const ChatMessage& msg) {
@@ -373,7 +428,12 @@ std::vector<ChatMessage> ChatSession::getMessagesForRequest() const {
                 }
             }
 
-            if (completeToolGroup) {
+            if (hasRetiredToolCall(assistant.toolCalls)) {
+                out.push_back(historicalToolGroup(assistant, toolResults));
+                if (completeToolGroup) {
+                    i = nextIndex - 1;
+                }
+            } else if (completeToolGroup) {
                 out.push_back(std::move(assistant));
                 out.insert(out.end(), toolResults.begin(), toolResults.end());
                 i = nextIndex - 1;

@@ -375,6 +375,7 @@ if(BUILD_TESTING)
         gui/ai/AgentRunner.cpp
         gui/ai/AgentMutationAudit.cpp
         gui/ai/ToolCallSecurity.cpp
+        gui/ai/ChatSession.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp
     )

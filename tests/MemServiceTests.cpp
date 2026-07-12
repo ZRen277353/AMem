@@ -2,6 +2,7 @@
 #include "../gui/ai/AgentController.h"
 #include "../gui/ai/AgentMutationAudit.h"
 #include "../gui/ai/AgentTaskExecutor.h"
+#include "../gui/ai/ChatSession.h"
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
 #include "../gui/ai/ToolCallSecurity.h"
@@ -21,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -40,6 +42,13 @@ AIProvider* ProviderRegistry::getProvider(const std::string&) {
 }
 
 } // namespace AI
+
+namespace Gui {
+
+std::list<std::pair<std::string, int>> logs;
+std::mutex logsMutex;
+
+} // namespace Gui
 
 namespace {
 
@@ -2051,6 +2060,117 @@ void testHiddenToolRegistration() {
            "structured completion_unknown must survive result normalization");
 }
 
+void testRetiredToolHistoryDowngrade() {
+    const std::vector<std::string> retiredNames = {
+        "get_status", "get_server_version", "get_architecture",
+        "init_driver", "read_memory", "read_value", "write_bytes",
+        "write_value", "scan_set_range", "scan_value", "scan_next",
+        "scan_fuzzy", "scan_hex", "get_scan_count", "get_scan_results",
+        "clear_scan", "get_module_list", "list_modules", "get_module_base",
+        "get_process_list", "list_processes", "open_process",
+        "resolve_offset_chain", "read_disassembly", "set_breakpoint",
+        "remove_breakpoint", "read_breakpoint_info", "suspend_breakpoint",
+        "resume_breakpoint", "resolve_symbol", "symbol_init", "symbol_find",
+        "execute_lua",
+    };
+
+    for (const auto& name : retiredNames) {
+        AI::ChatSession session;
+        AI::ChatMessage assistant;
+        assistant.role = AI::Role::Assistant;
+        assistant.toolCalls.push_back(toolCall("legacy-call", name));
+        session.addMessage(std::move(assistant));
+
+        AI::ChatMessage result;
+        result.role = AI::Role::Tool;
+        result.toolCallId = "legacy-call";
+        result.name = name;
+        result.content = R"({"success":true})";
+        session.addMessage(std::move(result));
+
+        const auto outgoing = session.getMessagesForRequest();
+        expect(outgoing.size() == 1 &&
+                   outgoing.front().role == AI::Role::Assistant &&
+                   outgoing.front().toolCalls.empty() &&
+                   outgoing.front().content.find(name) != std::string::npos &&
+                   outgoing.front().content.find(R"({"success":true})") !=
+                       std::string::npos,
+               "retired tool history must become non-executable assistant text: " +
+                   name);
+    }
+
+    AI::ChatSession mixed;
+    AI::ChatMessage mixedAssistant;
+    mixedAssistant.role = AI::Role::Assistant;
+    mixedAssistant.toolCalls.push_back(
+        toolCall("legacy", "scan_value", R"({"value":42})"));
+    mixedAssistant.toolCalls.push_back(
+        toolCall("canonical", "memory_read", R"({"address":"0x1000","size":4})"));
+    mixed.addMessage(std::move(mixedAssistant));
+    for (const auto& id : {std::string("legacy"), std::string("canonical")}) {
+        AI::ChatMessage result;
+        result.role = AI::Role::Tool;
+        result.toolCallId = id;
+        result.content = id + "-result";
+        mixed.addMessage(std::move(result));
+    }
+    const auto mixedOutgoing = mixed.getMessagesForRequest();
+    expect(mixedOutgoing.size() == 1 &&
+               mixedOutgoing.front().toolCalls.empty() &&
+               mixedOutgoing.front().content.find("scan_value") !=
+                   std::string::npos &&
+               mixedOutgoing.front().content.find("memory_read") !=
+                   std::string::npos,
+           "a mixed historical tool group must downgrade atomically");
+
+    AI::ChatSession incomplete;
+    AI::ChatMessage incompleteAssistant;
+    incompleteAssistant.role = AI::Role::Assistant;
+    incompleteAssistant.toolCalls.push_back(
+        toolCall("missing", "read_disassembly", R"({"address":4096})"));
+    incomplete.addMessage(std::move(incompleteAssistant));
+    const auto incompleteOutgoing = incomplete.getMessagesForRequest();
+    expect(incompleteOutgoing.size() == 1 &&
+               incompleteOutgoing.front().toolCalls.empty() &&
+               incompleteOutgoing.front().content.find("[not recorded]") !=
+                   std::string::npos,
+           "incomplete retired tool history must remain visible as text");
+
+    AI::ChatSession sensitive;
+    AI::ChatMessage sensitiveAssistant;
+    sensitiveAssistant.role = AI::Role::Assistant;
+    AI::ToolCall sensitiveCall = toolCall(
+        "driver", "init_driver", R"({"card_name":"secret-card"})");
+    sensitiveCall.redactedArguments = R"({"card_name":"[REDACTED]"})";
+    sensitiveAssistant.toolCalls.push_back(std::move(sensitiveCall));
+    sensitive.addMessage(std::move(sensitiveAssistant));
+    const auto sensitiveOutgoing = sensitive.getMessagesForRequest();
+    expect(sensitiveOutgoing.size() == 1 &&
+               sensitiveOutgoing.front().content.find("secret-card") ==
+                   std::string::npos &&
+               sensitiveOutgoing.front().content.find("[REDACTED]") !=
+                   std::string::npos,
+           "retired sensitive tool history must use redacted arguments");
+
+    AI::ChatSession canonical;
+    AI::ChatMessage canonicalAssistant;
+    canonicalAssistant.role = AI::Role::Assistant;
+    canonicalAssistant.toolCalls.push_back(
+        toolCall("canonical", "memory_read", R"({"address":"0x1000","size":4})"));
+    canonical.addMessage(std::move(canonicalAssistant));
+    AI::ChatMessage canonicalResult;
+    canonicalResult.role = AI::Role::Tool;
+    canonicalResult.toolCallId = "canonical";
+    canonicalResult.name = "memory_read";
+    canonicalResult.content = R"({"success":true})";
+    canonical.addMessage(std::move(canonicalResult));
+    const auto canonicalOutgoing = canonical.getMessagesForRequest();
+    expect(canonicalOutgoing.size() == 2 &&
+               canonicalOutgoing.front().toolCalls.size() == 1 &&
+               canonicalOutgoing.back().role == AI::Role::Tool,
+           "canonical tool history must retain provider tool-call structure");
+}
+
 void testDeviceSessionLifecycle() {
     auto& session = DeviceSession::GetInstance();
     {
@@ -3315,6 +3435,7 @@ int main() {
         {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
+        {"retired tool history downgrade", &testRetiredToolHistoryDowngrade},
         {"device session lifecycle", &testDeviceSessionLifecycle},
         {"agent task executor lifecycle", &testAgentTaskExecutorLifecycle},
         {"mutation audit persistence", &testMutationAuditPersistence},
