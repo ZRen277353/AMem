@@ -13,6 +13,7 @@ file(READ "${SOURCE_ROOT}/ipc/NativeAgentRuntime.cpp" runtime_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcRequestSession.cpp" request_session_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalAudit.h" approval_audit_header)
+file(READ "${SOURCE_ROOT}/ipc/IpcApprovalBroker.cpp" approval_broker_source)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -66,6 +67,12 @@ forbid_text("${approval_audit_header}" "approval audit raw params"
     "params")
 forbid_text("${approval_audit_header}" "approval audit raw results"
     "resultJson")
+require_text("${approval_broker_source}" "durable consumed transition"
+    "const bool durable = audit(changed);")
+require_text("${approval_broker_source}" "fail-closed consumed grant"
+    "changed.state == IpcApprovalState::Consumed && durable")
+require_text("${approval_broker_source}" "stable consumed audit failure"
+    "approval_audit_failed")
 require_text("${runtime_source}" "session-scoped approval cancellation"
     "approvalBroker_->cancelSession(sessionId);")
 forbid_text("${runtime_source}" "runtime privileged submission"

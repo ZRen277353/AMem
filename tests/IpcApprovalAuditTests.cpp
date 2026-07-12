@@ -207,6 +207,32 @@ void testWriteFailuresRemainVisible() {
          "audit write failure must remain visible to the control surface");
 }
 
+void testConsumedAuditFailureWithholdsAndBurnsGrant() {
+  TempDirectory directory("consume-failure");
+  const auto path = directory.path() / "not-a-file";
+  std::filesystem::create_directories(path);
+  NativeIpc::IpcApprovalAuditLog audit(path.string());
+  NativeIpc::IpcApprovalBroker broker({}, &audit);
+
+  const auto submitted = broker.submit(submission(40, 50));
+  expect(submitted.ok &&
+             broker
+                 .decide(submitted.record->approvalId,
+                         NativeIpc::IpcApprovalDecision::Approve, context())
+                 .ok,
+         "failed audit fixture should still reach approved state");
+  const auto consumed =
+      broker.consume(submitted.record->approvalId, 40, 50, context());
+  expect(!consumed.ok && !consumed.grant &&
+             consumed.code == "approval_audit_failed" && consumed.record &&
+             consumed.record->state == NativeIpc::IpcApprovalState::Consumed,
+         "real persistent failure must withhold a consumed grant");
+  expect(broker.consume(submitted.record->approvalId, 40, 50, context()).code ==
+                 "approval_not_approved" &&
+             audit.snapshot().failedWrites == 3,
+         "failed durable consume must remain burned without another append");
+}
+
 } // namespace
 
 int main() {
@@ -217,6 +243,8 @@ int main() {
        &testRotationReloadAndMalformedLinesStayBounded},
       {"concurrent appends are serialized", &testConcurrentAppendsAreSerialized},
       {"write failures remain visible", &testWriteFailuresRemainVisible},
+      {"consumed audit failure withholds and burns grant",
+       &testConsumedAuditFailureWithholdsAndBurnsGrant},
   };
 
   int failures = 0;

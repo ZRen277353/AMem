@@ -100,7 +100,10 @@ public:
   IpcApprovalResult submit(const IpcApprovalSubmission &submission);
   IpcApprovalResult decide(uint64_t approvalId, IpcApprovalDecision decision,
                            const Mem::OperationContext &current);
-  IpcApprovalResult consume(uint64_t approvalId,
+  // The record is burned before the unlocked audit call. A grant is returned
+  // only when that consumed transition is durably recorded.
+  IpcApprovalResult consume(uint64_t approvalId, uint64_t sessionId,
+                            uint64_t requestId,
                             const Mem::OperationContext &current);
 
   size_t invalidateStale(const Mem::OperationContext &current);

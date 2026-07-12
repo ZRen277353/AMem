@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -79,6 +80,60 @@ private:
   NativeIpc::IpcApprovalBroker *broker_ = nullptr;
 };
 
+class FailingConsumedAuditSink final : public NativeIpc::IIpcApprovalAuditSink {
+public:
+  bool recordApproval(const NativeIpc::IpcApprovalRecord &record,
+                      std::string *error) override {
+    if (error != nullptr) {
+      error->clear();
+    }
+    if (record.state != NativeIpc::IpcApprovalState::Consumed) {
+      return true;
+    }
+    if (error != nullptr) {
+      *error = "injected durable write failure";
+    }
+    return false;
+  }
+};
+
+class BlockingConsumedAuditSink final
+    : public NativeIpc::IIpcApprovalAuditSink {
+public:
+  bool recordApproval(const NativeIpc::IpcApprovalRecord &record,
+                      std::string *error) override {
+    if (error != nullptr) {
+      error->clear();
+    }
+    if (record.state != NativeIpc::IpcApprovalState::Consumed) {
+      return true;
+    }
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    consumedEntered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [&] { return released_; });
+    return true;
+  }
+
+  bool waitForConsumedAudit() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 5s, [&] { return consumedEntered_; });
+  }
+
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool consumedEntered_ = false;
+  bool released_ = false;
+};
+
 void testCatalogOwnedValidationAndBoundedDto() {
   NativeIpc::IpcApprovalBroker broker;
   expect(broker.submit(submission("status")).code == "approval_not_required",
@@ -145,7 +200,7 @@ void testApproveConsumeIsOneShot() {
               .code == "approval_not_pending",
       "decision must be a one-way transition");
 
-  const auto consumed = broker.consume(approvalId, expected);
+  const auto consumed = broker.consume(approvalId, 10, 20, expected);
   expect(consumed.ok && consumed.grant &&
              consumed.record->state == NativeIpc::IpcApprovalState::Consumed &&
              consumed.grant->sessionId == 10 &&
@@ -153,7 +208,8 @@ void testApproveConsumeIsOneShot() {
              consumed.grant->method == "memory_write" &&
              consumed.grant->target == expected.target,
          "approved request should yield one target-bound grant");
-  expect(broker.consume(approvalId, expected).code == "approval_not_approved",
+  expect(broker.consume(approvalId, 10, 20, expected).code ==
+             "approval_not_approved",
          "approval grant must not be reusable");
 
   const auto denied =
@@ -163,7 +219,7 @@ void testApproveConsumeIsOneShot() {
                     NativeIpc::IpcApprovalDecision::Deny, context(99, 99));
   expect(denial.ok &&
              denial.record->state == NativeIpc::IpcApprovalState::Denied &&
-             broker.consume(denied.record->approvalId, expected).code ==
+             broker.consume(denied.record->approvalId, 10, 21, expected).code ==
                  "approval_not_approved",
          "explicit denial must be terminal without trusting current context");
 }
@@ -188,7 +244,7 @@ void testContextInvalidatesBeforeAndAfterDecision() {
              .ok,
          "second request should approve on matching context");
   const auto invalidAfter =
-      broker.consume(after.record->approvalId, context(8, 2));
+      broker.consume(after.record->approvalId, 1, 2, context(8, 2));
   expect(!invalidAfter.ok && invalidAfter.code == "approval_invalidated" &&
              invalidAfter.record->state ==
                  NativeIpc::IpcApprovalState::Invalidated,
@@ -209,7 +265,7 @@ void testContextInvalidatesBeforeAndAfterDecision() {
                      NativeIpc::IpcApprovalDecision::Approve, context(7, 99))
              .ok,
          "None policy should ignore target changes within one generation");
-  expect(!broker.consume(driver.record->approvalId, context(8, 99)).ok,
+  expect(!broker.consume(driver.record->approvalId, 1, 4, context(8, 99)).ok,
          "None policy must still bind connection generation");
 }
 
@@ -261,7 +317,7 @@ void testAuditReceivesBoundedStateTransitions() {
                      NativeIpc::IpcApprovalDecision::Approve, expected)
              .ok,
          "Lua approval should transition to approved");
-  expect(broker.consume(submitted.record->approvalId, expected).ok,
+  expect(broker.consume(submitted.record->approvalId, 9, 7, expected).ok,
          "Lua approval should be consumable once");
 
   const auto records = sink.records();
@@ -277,6 +333,139 @@ void testAuditReceivesBoundedStateTransitions() {
                record.clientName == "AMem.ApprovalTests" &&
                record.connectionGeneration == 7,
            "audit DTO should contain bounded identity and target metadata");
+  }
+}
+
+void testConsumeRevalidatesRequestIdentity() {
+  NativeIpc::IpcApprovalBroker broker;
+  const Mem::OperationContext expected = context();
+
+  const auto wrongSession =
+      broker.submit(submission("memory_write", 80, 1, expected));
+  expect(broker
+             .decide(wrongSession.record->approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve, expected)
+             .ok,
+         "identity fixture should approve");
+  const auto sessionResult =
+      broker.consume(wrongSession.record->approvalId, 81, 1, expected);
+  expect(!sessionResult.ok && !sessionResult.grant &&
+             sessionResult.code == "approval_identity_mismatch" &&
+             sessionResult.record->state ==
+                 NativeIpc::IpcApprovalState::Invalidated,
+         "consume must invalidate a mismatched server session");
+
+  const auto wrongRequest =
+      broker.submit(submission("memory_write", 80, 2, expected));
+  expect(broker
+             .decide(wrongRequest.record->approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve, expected)
+             .ok,
+         "request identity fixture should approve");
+  const auto requestResult =
+      broker.consume(wrongRequest.record->approvalId, 80, 3, expected);
+  expect(!requestResult.ok && !requestResult.grant &&
+             requestResult.code == "approval_identity_mismatch" &&
+             requestResult.record->state ==
+                 NativeIpc::IpcApprovalState::Invalidated,
+         "consume must invalidate a mismatched request id");
+}
+
+void testConsumeAuditFailureBurnsGrant() {
+  FailingConsumedAuditSink sink;
+  NativeIpc::IpcApprovalBroker broker({}, &sink);
+  const Mem::OperationContext expected = context();
+  const auto submitted =
+      broker.submit(submission("memory_write", 90, 1, expected));
+  expect(broker
+             .decide(submitted.record->approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve, expected)
+             .ok,
+         "audit failure fixture should approve");
+
+  const auto failed =
+      broker.consume(submitted.record->approvalId, 90, 1, expected);
+  expect(!failed.ok && !failed.grant &&
+             failed.code == "approval_audit_failed" && failed.record &&
+             failed.record->state == NativeIpc::IpcApprovalState::Consumed,
+         "failed consumed audit must withhold the execution grant");
+  expect(broker.consume(submitted.record->approvalId, 90, 1, expected).code ==
+             "approval_not_approved",
+         "audit failure must burn authorization against retry");
+}
+
+void testConsumeSerializesWithSessionCancellation() {
+  BlockingConsumedAuditSink sink;
+  NativeIpc::IpcApprovalBroker broker({}, &sink);
+  const Mem::OperationContext expected = context();
+  const auto submitted =
+      broker.submit(submission("memory_write", 100, 1, expected));
+  expect(broker
+             .decide(submitted.record->approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve, expected)
+             .ok,
+         "consume cancellation fixture should approve");
+
+  std::atomic<bool> consumeReturned{false};
+  NativeIpc::IpcApprovalResult consumed;
+  std::thread consumeThread([&] {
+    consumed = broker.consume(submitted.record->approvalId, 100, 1, expected);
+    consumeReturned.store(true, std::memory_order_release);
+  });
+  const bool auditEntered = sink.waitForConsumedAudit();
+  const bool returnedBeforeAudit =
+      consumeReturned.load(std::memory_order_acquire);
+  const size_t cancelled = broker.cancelSession(100);
+  const auto state = broker.find(submitted.record->approvalId)->state;
+  sink.release();
+  consumeThread.join();
+  expect(auditEntered && !returnedBeforeAudit && cancelled == 0 &&
+             state == NativeIpc::IpcApprovalState::Consumed && consumed.ok &&
+             consumed.grant && consumeReturned.load(std::memory_order_acquire),
+         "consume should beat cancellation but wait for durable audit");
+}
+
+void testConsumeAndSessionCancelRaceIsTerminal() {
+  const Mem::OperationContext expected = context();
+  for (size_t iteration = 0; iteration < 64; ++iteration) {
+    NativeIpc::IpcApprovalBroker broker;
+    const auto submitted =
+        broker.submit(submission("memory_write", 110, 1, expected));
+    expect(broker
+               .decide(submitted.record->approvalId,
+                       NativeIpc::IpcApprovalDecision::Approve, expected)
+               .ok,
+           "consume race fixture should approve");
+
+    std::atomic<bool> start{false};
+    NativeIpc::IpcApprovalResult consumed;
+    size_t cancelled = 0;
+    std::thread consumeThread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      consumed = broker.consume(submitted.record->approvalId, 110, 1, expected);
+    });
+    std::thread cancelThread([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      cancelled = broker.cancelSession(110);
+    });
+    start.store(true, std::memory_order_release);
+    consumeThread.join();
+    cancelThread.join();
+
+    const auto final = broker.find(submitted.record->approvalId);
+    const bool consumedFirst =
+        consumed.ok && consumed.grant && cancelled == 0 && final &&
+        final->state == NativeIpc::IpcApprovalState::Consumed;
+    const bool cancelledFirst =
+        !consumed.ok && !consumed.grant &&
+        consumed.code == "approval_not_approved" && cancelled == 1 && final &&
+        final->state == NativeIpc::IpcApprovalState::Cancelled;
+    expect(consumedFirst || cancelledFirst,
+           "consume and session cancellation must have one terminal winner");
   }
 }
 
@@ -357,6 +546,13 @@ int main() {
        &testQueueCancellationExpiryAndRetention},
       {"audit receives bounded transitions",
        &testAuditReceivesBoundedStateTransitions},
+      {"consume revalidates request identity",
+       &testConsumeRevalidatesRequestIdentity},
+      {"consume audit failure burns grant", &testConsumeAuditFailureBurnsGrant},
+      {"consume serializes with session cancellation",
+       &testConsumeSerializesWithSessionCancellation},
+      {"consume and session cancellation race is terminal",
+       &testConsumeAndSessionCancelRaceIsTerminal},
       {"cancel all revokes pending and approved",
        &testCancelAllRevokesPendingAndApproved},
       {"request cancellation and lookup",

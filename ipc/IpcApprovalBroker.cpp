@@ -170,7 +170,8 @@ IpcApprovalBroker::decide(uint64_t approvalId, IpcApprovalDecision decision,
 }
 
 IpcApprovalResult
-IpcApprovalBroker::consume(uint64_t approvalId,
+IpcApprovalBroker::consume(uint64_t approvalId, uint64_t sessionId,
+                           uint64_t requestId,
                            const Mem::OperationContext &current) {
   IpcApprovalRecord changed;
   {
@@ -188,6 +189,8 @@ IpcApprovalBroker::consume(uint64_t approvalId,
     }
     if (std::chrono::steady_clock::now() >= found->deadline) {
       found->state = IpcApprovalState::Expired;
+    } else if (found->sessionId != sessionId || found->requestId != requestId) {
+      found->state = IpcApprovalState::Invalidated;
     } else if (!contextMatches(*found, current)) {
       found->state = IpcApprovalState::Invalidated;
     } else {
@@ -196,18 +199,28 @@ IpcApprovalBroker::consume(uint64_t approvalId,
     changed = *found;
   }
 
-  audit(changed);
+  const bool durable = audit(changed);
   IpcApprovalResult result;
-  result.ok = changed.state == IpcApprovalState::Consumed;
-  if (result.ok) {
+  if (changed.state == IpcApprovalState::Consumed && durable) {
+    result.ok = true;
     result.grant = makeGrant(changed);
+  } else if (changed.state == IpcApprovalState::Consumed) {
+    result.code = "approval_audit_failed";
+    result.message = "consumed approval was not durably audited";
   } else {
-    result.code = changed.state == IpcApprovalState::Expired
-                      ? "approval_expired"
-                      : "approval_invalidated";
-    result.message = changed.state == IpcApprovalState::Expired
-                         ? "approval deadline expired before execution"
-                         : "approval context changed before execution";
+    const bool expired = changed.state == IpcApprovalState::Expired;
+    const bool identityMismatch =
+        changed.sessionId != sessionId || changed.requestId != requestId;
+    if (expired) {
+      result.code = "approval_expired";
+      result.message = "approval deadline expired before execution";
+    } else if (identityMismatch) {
+      result.code = "approval_identity_mismatch";
+      result.message = "approval session or request changed before execution";
+    } else {
+      result.code = "approval_invalidated";
+      result.message = "approval context changed before execution";
+    }
   }
   result.record = std::move(changed);
   return result;
@@ -371,7 +384,6 @@ bool IpcApprovalBroker::audit(const IpcApprovalRecord &record) const {
     std::string error;
     return auditSink_->recordApproval(record, &error);
   } catch (...) {
-    // Audit failures never turn a denied/invalidated request into approval.
     return false;
   }
 }
