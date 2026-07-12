@@ -257,6 +257,7 @@ ChatWindow
             -> parse JSON and validate schema
             -> SocketIoTimeout::ScopedTimeout(deadline)
             -> MemService or legacy socket executor
+       -> AgentMutationAuditLog(write/session effect, before callback)
        -> completion callback
   -> UIMessageQueue(ToolResult)
 ```
@@ -265,7 +266,7 @@ ChatWindow
 
 排队取消或超时不会进入 executor，分别返回 `cancelled_before_start` 或 `timed_out_before_start`。活动任务使用同一个 cancellation token 和绝对 deadline；已迁移 service 会在 send 前、I/O 期间和结果规范化时观察它们。
 
-worker 不会强杀正在运行的 C++ 调用。只读操作在 deadline 后才返回时会归一为 `timed_out`；写操作保留 `completed_after_deadline`、`completed_after_cancel_request` 或 `completion_unknown`，避免把已经发送的副作用误报为未执行。legacy executor 若不主动检查 context，仍可能直到 socket deadline 或函数返回才响应取消，但不会脱离 worker 生命周期。
+worker 不会强杀正在运行的 C++ 调用。只读操作在 deadline 后才返回时会归一为 `timed_out`；写操作保留 `completed_after_deadline`、`completed_after_cancel_request` 或 `completion_unknown`，避免把已经发送的副作用误报为未执行。write-classified 和 symbol-session outcome 在 callback 前写独立审计，因此 callback 被 stale run gate 丢弃或抛异常也不会删除最终状态。legacy executor 若不主动检查 context，仍可能直到 socket deadline 或函数返回才响应取消，但不会脱离 worker 生命周期。
 
 ### 5.4 socket 层
 
@@ -347,12 +348,12 @@ tool(result for call 2)
 
 1. 设置 HTTP token。
 2. 调用 `AgentTaskExecutor::cancelRun()`，标记当前 active/queued task 的 token。
-3. 清 active dispatch/tool run id。
+3. 活动 mutation 立即显示 cancel requested，而不是声称已取消。
 4. 保存部分流式内容。
 5. 记录 cancelled notice/trace。
 6. 把 UI 和 run 恢复到 Idle。
 
-排队任务不会再执行；已迁移的 active service 会观察取消，但已经发送到设备的写命令不能撤回。迟到工具结果仍会被 runId 过滤，因此 `completed_after_cancel_request` 或 `completion_unknown` 目前不会进入当前会话/trace。
+排队任务不会再执行；已迁移的 active service 会观察取消，但已经发送到设备的写命令不能撤回。迟到工具结果仍不会进入旧会话/trace，但 `AgentTaskExecutor` 会先把 approval/effect/target/completion 摘要写入 `ai_mutation_audit.jsonl`，Audit 表按新到旧显示最近 100 条。Clear、New、session switch/delete 和窗口析构也通过同一 active-run cancellation 入口。
 
 排查“点 Stop 后设备还是变化”时，先区分任务是否已发送；Stop 是取消请求，不是写操作回滚。
 
@@ -417,7 +418,13 @@ GUI 的 connect/disconnect/auto-reconnect 现在通过 `DeviceSession` exclusive
 
 磁盘可包含 runtime system notice、不完整工具组和全部审计；`getMessagesForRequest()` 会在发送前生成清洗副本。不要为了“简化 provider”而直接读取 `getMessages()`。
 
-### 8.3 加载边界
+### 8.3 独立 mutation audit
+
+`ai_mutation_audit.jsonl` 不属于聊天 session。write-classified 工具和 symbol active-table session effect 在 executor callback 前写入；manual deny 和队列拒绝由 UI 边界补写。单条记录最多 64 KiB，active 文件最多 4 MiB并保留一个 `.1` 备份；加载时忽略损坏 JSONL 行。
+
+审计保留 run/tool-call id、approval、effect/resource domain、预期 generation/target、duration、success 和 completion。driver/Lua secret/error、raw memory bytes、bulk output、registers、hits、items 和大字段仅保存 omitted/size 摘要。它仍是明文文件，不替代加密会话或 OS 访问控制。
+
+### 8.4 加载边界
 
 `ChatSession::loadUnlocked()` 先完整解析 JSON，再按 `arr.size()` reserve，最后才裁剪到 1000 条。外部编辑或异常大文件可在裁剪前消耗大量内存。
 
@@ -540,7 +547,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 21 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 22 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

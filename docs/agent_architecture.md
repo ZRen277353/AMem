@@ -193,12 +193,12 @@ HTTP 2xx 不等于 provider stream 完整：
 
 | 操作 | 当前效果 | 不保证 |
 |------|----------|--------|
-| Stop/`cancelRequest()` | 设置 HTTP token，调用 `AgentTaskExecutor::cancelRun()`，清 active id 并结束当前编排 | 撤回已发送写操作、让迟到回执进入当前会话/trace |
+| Stop/`cancelRequest()` | 设置 HTTP token，调用 `AgentTaskExecutor::cancelRun()`，清 active id 并结束当前编排；mutation 最终状态在 UI callback 前写独立审计 | 撤回已发送写操作、让迟到回执进入原会话/trace |
 | HTTP cancellation token | content receiver 在数据块边界中止 | 阻塞 read 立刻结束、worker 已 join |
 | 排队任务取消/deadline | worker 在执行前返回 `cancelled_before_start`/`timed_out_before_start` | 已开始操作被抢占 |
 | 活动工具取消/deadline | 同一 `OperationContext` 传到 service 和 socket I/O；worker 始终受管 | legacy executor 立即响应、已发送设备命令被撤回 |
-| deadline 后完成 | 只读结果归一为 `timed_out`；写结果保留 `completed_after_deadline` 或底层不确定状态 | Stop 后 UI 一定展示最终回执 |
-| runId 过滤 | 迟到结果不污染新 UI run | 迟到操作没有设备副作用 |
+| deadline 后完成 | 只读结果归一为 `timed_out`；写结果保留 `completed_after_deadline` 或底层不确定状态，并写 mutation audit | 原会话接收已过期结果 |
+| runId 过滤 | 迟到结果不污染新 UI run；mutation/session-effect 结果仍进入独立 Audit 表 | 迟到操作没有设备副作用 |
 | `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
 | `DeviceSession` poison | 推进 generation、拒绝新请求并等待显式重连 | 自动恢复 driver/process/scan/breakpoint 状态 |
 | MCP HTTP timeout | Python 停止等待，部分读方法会重试 | 旧 IPC handler/设备请求已取消 |
@@ -256,7 +256,8 @@ Idle
 3. `ToolExecutor` 在注册表中查工具，解析 arguments JSON 并按 schema 校验。
 4. 在同一 worker 上同步调用 executor，把同一 deadline/cancellation 传入 service/socket。
 5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
-6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
+6. mutation 和 symbol-session effect 先写入有界 `AgentMutationAuditLog`；该步骤发生在 completion callback 之前。
+7. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`；旧 run 结果仍可被 UI 过滤，不影响独立审计。
 
 当前 LuaJIT 构建的注册表有 **57 个可执行名称**。其中 33 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 24 个定义。无 `HAVE_LUAJIT` 时 canonical/alias Lua 均不注册，目录为 55 个可执行、32 个隐藏、23 个广告定义。当前 LuaJIT 目录如下（H=hidden）：
 
@@ -285,11 +286,17 @@ Idle
 
 当前审批仍不包含：
 
-- 进程名和持久化 effect 审计
-- 独立持久 effect 审计
+- 进程名
+- catalog-owned effect/resource metadata（当前独立审计按 canonical/alias 名称归类）
 - endpoint/provider 数据去向
 
 二十三个 canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit page 在 service/Agent 边界限制为 100 项。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把所有 target mutation 视为完整原子边界。
+
+### 7.3 独立 mutation audit
+
+`AgentTaskExecutor` 在 write-classified 工具和 symbol session 工具的 completion callback 前写 `ai_mutation_audit.jsonl`。记录包含 run/tool-call id、脱敏参数摘要、approval、effect/resource domain、预期 generation/target、duration、success 和 completion。manual deny 与队列拒绝由 `ChatWindow` 在没有 worker outcome 时补写。Stop、Clear、New、session switch/delete 和窗口析构统一向 active run 发送取消请求。
+
+单条记录上限 64 KiB；active 文件上限 4 MiB，轮转为一个 `.1` 备份；内存只保留最近 100 条供 Audit 表显示。driver message/card、Lua code/error/output、raw memory data、register/hit/items 和大字段不原样保存。JSONL 尾部损坏记录会在加载时跳过，但日志仍是明文且写盘失败不能被描述为绝对可靠审计。
 
 ## 8. 共享状态与事务边界
 
@@ -347,6 +354,7 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 | `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；损坏与缺失当前都可能写默认值 |
 | `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏时可能重建为空索引并孤立会话文件 |
 | `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；driver card 字段会脱敏，但仍可能包含 Lua、地址、内存数据和其他完整参数/结果 |
+| `ai_mutation_audit.jsonl` / `.1` | `AgentMutationAuditLog` | mutation/session-effect 完成摘要 | 明文、字段脱敏；64 KiB/record，4 MiB active + 一个轮转备份 |
 
 ### 9.1 全局设置与会话字段冲突
 
@@ -445,12 +453,11 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 ### 尚未满足、不能假定成立的目标
 
 1. 应用 shutdown 返回时 HTTP/IPC 后台任务均已退出。
-2. Stop 能撤回已发送操作，或保证其迟到回执进入独立审计。
-3. 所有 legacy process-bound executor 都在实际 send 边界消费 run snapshot。
-4. 端口锁能让复合业务操作成为事务。
-5. loopback IPC 等同于已鉴权。
-6. 所有 AI 持久化文件都严格原子且损坏时不覆盖。
-7. ReadOnly 一定没有共享状态变化。
+2. 所有 legacy process-bound executor 都在实际 send 边界消费 run snapshot。
+3. 端口锁能让复合业务操作成为事务。
+4. loopback IPC 等同于已鉴权。
+5. 所有 AI 持久化文件都严格原子且损坏时不覆盖。
+6. ReadOnly 一定没有共享状态变化。
 8. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 9. provider `maxContextTokens` 会自动限制实际请求。
 10. 内置 Agent、IPC 和 MCP 暴露相同能力。
@@ -489,7 +496,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 21 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

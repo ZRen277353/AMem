@@ -23,7 +23,7 @@
 | A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
 | A-06 | P1 | 未修复 | IPC client handler 不排空，响应也未处理 partial send |
-| A-07 | P1 | 部分修复 | Stop 已传递 task cancellation；已发送写入的最终回执仍不可见 |
+| A-07 | P1 | 已修复 | Stop 保留真实取消语义；mutation 晚到回执在 UI callback 前进入独立审计 |
 | A-08 | P1 | 未修复 | 复合工具和进程切换不是事务，可被其他前端插入 |
 | A-09 | P1 | 未修复 | HTTP、模型内容、工具输出和会话载入缺少总量上限 |
 | A-10 | P1 | 待安全决策 | “OpenAI” provider 默认指向第三方兼容网关 |
@@ -141,22 +141,21 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 - 为响应体设上限或分页，避免一次构建和发送超大 JSON。
 - 在服务端支持 request id/cancellation 前，不要对 timeout 后仍可能运行的方法自动重试；至少把旧请求状态暴露给调用方。
 
-### A-07：Stop 后已发送操作的最终状态仍不可见
+### A-07：Stop 后已发送操作的最终状态独立可见（已修复）
 
 **证据**
 
-`ChatWindow::cancelRequest()` 现在同时设置 run token 并调用 `AgentTaskExecutor::cancelRun()`。排队任务会成为 `cancelled_before_start`，迁移到 `MemService` 的 active 操作可观察 cancellation；canonical 长扫描会请求 DEBUG stop，memory/breakpoint mutation 会保留 confirmed-after-cancel/deadline 或 `completion_unknown`。worker 始终保持受管并在 shutdown join。UI 仍会立即清空 active tool run id，因此这些晚到 scan/write/breakpoint 回执仍会被 run-id gate 丢弃。
+`ChatWindow::cancelRequest()` 同时设置 run token 并调用 `AgentTaskExecutor::cancelRun()`。排队任务成为 `cancelled_before_start`，迁移到 `MemService` 的 active 操作观察 cancellation；canonical 长扫描请求 DEBUG stop，memory/breakpoint/driver/Lua mutation 保留 confirmed-after-cancel/deadline 或 `completion_unknown`。活动 mutation 的 Stop notice 明确显示 cancel requested。Clear、New、session switch/delete 和窗口析构也统一调用 active-run cancellation。
+
+`AgentTaskExecutor::deliver()` 在任何 completion callback 前将 write-classified 和 symbol-session effect 写入 `AgentMutationAuditLog`。因此即使 callback 抛异常、原 run 已清空或 `UIMessageQueue` 被 run-id gate 丢弃，最终状态仍保存在 `ai_mutation_audit.jsonl` 并出现在 Audit 表。manual deny 与 queue rejection 也有记录。
 
 **影响**
 
-线程和端口生命周期不再失管，但用户仍可能把“Stop”理解为操作已取消；已批准且发送的写操作可能完成，而当前会话/trace 不记录其最终状态。未迁移 legacy executor 也可能只在 socket deadline 处响应取消。
+已发送副作用仍不能撤回，迟到结果也不会重新写入已结束的聊天 session；这是刻意的隔离。最终 completion、approval、effect/resource domain、run/tool-call id 和预期 target 改由独立审计承担。未迁移 legacy executor 仍可能只在 socket deadline 处响应取消，但 worker ownership 和最终 outcome 不再丢失。
 
 **建议**
 
-- UI 区分“停止生成”“排队任务已取消”“已请求取消”和“操作仍在收尾”。
-- 对已经发出的写命令，在拿到确定结果前保持可见 pending 状态。
-- 即使原 run 已结束，也把晚到结果写入独立审计日志。
-- 只在协议能安全中断且不会留下半包时，才把 cancellation 传入 socket 层。
+剩余约束：只有协议能安全中断且不会留下半包时，才把 cancellation 进一步传入 socket 层。独立日志是 4 MiB active + 一个轮转备份的明文摘要，不是不可篡改或远程合规审计。
 
 ### A-08：复合操作和共享设备状态不是事务
 
@@ -227,7 +226,7 @@ DPAPI 只保护 `ai_config.json` 中的 provider API key。`ChatSession` 会明�
 
 **影响**
 
-driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit 和 `ai_sessions/*.json` 脱敏，原值只为执行和当前 tool-call 连续性暂存在进程内。Lua 代码、地址、内存内容、符号和断点寄存器仍可能进入会话文件，并在后续回合发送给远端 provider，因此本项仍未关闭。
+driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sessions/*.json` 和 mutation audit 脱敏，原值只为执行和当前 tool-call 连续性暂存在进程内。独立 audit 也省略 Lua code/error/output、raw memory data、register/hit/items 和大字段，但它仍是明文。Lua 代码、地址、内存内容、符号和断点寄存器仍可能进入会话文件，并在后续回合发送给远端 provider，因此本项仍未关闭。
 
 **建议**
 
@@ -392,7 +391,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 21 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 22 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。

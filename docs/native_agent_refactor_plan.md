@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、Lua host boundary、连接生命周期、run target 与受管工具 worker 已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、Lua host boundary、独立 mutation audit、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成十三个纵向切片：
+截至 2026-07-12 已完成十四个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -26,13 +26,14 @@
 - `disassemble` 统一校验 ARM64 固定宽度 `count * 4`、拒绝短读，返回 little-endian encoding 和明确的 `decoded=false`；旧 `read_disassembly` 仅作隐藏 alias。
 - `driver_initialize` 在 service/send 边界绑定 connection generation，区分未发送、server reject、`completion_unknown` 与确认后 cancel/deadline；`card`/`card_name` 在审批、审计和会话 JSON 中统一脱敏，原值仅瞬时用于执行/provider 连续性。
 - `lua_execute` 与隐藏 `execute_lua` 仅在 `HAVE_LUAJIT` 时注册；执行前复核 target/generation，Lua timeout 不得延长 task absolute deadline，开始后取消只记录回执而不声称硬中止。
+- write-classified 与 symbol-session outcome 在 UI callback 前写 `ai_mutation_audit.jsonl`；manual deny/queue rejection 同样记录。日志保存 approval/effect/resource/target/completion 的脱敏摘要，64 KiB/record、4 MiB active + 一个轮转备份，并由独立 Audit 表展示最近 100 条。
 - `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 旧名称仍可执行但不再向 provider 广告。LuaJIT 构建当前有 57 个可执行名称、33 个隐藏 alias、24 个广告定义；无 LuaJIT 时为 55/32/23。
-- `NativeAgentMemTests` 的 21 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
+- `NativeAgentMemTests` 的 22 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：Stop 后已发送操作的独立可见审计、GUI/IPC scan/symbol/breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
+尚未完成：GUI/IPC scan/symbol/breakpoint 调用迁移、隐藏 legacy executor 收敛、MCP/IPC 删除。规范模型可见目录和 Stop 后 mutation 独立审计已经完成，但部分隐藏旧工具仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send/host 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-19、A-20 仍只能视为部分修复；A-03 与 A-07 已由 joinable worker、shutdown 和 mutation-audit 测试关闭。
 
 ## 1. 结论
 
@@ -442,6 +443,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - 使用 joinable `AgentTaskExecutor`，删除工具路径两层 detached。
 - 先注册规范工具，同时将 alias 设为 hidden compatibility entry。
 - 24 个目标规范名称均已落地；扫描、符号、断点、driver 和 disassembly 已迁入 service 边界，Lua 已加入 host boundary/feature gate。下一步迁移或删除隐藏 legacy executor。
+- mutation/session effect 在 completion callback 前写独立脱敏审计，Stop 不再把取消请求描述为副作用已撤回。
 
 退出条件：Agent 工具实现中没有 raw socket command 或 `AppContext::Get()`；Stop 和 teardown 测试通过。
 
@@ -586,4 +588,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十三批加入 canonical `lua_execute` 并隐藏 `execute_lua`，两者只在 `HAVE_LUAJIT` 时注册。host 执行前复核 target/generation，实际 Lua hook deadline 取参数 timeout 与 Agent absolute deadline 的较早值；脚本开始后不承诺硬取消，晚到取消/超时按完成回执记录。
 
-十三个切片均已通过 Debug/Release 应用构建和 21 组无设备测试，模型可见规范目录已完成。下一批应实现 Stop 后已发送操作的独立审计，再推进 GUI 调用迁移、隐藏 alias 删除以及 IPC/MCP 收敛。
+第十四批加入 `AgentMutationAuditLog`。executor 在 UI callback 前持久化 write 和 symbol-session outcome；manual deny/queue rejection 由 UI 边界补写。记录冻结 enqueue 时 safety/target policy，保存 approval、effect/resource、run/tool-call id、预期 target 和 completion；driver/Lua/raw-memory/bulk 字段脱敏，JSONL 有单条/总量/轮转上限。Stop、Clear、New、session switch/delete 与析构共享 active-run cancellation，Audit 表独立显示迟到最终状态。
+
+十四个切片均已通过 Debug/Release 应用构建和 22 组无设备测试，模型可见规范目录与 Stop 后 mutation 审计已完成。下一批应推进 GUI 调用迁移、隐藏 alias 删除以及 IPC/MCP 收敛。
