@@ -1,8 +1,9 @@
-#include "AgentMemTools.h"
+#include "MemJsonTools.h"
 
-#include "../../mem/Address.h"
-#include "../../mem/ValueCodec.h"
-#include "../../third_party/nlohmann/json.hpp"
+#include "Address.h"
+#include "ValueCodec.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -12,7 +13,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace AI {
+namespace Mem {
 
 namespace {
 
@@ -523,9 +524,9 @@ std::string spacedHex(const std::vector<unsigned char>& bytes) {
 
 } // namespace
 
-AgentMemTools::AgentMemTools(Mem::IMemService& service) : service_(service) {}
+MemJsonTools::MemJsonTools(IMemService& service) : service_(service) {}
 
-std::string AgentMemTools::status(
+std::string MemJsonTools::status(
     const std::string& /*argsJson*/,
     const Mem::OperationContext& context) {
     const auto response = service_.status(context);
@@ -576,7 +577,7 @@ std::string AgentMemTools::status(
     return output.dump();
 }
 
-std::string AgentMemTools::driverInitialize(
+std::string MemJsonTools::driverInitialize(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -613,7 +614,7 @@ std::string AgentMemTools::driverInitialize(
     }
 }
 
-std::string AgentMemTools::processList(
+std::string MemJsonTools::processList(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -653,7 +654,7 @@ std::string AgentMemTools::processList(
     }
 }
 
-std::string AgentMemTools::processOpen(
+std::string MemJsonTools::processOpen(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -684,7 +685,7 @@ std::string AgentMemTools::processOpen(
     }
 }
 
-std::string AgentMemTools::moduleList(
+std::string MemJsonTools::moduleList(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -731,7 +732,7 @@ std::string AgentMemTools::moduleList(
     }
 }
 
-std::string AgentMemTools::moduleResolve(
+std::string MemJsonTools::moduleResolve(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -762,7 +763,7 @@ std::string AgentMemTools::moduleResolve(
     }
 }
 
-std::string AgentMemTools::pointerResolve(
+std::string MemJsonTools::pointerResolve(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -822,7 +823,7 @@ std::string AgentMemTools::pointerResolve(
     }
 }
 
-std::string AgentMemTools::disassemble(
+std::string MemJsonTools::disassemble(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -871,7 +872,7 @@ std::string AgentMemTools::disassemble(
     }
 }
 
-std::string AgentMemTools::symbolResolve(
+std::string MemJsonTools::symbolResolve(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -909,7 +910,7 @@ std::string AgentMemTools::symbolResolve(
     }
 }
 
-std::string AgentMemTools::symbolList(
+std::string MemJsonTools::symbolList(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -959,7 +960,7 @@ std::string AgentMemTools::symbolList(
     }
 }
 
-std::string AgentMemTools::breakpointSet(
+std::string MemJsonTools::breakpointSet(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -987,7 +988,7 @@ std::string AgentMemTools::breakpointSet(
     }
 }
 
-std::string AgentMemTools::breakpointRemove(
+std::string MemJsonTools::breakpointRemove(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1011,7 +1012,7 @@ std::string AgentMemTools::breakpointRemove(
     }
 }
 
-std::string AgentMemTools::breakpointSuspend(
+std::string MemJsonTools::breakpointSuspend(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1035,7 +1036,7 @@ std::string AgentMemTools::breakpointSuspend(
     }
 }
 
-std::string AgentMemTools::breakpointResume(
+std::string MemJsonTools::breakpointResume(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1059,7 +1060,7 @@ std::string AgentMemTools::breakpointResume(
     }
 }
 
-std::string AgentMemTools::breakpointHits(
+std::string MemJsonTools::breakpointHits(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1117,7 +1118,7 @@ std::string AgentMemTools::breakpointHits(
     }
 }
 
-std::string AgentMemTools::scanStart(
+std::string MemJsonTools::scanStart(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1214,7 +1215,7 @@ std::string AgentMemTools::scanStart(
     }
 }
 
-std::string AgentMemTools::scanRefine(
+std::string MemJsonTools::scanRefine(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1289,7 +1290,7 @@ std::string AgentMemTools::scanRefine(
     }
 }
 
-std::string AgentMemTools::scanResults(
+std::string MemJsonTools::scanResults(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1337,7 +1338,7 @@ std::string AgentMemTools::scanResults(
     }
 }
 
-std::string AgentMemTools::scanClear(
+std::string MemJsonTools::scanClear(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1371,7 +1372,7 @@ std::string AgentMemTools::scanClear(
     }
 }
 
-std::string AgentMemTools::memoryRead(const std::string& argsJson,
+std::string MemJsonTools::memoryRead(const std::string& argsJson,
                                       const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
@@ -1410,7 +1411,7 @@ std::string AgentMemTools::memoryRead(const std::string& argsJson,
     }
 }
 
-std::string AgentMemTools::memoryReadValue(
+std::string MemJsonTools::memoryReadValue(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1466,7 +1467,7 @@ std::string AgentMemTools::memoryReadValue(
     }
 }
 
-std::string AgentMemTools::memoryWrite(
+std::string MemJsonTools::memoryWrite(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1516,7 +1517,7 @@ std::string AgentMemTools::memoryWrite(
     }
 }
 
-std::string AgentMemTools::memoryWriteValue(
+std::string MemJsonTools::memoryWriteValue(
     const std::string& argsJson,
     const Mem::OperationContext& context) {
     try {
@@ -1573,4 +1574,4 @@ std::string AgentMemTools::memoryWriteValue(
     }
 }
 
-} // namespace AI
+} // namespace Mem

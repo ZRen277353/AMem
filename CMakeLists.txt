@@ -159,7 +159,6 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/ToolCallSecurity.cpp
     gui/ai/AgentRunContext.cpp
     gui/ai/AgentTaskExecutor.cpp
-    gui/ai/AgentMemTools.cpp
     gui/ai/AgentMemToolsSystem.cpp
     gui/ai/ChatWindow.cpp
     gui/ai/ChatWindowSettings.cpp
@@ -261,6 +260,35 @@ set(MEM_SOURCES
     mem/ValueCodec.cpp
 )
 
+if(HAVE_AI_CHAT OR ENABLE_NATIVE_IPC OR BUILD_TESTING)
+    add_library(NativeMemJsonTools STATIC
+        mem/MemJsonTools.cpp
+    )
+    target_include_directories(NativeMemJsonTools PUBLIC
+        ${CMAKE_SOURCE_DIR}
+    )
+    target_include_directories(NativeMemJsonTools PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    if(HAVE_LUAJIT)
+        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_LUAJIT)
+    endif()
+    if(HAVE_CAPSTONE)
+        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_CAPSTONE)
+    endif()
+    if(HAVE_KEYSTONE)
+        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_KEYSTONE)
+    endif()
+    if(MSVC)
+        target_compile_options(NativeMemJsonTools PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeMemJsonTools PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeMemJsonTools PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-mem"
+    )
+endif()
+
 set(RENDERER_SOURCES
     renderer/DX12Renderer.cpp
     renderer/StyleSetup.cpp
@@ -309,7 +337,6 @@ else()
     message(STATUS "Native IPC transport disabled")
 endif()
 
-
 # 配置 DirectX 后端
 if(USE_DX11)
     add_definitions(-DUSE_DX11)
@@ -345,6 +372,10 @@ endif()
 if(ENABLE_NATIVE_IPC)
     target_compile_definitions(ImGuiProject PRIVATE HAVE_NATIVE_IPC)
     target_link_libraries(ImGuiProject NativeIpcTransport)
+endif()
+
+if(HAVE_AI_CHAT)
+    target_link_libraries(ImGuiProject NativeMemJsonTools)
 endif()
 
 # 包含目录
@@ -530,7 +561,6 @@ if(BUILD_TESTING)
         mem/MemService.cpp
         mem/ValueCodec.cpp
         socket/DeviceSession.cpp
-        gui/ai/AgentMemTools.cpp
         gui/ai/AgentRunContext.cpp
         gui/ai/AgentTaskExecutor.cpp
         gui/ai/AgentRunner.cpp
@@ -545,6 +575,7 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/third_party
     )
     target_compile_definitions(NativeAgentMemTests PRIVATE HAVE_AI_CHAT)
+    target_link_libraries(NativeAgentMemTests PRIVATE NativeMemJsonTools)
     if(MSVC)
         target_compile_options(NativeAgentMemTests PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
