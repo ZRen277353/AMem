@@ -163,19 +163,19 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 **证据**
 
 - 端口锁只覆盖单个 request-response。
-- 每条 `SocketCommand` 现会经过可重入 per-port transaction gate；canonical pointer 与 scan 已长期持有相应 transaction，symbol 和 process selection 尚未完成同等级的业务事务/epoch。
+- 每条 `SocketCommand` 现会经过可重入 per-port transaction gate；canonical pointer、scan 与 symbol 已长期持有相应 transaction，process selection 尚未完成同等级的业务事务/revision。
 - canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；旧 GUI/IPC/隐藏 alias 仍可能分步调用，但会推进 epoch 并使 native session 失效。
-- `symbol_list(module_base)` 先 `SymbolInit` 再 `SymbolGetList`。
+- 旧 GUI/IPC 的 symbol 流程仍会分开调用 `SymbolInit` 和 `SymbolGetList`；canonical `symbol_list` 已合并 module resolve + init + page，并用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
 - GUI、内置 Agent、IPC/MCP 共用进程、扫描结果和服务端 active symbol table。
 
 **影响**
 
-另一个前端仍可在 legacy scan、symbol 或 process-selection 两步之间插入请求，导致范围、符号表或当前进程被替换。canonical scan 会检测冲突，但旧调用自身仍没有同等级的 completion/session 契约。
+另一个前端仍可在 legacy scan/symbol 或 process-selection 两步之间插入请求，导致范围、符号表或当前进程被替换。canonical scan/symbol 会检测冲突，但旧调用自身仍没有同等级的 completion/session 契约。
 
 **建议**
 
-- 复用现有 transaction gate，并为进程切换和符号会话建立明确 revision/epoch；继续迁移或删除旧 scan 调用。持 gate 时不得反向获取 process-state mutex。
+- 继续把旧 GUI/IPC scan/symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
 - 最可靠的方式是让服务端提供单命令复合操作或显式 session id。
 - 工具执行前后校验 process/scan/symbol revision；冲突时失败而不是继续使用混合状态。
 
@@ -254,21 +254,11 @@ DPAPI 只保护 `ai_config.json` 中的 provider API key。`ChatSession` 会明�
 - 若为全局设置：会话文件停止保存/加载这两个字段，load 后重新应用 `AiSettings`。
 - 若为每会话设置：UI 显示并编辑当前会话值，索引/迁移文档也要明确。
 
-### A-13：`symbol_*` 分类、共享状态和默认 prompt 漂移
+### A-13：`symbol_*` 分类、共享状态和默认 prompt 漂移（已按当前二元模型解决）
 
-**当前事实**
+当前二元 `ToolSafety` 明确定义为：`Write` 表示需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，保持 ReadOnly；active table 的内部 session mutation 由 MAIN transaction 和 symbol epoch 约束。`symbol_init`、`symbol_find`、`resolve_symbol` 已隐藏，默认 prompt 只列规范名称且不再把 symbol list 写成需要写审批。
 
-- `symbol_init`、`symbol_list` 当前注册为 `ToolSafety::ReadOnly`。
-- `DefaultSystemPrompt.h` 仍把两者列为 write-classified 操作。
-- 两者不修改目标内存，但会初始化/切换服务端共享 active symbol table；`symbol_list` 还可隐式执行 init。
-
-**影响**
-
-模型收到的安全说明与运行时审批行为不一致；同时 `ReadOnly` 容易被误解为“无共享状态副作用”。
-
-**建议**
-
-先定义分类语义。如果 `Write` 只表示“修改目标设备/进程”，保留当前分类但新增 `StatefulRead`/资源域元数据，并修正 prompt；如果所有共享状态变化都应审批，则重新分类。无论选择哪种，工具注册、默认 prompt、架构文档和 MCP retry 策略必须同步。
+剩余改进是引入设计文档中的 richer effect/resource metadata，把 symbol 操作标为 `SessionMutation` 并记录资源域审计。该扩展不能重新引入模型可见的 init 前置步骤，也不能把“可安全自动重试”与 ReadOnly 自动等同。
 
 ### A-14：地址字符串进制语义跨前端不一致
 
@@ -311,16 +301,16 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 当前静态提取结果：
 
-- 内置 Agent：48 个可执行名称，其中 22 个隐藏兼容 alias，向 provider 广告 26 个定义。
+- 内置 Agent：49 个可执行名称，其中 25 个隐藏兼容 alias，向 provider 广告 24 个定义。
 - IPC：29 个方法。
 - MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
-- 内置 Agent 独有 `read_disassembly`、`resolve_symbol` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
+- 内置 Agent 独有 `read_disassembly`、`symbol_resolve` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
 - 无 LuaJIT 时，内置 `execute_lua` 仍存在并返回 unavailable；IPC 不注册该方法，而 MCP 仍对模型暴露工具。
 - 名称别名包括 `get_server_version`/`get_version`、`read_breakpoint_info`/`read_bp_info`。
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-`status`、`process_list`、`process_open`、module/pointer resolution、canonical scan、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan 返回 epoch、分页和明确 completion，module/pointer resolve 拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`process_list`、`process_open`、module/pointer/symbol resolution、canonical scan、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页，scan 另返回明确 completion；module/pointer/symbol 的 module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 
@@ -387,7 +377,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - provider 声明 `maxContextTokens`：OpenAI 128k、Claude 200k、DeepSeek 64k。
 - 除声明外没有代码读取 `getCapabilities()`。
 - `AiSettings` 允许 `tokenLimit` 到 1,000,000；`AiSettings.h` 注释仍写 200,000。
-- `ChatSession::estimateTokenCount()` 仅用消息 UTF-8 字节数/4，未计当前 26 个广告工具 schema、provider JSON 开销或输出 token 预留。
+- `ChatSession::estimateTokenCount()` 仅用消息 UTF-8 字节数/4，未计当前 24 个广告工具 schema、provider JSON 开销或输出 token 预留。
 
 **影响**
 
@@ -402,7 +392,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 17 个测试组，覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan session/epoch/分页/取消/完成未知、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 18 个测试组，覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session/epoch/分页、scan 取消/完成未知、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
@@ -420,6 +410,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 | 项目 | 当前实现 |
 |------|----------|
+| Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
 | pointer chain 的 module/read 可被其他前端插入 | 可重入 per-port transaction gate 覆盖所有普通命令；`pointer_resolve` 和旧 GUI/Lua/IPC helper 在 module list 到最后一次 read 期间持续持有 |
 | module 列表/解析直连 socket 且子串取首项 | `MemService::listModules/resolveModule` 统一分页、target 校验和完整名/basename/唯一子串匹配；歧义与异常范围会失败 |

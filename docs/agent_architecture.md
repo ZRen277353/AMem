@@ -258,7 +258,7 @@ Idle
 5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
 6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
 
-当前注册表有 **48 个可执行名称**。其中 22 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 26 个定义。当前目录如下（H=hidden）：
+当前注册表有 **49 个可执行名称**。其中 25 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 24 个定义。当前目录如下（H=hidden）：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
@@ -268,10 +268,10 @@ Idle
 | 扫描 | `scan_start` W, `scan_refine` W, `scan_results` R, `scan_clear` W, `scan_set_range` H, `scan_value` H, `scan_next` H, `scan_fuzzy` H, `scan_hex` H, `get_scan_count` H, `get_scan_results` H, `clear_scan` H |
 | 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `pointer_resolve` R, `resolve_offset_chain` H |
 | 断点 | `set_breakpoint` W, `remove_breakpoint` W, `read_breakpoint_info` R, `suspend_breakpoint` W, `resume_breakpoint` W |
-| 符号 | `resolve_symbol` R, `symbol_init` R, `symbol_list` R, `symbol_find` R |
+| 符号 | `symbol_resolve` R, `symbol_list` R, `resolve_symbol` H, `symbol_init` H, `symbol_find` H |
 | 脚本 | `execute_lua` W |
 
-`symbol_init` 和 `symbol_list` 当前按“不会修改目标内存”分类为 ReadOnly，但会改变服务端 active symbol table。默认 prompt 仍把它们称为 write-classified，这是待统一的安全语义。
+当前二元安全模型把 `Write` 定义为需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称需要写审批。未来扩展 effect 元数据时应把它们标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
 
 ### 7.2 审批边界
 
@@ -286,10 +286,10 @@ Idle
 当前审批仍不包含：
 
 - 进程名和持久化 effect 审计
-- 当前 symbol epoch 和独立持久 effect 审计
+- 独立持久 effect 审计
 - endpoint/provider 数据去向
 
-十四个已迁移工具（`status`、`process_list`、`process_open`、`module_list`、`module_resolve`、`pointer_resolve`、四个 canonical scan 工具、raw/typed memory read/write）在 service 边界消费 `OperationContext`。模块解析拒绝歧义；pointer resolution 在同一只读事务中完成模块查询和全部解引用。`scan_start` 把 range+scan 合为事务，后续 refine/results/clear 绑定最新 `scan_epoch`；所有旧 scan 命令也推进全局 epoch，使跨前端替换可检测。`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
+十六个已迁移工具（`status`、`process_list`、`process_open`、`module_list`、`module_resolve`、`pointer_resolve`、四个 canonical scan 工具、两个 canonical symbol 工具、raw/typed memory read/write）在 service 边界消费 `OperationContext`。pointer resolution 在同一只读事务中完成模块查询和全部解引用。scan 后续操作绑定最新 `scan_epoch`；symbol list 的续页绑定最新 `symbol_epoch`，模块匹配、init 与 list/find 不可被其他 MAIN caller 插入。`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -313,13 +313,15 @@ Idle
 
 canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 GUI/IPC 旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。
 
+canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolve`/`symbol_list` 在一个事务内完成 module 唯一匹配、`SymbolInit` 与 find/page；每个 init 在已持有 transaction gate 后推进单调 epoch。续页必须带上一页 epoch，GUI/IPC/隐藏 alias 的 init 会使其失效。完整 target snapshot 仍在释放 transaction 后复核，以保持 connection -> process -> domain -> port 锁顺序。
+
 当前复合序列包括：
 
 - 旧 GUI/IPC/隐藏 alias 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
-- `SymbolInit` -> `SymbolGetList`
+- 旧 GUI/IPC 的 `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的清理/open/set PID/cache 流程
 
-canonical pointer/scan 已迁移；旧 GUI/IPC scan 流程和 symbol/process 序列仍可被其他 caller 插入。旧 scan mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
+canonical pointer/scan/symbol 已迁移；旧 GUI/IPC 自身的 scan/symbol 分步流程和 process selection 仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
 
 ### 8.3 地址语义
 
@@ -411,11 +413,11 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent | 26 个广告定义 / 48 个可执行名称 | 22 个旧名称仅作隐藏兼容 |
+| 内置 Agent | 24 个广告定义 / 49 个可执行名称 | 25 个旧名称仅作隐藏兼容 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
-内置 Agent 另有 `read_disassembly`、`resolve_symbol` 等。无 LuaJIT 时三层对 `execute_lua` 的可见性也不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
+内置 Agent 另有 `read_disassembly`、`symbol_resolve` 等。无 LuaJIT 时三层对 `execute_lua` 的可见性也不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
 ### 10.3 当前 IPC 安全边界
 
@@ -484,7 +486,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 17 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan session/epoch/分页/取消/完成未知、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 18 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan 与 symbol session/epoch/分页、scan 取消/完成未知、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

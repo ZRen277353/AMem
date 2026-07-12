@@ -40,7 +40,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the current no-device C++ test. Its 17 groups cover address and scalar codecs, native `MemService` adapters, module/pointer resolution, native scan sessions and epochs, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the current no-device C++ test. Its 18 groups cover address and scalar codecs, native `MemService` adapters, module/pointer resolution, native scan and symbol sessions/epochs, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ### MCP Server
 
@@ -149,6 +149,8 @@ If a new operation depends on multiple commands sharing global server state, use
 
 Every scan mutation advances `WinSocketClientMgr`'s monotonic scan epoch, including legacy GUI/IPC commands. Canonical `scan_start` holds one transaction across range selection and scan execution; `scan_refine`, `scan_results`, and `scan_clear` require the latest returned epoch. An epoch mismatch is a session conflict, not a retryable transport error.
 
+Every symbol-table initialization advances a monotonic symbol epoch while holding the port transaction gate. Canonical `symbol_resolve` and `symbol_list` resolve the module, initialize its symbol table, and find/fetch inside one MAIN transaction. Symbol continuation pages require the previous result's epoch; legacy GUI/IPC initialization invalidates it.
+
 Validate every untrusted count, string length, and byte size before allocating or receiving variable-length data.
 
 `DeviceSession` gives commands a shared request lease and connect/disconnect/reconnect an exclusive lifecycle lease. `WSAETIMEDOUT`, EOF, and partial I/O poison the connection, advance its generation, close the failed client, and reject reuse until explicit reconnect. The old pending-data drain recovery path has been removed. Do not add direct `Connect()`/`Close()` calls or bypass the lifecycle gate; process handles and target snapshots remain generation-bound.
@@ -176,15 +178,15 @@ ChatWindow
 - `AgentRunner` owns the model -> tool -> model state machine, budgets, and approval gating. It must remain free of ImGui calls.
 - `AgentTaskExecutor` owns a bounded serial queue and one joinable worker. It fixes the absolute deadline at enqueue, propagates cancellation, calls `ToolExecutor` synchronously, and joins during shutdown.
 - `ToolExecutor` owns the thread-safe registry, schema validation, safety metadata, synchronous executor call, and result normalization.
-- `ToolDefinitions.cpp` currently has 48 executable names. Twenty-two legacy aliases are hidden from providers, leaving 26 advertised definitions.
-- The native slice (`mem/`, `AgentMemTools`) owns status/process/open, module/pointer resolution, scan sessions, raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
+- `ToolDefinitions.cpp` currently has 49 executable names. Twenty-five legacy aliases are hidden from providers, leaving 24 advertised definitions.
+- The native slice (`mem/`, `AgentMemTools`) owns status/process/open, module/pointer/symbol resolution, scan and symbol sessions, raw and typed memory validation, scalar encoding, and structured results. Do not bypass it when extending those operations.
 - `ChatSession::getMessagesForRequest()` is the required provider boundary; it cleans and pairs tool calls/results.
 
 ### Tool Safety
 
 Every in-app tool is `ToolSafety::ReadOnly` or `ToolSafety::Write`. Write tools require confirmation unless `autoApproveWrites` is enabled.
 
-Current code classifies `symbol_init` and `symbol_list` as ReadOnly because they do not modify target memory, but they do mutate the server's active symbol-table state. `DefaultSystemPrompt.h` still describes them as write-classified. When changing this area, define whether safety means target mutation or any shared-state mutation, then update registration, prompt, docs, and retry policy together.
+Under the current binary safety model, `ToolSafety::Write` means target/host mutation requiring approval. Canonical `symbol_resolve` and `symbol_list` remain ReadOnly: their internal active-table mutation is serialized, epoch-bound, and does not modify target memory. `symbol_init`, `symbol_find`, and `resolve_symbol` are hidden compatibility names, and `DefaultSystemPrompt.h` lists only the canonical tools. A future richer effect model should represent this as session mutation without restoring model-visible initialization steps.
 
 Unknown tools cannot execute and are rejected by `ToolExecutor`.
 
@@ -206,7 +208,7 @@ Do not add new detached threads. Extend the owned task model and keep completion
 
 `AgentRunContext` captures the connection generation and `{pid, handle, processRevision}`. The approval dialog shows expected generation, PID, and revision; approval, dequeue, and result collection revalidate them. `process_open` uses `Selection` policy and explicitly advances the run context only when its returned snapshot is still current.
 
-This closes the boundary only for operations migrated to `MemService`, including module/pointer resolution, canonical scan sessions, and raw/typed memory read/write. `pointer_resolve` holds one read transaction across module lookup and every dereference. Canonical scan tools bind `{target, scanEpoch}` and report confirmed completion after cancellation/deadline; an unconfirmed sent scan is `completion_unknown`. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late write receipts still need independent audit visibility.
+This closes the boundary only for operations migrated to `MemService`, including module/pointer/symbol resolution, canonical scan and symbol sessions, and raw/typed memory read/write. `pointer_resolve` holds one read transaction across module lookup and every dereference. Canonical scan tools bind `{target, scanEpoch}` and report confirmed completion after cancellation/deadline; an unconfirmed sent scan is `completion_unknown`. Canonical symbol tools bind module lookup, initialization, and list/find to one transaction and return a module-bound epoch. New and legacy process-bound operations must consume the explicit `OperationContext` again at the actual service/socket send boundary. The approval dialog still lacks the process name, and Stop-time late write receipts still need independent audit visibility.
 
 ### Limits
 
@@ -272,7 +274,7 @@ External assistant -> FastMCP tool -> IpcClient -> GUI IPC -> socket command
 
 Keep `mcp/amem_mcp/constants.py` synchronized with C++ scan flags, value types, and memory region enums.
 
-The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 26 advertised definitions and 48 executable names (22 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; in-app `read_disassembly`/`resolve_symbol` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
+The exposed surfaces are intentionally overlapping, not identical: the in-app registry has 24 advertised definitions and 49 executable names (25 hidden aliases), IPC has 29 methods, and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; canonical in-app `read_disassembly`/`symbol_resolve` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
 
 Address parsing currently differs:
 
