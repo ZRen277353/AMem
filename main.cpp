@@ -7,9 +7,6 @@
 #include "renderer/DX12Renderer.h"
 #include "renderer/StyleSetup.h"
 #include "ExceptionHandler.h"
-#ifdef HAVE_LEGACY_HTTP_IPC
-#include "ipc/IpcServer.h"
-#endif
 #ifdef HAVE_AI_CHAT
 #include "ai/AgentTaskExecutor.h"
 #include "ai/HttpClient.h"
@@ -96,11 +93,6 @@ int main(int, char**)
 
     StyleSetup::loadFonts(io);
 
-#ifdef HAVE_LEGACY_HTTP_IPC
-    // Temporary migration-only endpoint. Default builds exclude this path.
-    IpcServer::GetInstance().Start(28100);
-#endif
-
     bool done = false;
     while (!done)
     {
@@ -128,10 +120,6 @@ int main(int, char**)
     }
 
     g_renderer.waitForPendingOperations();
-
-#ifdef HAVE_LEGACY_HTTP_IPC
-    IpcServer::GetInstance().Stop();
-#endif
 
 #ifdef HAVE_NATIVE_IPC
     // Stop the opt-in pipe and its approved work before device teardown.

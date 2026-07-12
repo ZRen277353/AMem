@@ -33,9 +33,6 @@ option(USE_DX12 "Use DirectX 12 backend" ON)
 # AI 聊天集成选项（Requirement 13.4）
 option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
 
-# 旧 loopback HTTP IPC 仅用于迁移验证。默认构建不编译也不监听 28100。
-option(ENABLE_LEGACY_HTTP_IPC "Enable legacy unauthenticated HTTP IPC" OFF)
-
 # 原生 Named Pipe transport 默认只编译测试。产品入口保持关闭，直到 owned
 # runtime composition、GUI status/control 和 privileged approval broker 完成。
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
@@ -295,15 +292,6 @@ set(RENDERER_SOURCES
     renderer/StyleSetup.cpp
 )
 
-set(IPC_SOURCES)
-if(ENABLE_LEGACY_HTTP_IPC)
-    list(APPEND IPC_SOURCES ipc/IpcServer.cpp)
-    message(WARNING
-        "Legacy HTTP IPC enabled: unauthenticated loopback port 28100 will be exposed")
-else()
-    message(STATUS "Legacy HTTP IPC disabled")
-endif()
-
 if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
         ipc/IpcApprovalAudit.cpp
@@ -393,13 +381,8 @@ add_executable(ImGuiProject
     ${MEM_SOURCES}
     ${SOCKET_SOURCES}
     ${RENDERER_SOURCES}
-    ${IPC_SOURCES}
     ${LUA_SOURCES}
 )
-
-if(ENABLE_LEGACY_HTTP_IPC)
-    target_compile_definitions(ImGuiProject PRIVATE HAVE_LEGACY_HTTP_IPC)
-endif()
 
 if(ENABLE_NATIVE_IPC)
     target_compile_definitions(ImGuiProject PRIVATE HAVE_NATIVE_IPC)
@@ -723,10 +706,10 @@ if(BUILD_TESTING)
             -P ${CMAKE_SOURCE_DIR}/tests/VerifyNoPythonMcp.cmake
     )
     add_test(
-        NAME native_agent_legacy_ipc_gate
+        NAME native_agent_no_legacy_http_ipc
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
-            -P ${CMAKE_SOURCE_DIR}/tests/VerifyLegacyHttpIpcGate.cmake
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyNoLegacyHttpIpc.cmake
     )
     add_test(
         NAME native_agent_native_ipc_gate
