@@ -6,11 +6,11 @@
 基线提交：`0bf354f`
 最后更新：2026-07-13
 
-本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；Named Pipe 的 framing、有界 I/O、Observe-only Hello、严格 request session、安全 transport、owned runtime、显式 GUI control、broker management、server session binding 和 non-executing request submission 已落地。编译和运行均默认关闭；批准仍返回 `approval_execution_disabled`，尚无 consume/send-boundary 或 persistent audit。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；Named Pipe framing/session/transport、owned runtime、显式 GUI control、broker management、server session binding、non-executing submission 和 bounded persistent approval audit 已落地。编译和运行默认关闭；批准仍返回 `approval_execution_disabled`，尚无 fail-closed consume/send-boundary executor。
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成三十二个纵向切片：
+截至 2026-07-13 已完成三十三个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -50,9 +50,10 @@
 - system owner 延迟持有 broker；GUI refresh/decision 只消费 bounded record，Stop/shutdown cancel-all。静态 gate 禁止窗口引用 params/results 并固定 Hello Observe-only；当前无 product submission/consume。
 - 每次成功 Hello 分配 server-owned 单调 session id，stop/start 不复用 id；runtime 持有同一个 system broker 的非 owning 引用，每个 established session 的关闭、target/session invalidation、异常和 Stop 退出都精确 `cancelSession()`。snapshot 与 GUI 只显示当前/最近 id，不保存请求内容；runtime owner 本身不直接 submit。
 - privileged request 由 owned worker 提交 bounded broker metadata，reader 保持可处理 Cancel；client Cancel 精确取消 request。批准仍被取消并返回 `approval_execution_disabled`，不调用 `consume()`、参数 adapter、service 或 socket。终止 Error 后做 100 ms 可取消 drain。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 8 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、6 组 MemService-dispatcher 和 10 组 runtime 测试，共 15 项 CTest。
+- `IpcApprovalAuditLog` 持久化不含 params/results 的 broker transition：16 KiB/record、4 MiB active + `.1`、最近 100 条、bounded tail reload、损坏/超大行跳过和写盘失败状态；GUI 显示最近 20 条与 health。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 4 组 approval-audit、8 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、6 dispatcher 和 10 runtime 测试，共 16 项 CTest。
 
-尚未完成：HTTP IPC transport 的最终删除；Native IPC dispatcher consume/send-boundary、persistent-audit 接入与 GUI click smoke；不同用户/remote 负向集成测试；以及连接层 fake transport 的迟到字节测试。规范模型目录、共享 JSON adapter、24-name catalog、12 Observe adapter、session invalidation、owned runtime、server session/request cancellation、non-executing submission、显式 GUI control、broker management、Python MCP 删除、HTTP IPC 默认关闭、native framing/session/transport、当前内置工具 target/send 边界和 mutation audit 已完成。A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍部分修复。
+尚未完成：HTTP IPC 最终删除；Native IPC fail-closed consume/send-boundary executor 与 GUI click smoke；不同用户/remote 负向测试；连接层 fake transport 迟到字节测试。规范目录、共享 adapter、catalog、Observe dispatch、owned runtime、session/request cancellation、non-executing submission、persistent approval audit、Python MCP 删除、HTTP IPC 默认关闭和 native framing/session/transport 已完成。A-01、A-06、A-19、A-20 仍部分修复。
 
 ## 1. 结论
 
@@ -496,7 +497,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] system owner/GUI 接入 bounded pending snapshot、approve/deny、refresh invalidation 与 Stop/shutdown cancel-all；gate 保证 UI 无 params/results 且 Hello 仍 Observe-only。
 - [x] runtime 为成功 Hello 分配跨 restart 单调 session id，并在 session close/invalidation/Stop 时精确取消绑定审批；gate 禁止 runtime 提交审批。
 - [x] owned request worker 提交 bounded approval metadata，reader 保持 Cancel；批准仍显式不执行，gate 禁止 consume。
-- 有 privileged 外部调用需求时继续接入 dispatcher consume/send boundary 与持久化审计；完成前不 grant privileged capability。
+- [x] system broker 注入 bounded persistent approval JSONL sink，GUI 显示 recent/health，sink 返回 durability status。
+- 有 privileged 外部调用需求时继续接入 fail-closed consume 与 dispatcher send boundary；完成前不 grant privileged capability。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
@@ -660,4 +662,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第三十二批接入 non-executing privileged request submission。`IpcRequestSession` 仅在 server dispatcher 明确支持时让缺失 capability 的 method 进入 owned worker；worker 以 server session/request id、client identity、method、baseline 和 absolute deadline 提交 broker，raw params 只留在 active task。reader 等待期间继续处理 Cancel，broker 新增 exact `cancelRequest()`/`find()`；deny/expire/invalidate/cancel 返回明确 completion，approve 被转为 cancelled 并返回 `approval_execution_disabled`。静态 gate 要求 submission 并禁止 `consume()`，Hello 仍只 grant Observe。压力测试同时发现并修复两处 native I/O 竞态：partial header 跨 validation timeout 不再丢失；session-level 终止 Error 后有 100 ms 可取消 drain，避免立即 disconnect 截断 payload。测试增至 8 broker、8 framed-I/O、6 dispatcher、10 runtime 组；Debug/Release 15/15，runtime/framed 各 100/100，fresh opt-in GUI control 编译通过。
 
-三十二个切片已落地。下一批应先建立持久化 approval audit，再让 dispatcher 在批准后一次性 `consume()`，并在真实 executor/send 边界复核 session/request/generation/target/deadline。整条链完成前 `TargetSelection`、`TargetMutation` 与 `HostExecution` 仍不得执行或在 Hello 中 grant。legacy HTTP IPC 仍待最终删除。
+第三十三批加入独立 `IpcApprovalAuditLog`。system owner 依次持有 audit -> broker -> runtime，broker 所有 transition 在锁外同步写 `native_ipc_approval_audit.jsonl`。记录只含 transition timestamp、client/method/capability/state、session/request、generation/target 和 deadline remaining；单条 16 KiB，active 4 MiB + 一个 `.1`，内存最近 100 条。loader 只扫描每个文件尾部的有界数据并跳过损坏、错误类型和超大行；外部超大 active 在下次 append 时替换。GUI 显示路径、最近 20 条、成功/失败数和 last error。sink 返回 durability status，为下一切片 fail-closed consume 提供接口；当前 decision 不因 audit failure 回滚。新增 4 组 audit 测试，Debug/Release 16/16，audit 50/50、broker 100/100，fresh `ENABLE_NATIVE_IPC=ON` + `ENABLE_AI_CHAT=OFF` GUI 编译通过。
+
+三十三个切片已落地。下一批应让 broker `consume()` 在 persistent audit 失败时烧毁授权且不返回 grant，再让 dispatcher 在批准后消费一次性 grant，并在真实 executor/send 边界复核 session/request/generation/target/deadline。整条链完成前 privileged capability 仍不得执行或在 Hello 中 grant。legacy HTTP IPC 仍待最终删除。
