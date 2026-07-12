@@ -307,6 +307,7 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
         ipc/IpcFramedConnection.cpp
         ipc/IpcHandshakeSession.cpp
+        ipc/IpcMethodCatalog.cpp
         ipc/IpcProtocol.cpp
         ipc/IpcRequestProtocol.cpp
         ipc/IpcRequestSession.cpp
@@ -449,6 +450,22 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcMethodCatalogTests
+        tests/IpcMethodCatalogTests.cpp
+    )
+    target_link_libraries(NativeIpcMethodCatalogTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcMethodCatalogTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcMethodCatalogTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcMethodCatalogTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_method_catalog COMMAND NativeIpcMethodCatalogTests)
+
     add_executable(NativeIpcRequestSessionTests
         tests/IpcRequestSessionTests.cpp
     )

@@ -6,6 +6,8 @@ endif()
 
 set(tool_definitions "${SOURCE_ROOT}/gui/ai/ToolDefinitions.cpp")
 file(READ "${tool_definitions}" source)
+set(ipc_catalog "${SOURCE_ROOT}/ipc/IpcMethodCatalog.cpp")
+file(READ "${ipc_catalog}" ipc_source)
 
 string(REGEX MATCHALL
     "registerTool\\([ \t\r\n]*\"[^\"]+\""
@@ -56,6 +58,25 @@ if(NOT actual_names STREQUAL expected_names)
         "Agent catalog mismatch.\nExpected: ${expected_names}\nActual: ${actual_names}")
 endif()
 
+string(REGEX MATCHALL
+    "\\{\"[a-z_]+\", IpcCapability::"
+    ipc_registrations
+    "${ipc_source}")
+set(ipc_names "")
+foreach(registration IN LISTS ipc_registrations)
+    string(REGEX REPLACE
+        ".*\\{\"([a-z_]+)\".*"
+        "\\1"
+        name
+        "${registration}")
+    list(APPEND ipc_names "${name}")
+endforeach()
+list(SORT ipc_names)
+if(NOT ipc_names STREQUAL expected_names)
+    message(FATAL_ERROR
+        "Native IPC catalog mismatch.\nExpected: ${expected_names}\nActual: ${ipc_names}")
+endif()
+
 foreach(forbidden IN ITEMS "client_singleton.h" "AppContext.h")
     string(FIND "${source}" "${forbidden}" position)
     if(NOT position EQUAL -1)
@@ -65,4 +86,4 @@ foreach(forbidden IN ITEMS "client_singleton.h" "AppContext.h")
 endforeach()
 
 list(LENGTH actual_names tool_count)
-message(STATUS "Verified ${tool_count} canonical Agent tools")
+message(STATUS "Verified ${tool_count} canonical Agent and native IPC methods")
