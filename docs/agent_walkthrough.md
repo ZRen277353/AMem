@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 43 个可执行名称，其中 13 个为隐藏兼容 alias，provider 实际收到 30 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 44 个可执行名称，其中 14 个为隐藏兼容 alias，provider 实际收到 30 个定义。
 
 ### 1.2 加载 provider 配置
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-九个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+十个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-module list/resolve 和 raw/typed memory read/write 都已在 service 边界消费 context。`module_resolve` 只接受确定的完整名、basename 或唯一子串；旧 module 名称仅作为 hidden aliases。`resolve_offset_chain` 仍是多命令 legacy 路径，必须和事务边界一起迁移。scan、breakpoint、symbol 和 Lua 也仍只有 Controller 出队和结果回收保护。
+module/pointer resolution 和 raw/typed memory read/write 都已在 service 边界消费 context。`module_resolve` 只接受确定的完整名、basename 或唯一子串；`pointer_resolve` 还会在一个 read transaction 中完成 module list 和全部 pointer read。旧 `resolve_offset_chain` 仅作为 hidden alias，保留原字段、整数 offset 和空链行为。scan、breakpoint、symbol 和 Lua 仍只有 Controller 出队和结果回收保护。
 
 ### 5.3 受管工具队列
 
@@ -273,15 +273,18 @@ executor 调 `client_singleton.h` 中的命令。现代命令应使用 `SocketCo
 
 ```text
 acquire shared DeviceSession request lease
+  -> acquire recursive per-port transaction gate
   -> EnsureOpenHandle (when required)
-  -> acquire per-port mutex
+  -> acquire request-response port mutex
   -> verify lease generation is current
   -> send/receive one command
 ```
 
 connect/disconnect/reconnect 持有 exclusive lifecycle lease；I/O 错误、EOF 或 partial failure 会 poison session、推进 generation 并拒绝新请求，已删除用待处理字节尝试恢复协议同步的旧路径。
 
-锁只覆盖单命令。以下序列不是事务：
+普通命令只短暂持有 transaction gate。`pointer_resolve`/旧 `ResolveModuleOffsetChain()` 会把同一个 gate 保持到模块查询和全部 pointer read 结束，因此其他 caller 不能插入；规范 service 在 gate 外做完整 target snapshot 校验，在 gate 内只做稳定 revision 和无 target-lock 的 generation/cancel 检查。
+
+以下序列仍不是事务：
 
 - `ScanSetRange` -> scan command
 - `SymbolInit` -> `SymbolGetList`
@@ -440,9 +443,9 @@ MCP client
 |------|------------|---------|
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
-| 地址字符串 `"1234"` | 规范 raw/typed memory 工具拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
+| 地址字符串 `"1234"` | 规范 raw/typed memory 地址和 pointer offsets 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 30 个广告定义 / 43 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | 30 个广告定义 / 44 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
@@ -531,7 +534,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 15 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 16 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

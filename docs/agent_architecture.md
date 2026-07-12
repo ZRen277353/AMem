@@ -258,7 +258,7 @@ Idle
 5. 解析返回 JSON，识别顶层 `error`、`success=false` 和 completion 状态。
 6. completion callback 把 `ToolResult` 投递到 `UIMessageQueue`。
 
-当前注册表有 **43 个可执行名称**。其中 13 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 30 个定义。当前目录如下（H=hidden）：
+当前注册表有 **44 个可执行名称**。其中 14 个旧名称是隐藏兼容 alias，不发送给 provider；模型实际收到 30 个定义。当前目录如下（H=hidden）：
 
 | 域 | 工具（R=当前 `ReadOnly`，W=当前 `Write`） |
 |----|--------------------------------------------|
@@ -266,7 +266,7 @@ Idle
 | 内存读 | `memory_read` R, `read_memory` H, `memory_read_value` R, `read_value` H, `read_disassembly` R |
 | 内存写 | `memory_write` W, `write_bytes` H, `memory_write_value` W, `write_value` H |
 | 扫描 | `scan_set_range` W, `scan_value` W, `scan_next` W, `scan_fuzzy` W, `scan_hex` W, `get_scan_count` R, `get_scan_results` R, `clear_scan` W |
-| 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `resolve_offset_chain` R |
+| 进程/模块 | `process_list` R, `get_process_list` H, `list_processes` H, `process_open` W, `open_process` H, `module_list` R, `get_module_list` H, `list_modules` H, `module_resolve` R, `get_module_base` H, `pointer_resolve` R, `resolve_offset_chain` H |
 | 断点 | `set_breakpoint` W, `remove_breakpoint` W, `read_breakpoint_info` R, `suspend_breakpoint` W, `resume_breakpoint` W |
 | 符号 | `resolve_symbol` R, `symbol_init` R, `symbol_list` R, `symbol_find` R |
 | 脚本 | `execute_lua` W |
@@ -289,7 +289,7 @@ Idle
 - 当前 scan/symbol epoch
 - endpoint/provider 数据去向
 
-九个已迁移工具（`status`、`process_list`、`process_open`、`module_list`、`module_resolve`、raw/typed memory read/write）在 service 边界消费 `OperationContext`。模块解析按完整名、basename、唯一子串依次匹配并拒绝歧义；`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
+十个已迁移工具（`status`、`process_list`、`process_open`、`module_list`、`module_resolve`、`pointer_resolve`、raw/typed memory read/write）在 service 边界消费 `OperationContext`。模块解析按完整名、basename、唯一子串依次匹配并拒绝歧义；pointer resolution 在同一只读事务中完成模块查询和全部解引用，并在释放事务后复核完整 target；`ValueCodec` 统一 scalar 类型别名、范围、little-endian 和有限浮点写入。其余旧 executor 已有 Controller 出队/结果保护，但 actual send 仍读取共享状态；迁移完成前不能把 target mutation 视为完整原子边界。
 
 ## 8. 共享状态与事务边界
 
@@ -307,7 +307,9 @@ Idle
 
 ### 8.2 端口锁只保证单命令
 
-`SocketCommand::execute*` 和端口 mutex 保证一个 request-response 不被并发响应串包。它们不保证多个命令组成的业务操作原子。
+`SocketCommand::execute*` 的端口 mutex 保证一个 request-response 不被并发响应串包。每条命令还会短暂持有可重入的 per-port transaction gate；复合操作只有显式把 `SocketCommand::TransactionLease` 保持到最后一步，才会阻止其他前端在命令之间插入。
+
+`pointer_resolve` 已使用该高层 gate：system backend 在稳定 generation/PID/handle/revision 上获得事务，`MemService` 在事务内完成 module list、唯一匹配和每次 8-byte pointer read，释放后再做完整 target 校验。旧 GUI/Lua/IPC 使用的 `ResolveModuleOffsetChain()` 也持有同一 gate，但仍保留旧的首个子串匹配和结果契约。
 
 当前复合序列包括：
 
@@ -315,11 +317,11 @@ Idle
 - `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的清理/open/set PID/cache 流程
 
-GUI、内置 Agent、IPC/MCP 可在两步之间插入。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。
+除已迁移的 pointer chain 外，GUI、内置 Agent、IPC/MCP 仍可在上述序列的两步之间插入。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
 
 ### 8.3 地址语义
 
-规范 raw/typed memory read/write 均拒绝无 `0x` 前缀的地址；隐藏兼容 alias 和尚未迁移的内置工具仍保留旧十六进制解析，IPC/MCP 对无前缀字符串仍按十进制解析。跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
+规范 raw/typed memory read/write 地址和 `pointer_resolve` 的 base/chain offsets 均拒绝无 `0x` 前缀的字符串；隐藏兼容 alias 和尚未迁移的内置工具仍保留旧十六进制解析，IPC/MCP 对无前缀字符串仍按十进制解析。跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
@@ -407,7 +409,7 @@ GUI 必须已运行并连接设备。Python server 不直接连接 Android。
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
-| 内置 Agent | 30 个广告定义 / 43 个可执行名称 | 13 个旧名称仅作隐藏兼容 |
+| 内置 Agent | 30 个广告定义 / 44 个可执行名称 | 14 个旧名称仅作隐藏兼容 |
 | IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
 | MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
 
@@ -480,7 +482,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 15 个测试组覆盖地址/scalar codec、进程与模块分页/解析、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 16 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和隐藏 alias。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 工具配对与裁剪

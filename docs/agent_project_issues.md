@@ -69,16 +69,16 @@
 - `AgentRunContext` 在 `resetForNewRun()` 时保存 connection generation 和 target snapshot，并绑定当前 cancellation token。
 - `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
 - 审批框显示预期 connection generation、PID 和 process revision。
-- `status`、`process_list`、`process_open`、module list/resolve、raw/typed memory read/write 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
+- `status`、`process_list`、`process_open`、module/pointer resolution、raw/typed memory read/write 的 adapter 消费显式 `OperationContext`；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
 - 无设备测试覆盖审批期间切进程/重连、批准后 send 前切进程、同批 `process_open -> memory_read` 和晚到成功结果拒绝。
 
 **影响**
 
-已迁移工具、module lookup 和 raw/typed memory write 已阻断该路径。但 pointer chain、scan、breakpoint、symbol 和 Lua 等旧 executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+已迁移工具、module/pointer lookup 和 raw/typed memory write 已阻断该路径。`pointer_resolve` 在事务开始前按 generation/PID/handle/stable revision 绑定目标，并在释放事务后复核完整 snapshot。但 scan、breakpoint、symbol 和 Lua 等旧 executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
-- 先给 pointer chain 建立跨模块列表和多次内存读取的事务边界，再迁移 breakpoint、scan 和 Lua，使实际 service/socket send 使用传入的 `OperationContext`。
+- 下一步优先把 scan start/refine/results 迁入显式 scan session/epoch 和事务边界，再迁移 breakpoint、symbol 和 Lua，使实际 service/socket send 使用传入的 `OperationContext`。
 - 将 process name 加入审批显示，并把 effect、资源域和规范化参数写入持久审计。
 - 所有 target selection/mutation 的 fake backend 测试必须覆盖“校验后、send 前切换”以及 completion unknown。
 
@@ -163,6 +163,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 **证据**
 
 - 端口锁只覆盖单个 request-response。
+- 每条 `SocketCommand` 现会经过可重入 per-port transaction gate，pointer chain 会跨 module list 和全部 read 长期持有；scan、symbol 和 process selection 尚未完成同等级的业务事务/epoch。
 - `scan_value`/部分 fuzzy、hex 流程由 `ScanSetRange` 再调用扫描命令组成。
 - `symbol_list(module_base)` 先 `SymbolInit` 再 `SymbolGetList`。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
@@ -174,7 +175,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 **建议**
 
-- 为进程切换、扫描会话和符号会话建立更高层事务锁/epoch。
+- 复用现有 transaction gate，并为进程切换、扫描会话和符号会话建立明确 revision/epoch；持 gate 时不得反向获取 process-state mutex。
 - 最可靠的方式是让服务端提供单命令复合操作或显式 session id。
 - 工具执行前后校验 process/scan/symbol revision；冲突时失败而不是继续使用混合状态。
 
@@ -310,7 +311,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 当前静态提取结果：
 
-- 内置 Agent：43 个可执行名称，其中 13 个隐藏兼容 alias，向 provider 广告 30 个定义。
+- 内置 Agent：44 个可执行名称，其中 14 个隐藏兼容 alias，向 provider 广告 30 个定义。
 - IPC：29 个方法。
 - MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
 - 内置 Agent 独有 `read_disassembly`、`resolve_symbol` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
@@ -319,7 +320,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
 
-`status`、`process_list`、`process_open`、module list/resolve、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。module resolve 拒绝歧义匹配，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`process_list`、`process_open`、module/pointer resolution、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。module/pointer resolve 拒绝歧义匹配，pointer 返回规范地址和 dereference 计数，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。但其余工具、IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
 
@@ -401,7 +402,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 15 个测试组，覆盖地址/scalar codec、进程与模块分页/解析、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 16 个测试组，覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
@@ -419,6 +420,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 | 项目 | 当前实现 |
 |------|----------|
+| pointer chain 的 module/read 可被其他前端插入 | 可重入 per-port transaction gate 覆盖所有普通命令；`pointer_resolve` 和旧 GUI/Lua/IPC helper 在 module list 到最后一次 read 期间持续持有 |
 | module 列表/解析直连 socket 且子串取首项 | `MemService::listModules/resolveModule` 统一分页、target 校验和完整名/basename/唯一子串匹配；歧义与异常范围会失败 |
 | typed read/write 重复解析和直连 socket | `ValueCodec` + `MemService::readValue/writeValue` 统一 scalar 范围/字节序；规范工具要求 `0x`，旧名称仅 hidden compatibility |
 | 工具路径两层 detached worker | `AgentTaskExecutor` 独占 joinable worker；`ToolExecutor` 同步执行，shutdown 测试证明 active/queued task 排空后 join |
