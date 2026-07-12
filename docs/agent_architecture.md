@@ -487,7 +487,7 @@ IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origi
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 另行精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪

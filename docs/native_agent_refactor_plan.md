@@ -34,7 +34,7 @@
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
-- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；独立 catalog CTest 精确校验 canonical 名称与依赖边界。
+- `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；catalog 与 no-Python-MCP 两项契约 CTest 分别固定 canonical 目录和运行时删除边界。
 
 尚未完成：HTTP IPC 默认启动与 transport 收敛、IPC scan/symbol/breakpoint 调用迁移，以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、Python MCP 删除、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-19、A-20 仍只能视为部分修复。
 
@@ -603,6 +603,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十九批完成退役工具收敛。`ChatSession::getMessagesForRequest()` 识别 33 个退役名称：只要同一 assistant tool-call 组包含退役调用，就把整组转换为普通 assistant 文本，保留脱敏参数和已记录结果，不再发送 provider tool protocol，也不能重新执行。随后从 `ToolDefinitions.cpp` 删除全部 hidden alias、direct-socket executor、旧 schema/参数解析和 `client_singleton.h`/`AppContext.h` 依赖；`AgentMemTools` 同步删除 legacy mode，只接受 canonical 字段与显式 `0x` 地址。LuaJIT 目录收敛为 24/24/0，无 LuaJIT 为 23/23/0。新增 `native_agent_catalog` CTest 固定名称和 include 边界，原生测试增至 23 组。
 
-第二十批删除 Python MCP 产品运行时。移除 FastMCP package、stdio 入口、pip metadata、`.mcp.json` 和六套 IDE 配置，不再维护第三套 schema、常量、retry 与 feature availability。独立的标准库 Android 协议探针迁至 `tools/protocol_reference/`，说明明确 C++ socket command 才是事实来源，脚本不具备 Agent 审批、target revision 或产品级安全边界。
+第二十批删除 Python MCP 产品运行时。移除 FastMCP package、stdio 入口、pip metadata、`.mcp.json` 和六套 IDE 配置，不再维护第三套 schema、常量、retry 与 feature availability。独立的标准库 Android 协议探针迁至 `tools/protocol_reference/`，说明明确 C++ socket command 才是事实来源，脚本不具备 Agent 审批、target revision 或产品级安全边界。`native_agent_no_python_mcp` CTest 阻止旧目录、配置和产品启动说明回归。
 
-二十个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试和 catalog 契约测试。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除与 GUI breakpoint/symbol/scan 迁移已完成。下一批应关闭 HTTP IPC 默认启动，并决定删除 IPC 或实现受限 Named Pipe。
+二十个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试、catalog 契约测试和 Python MCP 删除门禁。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除与 GUI breakpoint/symbol/scan 迁移已完成。下一批应关闭 HTTP IPC 默认启动，并决定删除 IPC 或实现受限 Named Pipe。

@@ -392,7 +392,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_agent_catalog` 还会精确验证 24 个 canonical 名称及 catalog 的 include 边界。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_agent_catalog` 精确验证 24 个 canonical 名称及 catalog 的 include 边界；`native_agent_no_python_mcp` 固定已删除的 runtime/config 和产品文档边界。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。

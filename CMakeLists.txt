@@ -399,6 +399,12 @@ if(BUILD_TESTING)
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/VerifyAgentCatalog.cmake
     )
+    add_test(
+        NAME native_agent_no_python_mcp
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyNoPythonMcp.cmake
+    )
 endif()
 
 # ==================== 分发说明 ====================

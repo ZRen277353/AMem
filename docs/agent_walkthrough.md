@@ -549,7 +549,7 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_agent_catalog` 另行校验 canonical 名称与 catalog 依赖边界。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_agent_catalog` 校验 canonical 名称与 catalog 依赖边界，`native_agent_no_python_mcp` 校验已删除的运行时和配置不会回归。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
