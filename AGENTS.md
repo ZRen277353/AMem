@@ -13,7 +13,7 @@ Read the relevant documents before changing `gui/ai/`, `ipc/`, `tools/protocol_r
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android server over sockets and provides memory scanning, memory read/write, hardware breakpoints, a hex viewer, value freezing, ELF symbols, and Lua scripting. Dear ImGui (docking branch) is rendered through DirectX 12.
 
-The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics. Native framing, secured transport, strict Hello/request sessions, a complete method catalog, 12 Observe adapters, an owned runtime, explicit status/control, and a bounded privileged-approval UI/state machine now exist under `ipc/` and `gui/`. Hello still grants only `Observe`; each privileged request instead submits bounded metadata for a one-shot GUI decision while the reader remains available for Cancel. After durable grant consumption, the dispatcher executes all 11 `MemService`-backed privileged methods through shared `MemJsonTools` and executes `lua_execute` through an injected host boundary. `process_open` is the only controlled session-baseline transition. The bounded plaintext security JSONL distinguishes approval transitions from final execution outcomes without storing params, result JSON, or error messages; failures are visible in the control window. `ENABLE_NATIVE_IPC` still defaults OFF; even when compiled, the pipe starts disabled and requires a user action.
+The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy, old loopback HTTP IPC server, and their IDE/build entry points have been removed from `NativeAgent`. Native framing, secured transport, strict Hello/request sessions, a complete method catalog, 12 Observe adapters, an owned runtime, explicit status/control, and a bounded privileged-approval UI/state machine now exist under `ipc/` and `gui/`. Hello still grants only `Observe`; each privileged request instead submits bounded metadata for a one-shot GUI decision while the reader remains available for Cancel. After durable grant consumption, the dispatcher executes all 11 `MemService`-backed privileged methods through shared `MemJsonTools` and executes `lua_execute` through an injected host boundary. `process_open` is the only controlled session-baseline transition. The bounded plaintext security JSONL distinguishes approval transitions from final execution outcomes without storing params, result JSON, or error messages; failures are visible in the control window. `ENABLE_NATIVE_IPC` still defaults OFF; even when compiled, the pipe starts disabled and requires a user action.
 
 Language: C++17 for the app. Platform: Windows 10/11 x64. The optional protocol probe in `tools/protocol_reference/` uses Python's standard library but is not a build or runtime dependency.
 
@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Coverage includes bounded JSONL persistence/rotation/schema-1 reload/failure status, fail-closed grant burning, execution-outcome summaries, exact identity/context revalidation, consume/Cancel races, framing across polling deadlines, Observe dispatch, approved privileged execution, post-consume cancellation, controlled process selection, completion-after-deadline semantics, monotonic session ids, cancellation, and joined shutdown. Sixteen CTests include those eleven native IPC binaries plus the service suite and four static gates. Provider, live GUI approval clicks, opt-in legacy IPC, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Coverage includes bounded JSONL persistence/rotation/schema-1 reload/failure status, fail-closed grant burning, execution-outcome summaries, exact identity/context revalidation, consume/Cancel races, framing across polling deadlines, Observe dispatch, approved privileged execution, post-consume cancellation, controlled process selection, completion-after-deadline semantics, monotonic session ids, cancellation, and joined shutdown. Sixteen CTests include those eleven native IPC binaries plus the service suite and four static gates, including a source-level guard against restoring the old HTTP server. Provider, live GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -52,14 +52,12 @@ CMake options:
 - `USE_DX12` (default ON)
 - `USE_DX11` (default OFF)
 - `ENABLE_AI_CHAT` (default ON)
-- `ENABLE_LEGACY_HTTP_IPC` (default OFF; unsafe migration-only endpoint)
 - `ENABLE_NATIVE_IPC` (default OFF; compile-only transport foundation)
 - `LUAJIT_STATIC` (default ON)
 
 Compile-time gates:
 
 - `HAVE_AI_CHAT`
-- `HAVE_LEGACY_HTTP_IPC`
 - `HAVE_NATIVE_IPC`
 - `HAVE_CAPSTONE`
 - `HAVE_KEYSTONE`
@@ -74,14 +72,14 @@ The free functions declared in `socket/client_singleton.h` are the shared device
 ```text
 GUI windows --------------------+
 In-app AI ToolDefinitions ------+--> MemService -> socket/client_singleton.h
-Opt-in legacy HTTP IPC ---------+                  -> WinSocketClientMgr -> Android
+Opt-in native Named Pipe IPC ---+                  -> WinSocketClientMgr -> Android
 ```
 
 When adding a device capability:
 
 1. Implement the protocol command in the appropriate `socket/*Commands.cpp`.
 2. Declare it in `socket/client_singleton.h`.
-3. Surface it only where required: a GUI panel or `ToolDefinitions.cpp`. Do not expand the legacy HTTP IPC while its replacement decision is pending.
+3. Surface it only where required: a GUI panel, `ToolDefinitions.cpp`, and/or the native IPC catalog/dispatcher.
 4. Keep validation, error semantics, flags, and output limits aligned across all exposed front ends.
 
 Do not implement a second version of the wire protocol in AI or IPC code.
@@ -90,7 +88,7 @@ Do not implement a second version of the wire protocol in AI or IPC code.
 
 ### Entry Point and Rendering
 
-- `main.cpp` creates the Win32 window, drives `Gui::mainLoop()`, and runs shutdown. It starts port 28100 only in an explicit `ENABLE_LEGACY_HTTP_IPC=ON` build.
+- `main.cpp` creates the Win32 window, drives `Gui::mainLoop()`, and runs joined shutdown. It has no HTTP IPC listener.
 - `renderer/DX12Renderer` owns DirectX 12 device/swapchain/frame resources.
 - `renderer/StyleSetup` owns ImGui style and font setup.
 - `ExceptionHandler.h` installs crash dump handling.
@@ -262,41 +260,16 @@ The current session format also stores `systemPrompt` and `tokenLimit`, even tho
 
 `IpcApprovalBroker` defines the privileged authorization core. It derives capability and target policy from `IpcMethodCatalog`, rejects Observe/unknown/unbounded submissions, stores no params/results, bounds live/history records, and permits only pending -> approved -> consumed or terminal deny/invalidate/expire/cancel transitions. `consume()` revalidates session, request, deadline, connection generation, and target under the broker mutex. It burns the record before the unlocked audit call and returns a one-shot grant only if the consumed transition is durable; audit failure returns `approval_audit_failed`, leaves the record consumed, and cannot be retried. A concurrent session Cancel and consume have one terminal winner. After consume, `IpcMemServiceDispatcher` synchronously records one `execution_outcome` with authorized/observed snapshots, success, completion, and bounded error code. Post-effect audit failure remains visible but must not rewrite a confirmed or uncertain device receipt. Static gates require dispatcher consumption, grant-bound execution/outcome audit, a shared Lua target recheck, and Observe-only Hello.
 
-### Legacy HTTP Server (`ipc/IpcServer.*`)
-
-When explicitly compiled in, the IPC server accepts HTTP JSON on `127.0.0.1:28100`:
-
-```json
-{"method": "read_memory", "params": {"address": "0x1234", "size": 16}}
-```
-
-Methods call the same C++ device commands used by GUI and in-app tools.
-
-Security/lifecycle constraints when the legacy option is enabled:
-
-- There is no authentication token.
-- Responses allow `Access-Control-Allow-Origin: *`.
-- Browser `OPTIONS` requests are accepted.
-- External IPC calls bypass the in-app `AgentRunner` write approval.
-- Each client handler is detached and not drained by `Stop()`.
-- Responses use one `send()` call and do not handle short writes.
-
-Loopback binding is not authentication. Do not add new privileged IPC methods without addressing authentication/capability and browser access. Do not rely on browser Private Network Access behavior as the service security boundary.
-
 ## Removed Python MCP Proxy
 
-The FastMCP package, `.mcp.json`, install metadata, and IDE configurations have been removed. Do not restore a Python wrapper around the legacy HTTP IPC. The optional `tools/protocol_reference/amem_client.py` script talks directly to the Android wire protocol for manual diagnostics; it is not an Agent integration or a second protocol authority.
+The FastMCP package, legacy HTTP server, `.mcp.json`, install metadata, and IDE configurations have been removed. Do not restore a Python proxy or unauthenticated HTTP control path. The optional `tools/protocol_reference/amem_client.py` script talks directly to the Android wire protocol for manual diagnostics; it is not an Agent integration or a second protocol authority.
 
-The remaining surfaces are still not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions; without it the count is 23. Opt-in legacy HTTP IPC has 29 methods and does not use the in-app approval, target-context, result, or feature-gate contract. Keep a machine-checkable capability matrix while IPC is replaced or deleted.
+With LuaJIT the in-app registry has 24 executable and advertised canonical definitions; without it the count is 23. Native IPC uses the same 24-name server catalog and shared adapters, but rejects `lua_execute` when the injected Lua host is unavailable. Keep catalog and feature-gate checks machine-verifiable.
 
 Address parsing currently differs:
 
 - In-app address fields, including raw/typed memory, scan ranges, disassembly, pointer offsets, and breakpoint addresses, require explicit `0x` strings. Retired aliases are not executable.
-- Legacy HTTP IPC interprets an unprefixed string as decimal; hexadecimal requires `0x`.
-
-Until the parsers are unified, require `0x` for every address string in schemas, prompts, examples, and tests.
-
-An external HTTP client timeout does not cancel the detached C++ handler. Do not add automatic retries without server request ids/cancellation and resource/idempotency analysis; a method that initializes or changes shared state is not retry-safe merely because it does not modify target memory.
+Native IPC reuses `MemJsonTools`, so canonical in-app and external address fields require explicit `0x` strings. Preserve that rule in schemas, prompts, examples, and tests.
 
 ## Lua
 

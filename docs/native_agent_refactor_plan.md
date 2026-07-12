@@ -1,16 +1,16 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`/`LuaJsonTool`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/Hello/request session/catalog/完整 dispatcher/安全 transport/owned runtime/显式 GUI control/逐请求 privileged approval execution/security outcome audit 已落地
+状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`/`LuaJsonTool`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 与 legacy HTTP IPC 删除、native IPC framing/Hello/request session/catalog/完整 dispatcher/安全 transport/owned runtime/显式 GUI control/逐请求 privileged approval execution/security outcome audit 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
 最后更新：2026-07-13
 
-本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；Named Pipe framing/session/transport、owned runtime、显式 GUI control、broker management、server session binding、bounded persistent security audit、fail-closed consume、approved dispatcher/send-boundary execution 与 final outcome summary 已落地。编译和运行默认关闭；Hello 仍只授予 Observe，privileged execution 通过逐请求审批与 durable one-shot grant 完成。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 与 legacy HTTP IPC 已删除；Named Pipe framing/session/transport、owned runtime、显式 GUI control、broker management、server session binding、bounded persistent security audit、fail-closed consume、approved dispatcher/send-boundary execution 与 final outcome summary 已落地。Native IPC 编译和运行默认关闭；Hello 仍只授予 Observe，privileged execution 通过逐请求审批与 durable one-shot grant 完成。
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成三十六个纵向切片：
+截至 2026-07-13 已完成三十七个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -34,7 +34,7 @@
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
-- `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；标准构建不加入 `IpcServer.cpp`，`main.cpp` 的 include/start/stop 受 `HAVE_LEGACY_HTTP_IPC` 约束。显式 opt-in 会打印未鉴权端口警告，供迁移验证。
+- legacy `ipc/IpcServer.*`、CMake option/macro、main 启停和 loopback HTTP listener 已删除；`native_agent_no_legacy_http_ipc` 静态 gate 阻止旧 server/CORS/端口入口回归。
 - `IpcProtocol` 固定 24-byte little-endian header、精确 `1.0` 版本、六种 message type 与 request-id 规则；request payload 硬限制 1 MiB，其他帧硬限制 4 MiB，并验证 UTF-8，partial frame 不消费输入。
 - `ENABLE_NATIVE_IPC` 默认 OFF；`NativePipeSecurity` 只允许当前进程用户 SID 与 SYSTEM read/write，`NamedPipeServer` 拒绝 remote client、固定 first/single instance 并复用同一 handle。overlapped accept 与串行 handler 共用 joinable thread，stop event + `CancelIoEx` 后 join；状态快照有 lifecycle/count/name/error。
 - `IpcFramedConnection` 在 payload 分配前调用 `DecodeHeader()`，用 overlapped exact read/write、绝对 deadline 和 stop event 处理 fragmented input、short write 与取消；跨 polling timeout 的 partial frame 有界保留并继续读取，partial close 是 protocol error。
@@ -57,7 +57,7 @@
 - security audit schema 2 在同一有界 JSONL 中区分 `approval_transition` 与 `execution_outcome`；outcome 只含 authorized/observed target、success、completion 与 bounded error code，schema 1 继续可加载。post-effect 写盘失败进入 GUI health，但不覆盖真实设备回执。
 - `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试，共 16 项 CTest。Debug/Release 全部通过，audit/dispatcher/runtime 各连续 50 次通过；fresh AI-off/AI-on 产品完整链接均通过。
 
-尚未完成：HTTP IPC 最终删除；Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；连接层 fake transport 迟到字节测试。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 删除、HTTP IPC 默认关闭和 native framing/session/transport 已完成。A-01、A-06、A-19、A-20 仍部分修复。
+尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；连接层 fake transport 迟到字节测试。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 已完成。A-01、A-06、A-14、A-17 已关闭；A-19、A-20 仍部分修复。
 
 ## 1. 结论
 
@@ -79,7 +79,7 @@ GUI windows ---------------------------+--> MemService
 3. Agent 只暴露一组稳定的规范工具名；兼容别名先隐藏、再迁移、最后删除。
 4. 工具调用绑定 `{pid, processHandle, processRevision, connectionGeneration}`，审批后目标发生变化时必须拒绝执行。
 5. detached 工具线程改成一个受管、可 join 的任务队列。取消具有明确状态，不再把“UI 不接收晚到结果”描述为操作已停止。
-6. 若仍需要外部自动化，HTTP IPC 替换为默认关闭的 Windows Named Pipe；如果没有外部调用方，则直接删除 IPC，不保留第二套公开接口。
+6. legacy HTTP IPC 已由默认关闭的 Windows Named Pipe control plane 取代；Native IPC 只做共享 `MemService` 的受限 adapter，不保留第二套业务实现。
 
 ## 2. 目标与非目标
 
@@ -348,15 +348,15 @@ public:
 
 ### 7.1 默认决定
 
-`NativeAgent` 不再自动启动 `127.0.0.1:28100` HTTP 服务。构建选项建议为：
+`NativeAgent` 已删除 legacy loopback HTTP 服务，只保留以下 Native IPC 构建选项：
 
 ```cmake
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 ```
 
 - 该选项把 codec/transport/runtime/GUI control 编入产品，但应用启动时仍不监听；只有用户在状态窗口点击“启用”才启动 Observe-only 服务。
-- 没有明确外部调用方时：删除 IPC，架构停在 GUI/Agent -> `MemService`。
-- 仍需外部脚本或 IDE 自动化时：实现 Named Pipe，但它只是 `MemService` 的受限 adapter，不拥有业务逻辑。
+- 未编译或用户未显式启用时，架构停在 GUI/Agent -> `MemService`。
+- 需要外部脚本或 IDE 自动化时使用 Named Pipe；它只是 `MemService` 的受限 adapter，不拥有业务逻辑。
 
 ### 7.2 Named Pipe 设计
 
@@ -427,7 +427,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - `gui/ai/DefaultSystemPrompt.h`：只描述规范工具，不列 alias 或前置状态调用。
 - `socket/client_singleton.*`、`socket/*Commands.cpp`：先作为 `MemService` 的 legacy backend；消费者迁完后收窄为内部协议层。
 - `gui/*Window.cpp`：按域迁移到 `IMemService`，不再直接读取原始 handle。
-- `main.cpp`、`CMakeLists.txt`：注入 service/session，移除 HTTP IPC 自动启动，增加可选 Named Pipe 和测试 target。
+- `main.cpp`、`CMakeLists.txt`：注入 service/session，删除 legacy HTTP IPC，增加可选 Named Pipe 和测试 target。
 - `README.md`、`AGENTS.md`、`CLAUDE.md`、`scripts/README.md`：完成每阶段后更新事实描述。
 
 最终删除或移动：
@@ -435,9 +435,9 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] 删除 `.mcp.json`。
 - [x] 删除 `mcp/amem_mcp/`、`mcp/configs/`、`mcp/server.py`、`mcp/pyproject.toml`、`mcp/requirements.txt`、`mcp/README.md` 和 `mcp/.gitignore`。
 - [x] 将仍用于协议排障的标准库探针移动到 `tools/protocol_reference/`，并明确它不参与产品运行。
-- [x] 旧 HTTP IPC 默认不编译、不监听，仅保留带警告的显式迁移 opt-in。
-- [ ] 新 IPC 上线后删除 `ipc/IpcServer.*`；若不保留外部自动化，则整个 `ipc/` 可删除。
-- [x] 删除 README、IDE 配置和脚本中对 FastMCP、`python -m amem_mcp` 和 MCP 安装的引用；端口 28100 的风险说明保留到旧 IPC 删除。
+- [x] 删除旧 HTTP `ipc/IpcServer.*`、CMake option/macro、main 启停和端口/CORS 入口。
+- [x] 用 `native_agent_no_legacy_http_ipc` gate 阻止旧 server、构建开关、监听地址和 CORS marker 回归。
+- [x] 删除 README、IDE 配置和脚本中对 FastMCP、`python -m amem_mcp` 和 MCP 安装的引用。
 
 ## 10. 分阶段迁移
 
@@ -484,11 +484,11 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 退出条件：除 `MemService`/协议实现外，仓库没有前端直接包含 `client_singleton.h` 的业务调用。
 
-### Phase 4：替换或删除 IPC（部分完成）
+### Phase 4：以 Native IPC 替换 legacy HTTP（部分完成）
 
 变更：
 
-- [x] 关闭 HTTP server 的默认编译和启动。
+- [x] 删除 legacy HTTP server、构建 gate、main 启停和 loopback/CORS 控制面。
 - [x] 固定显式小端 framing、版本/message/id/长度/UTF-8 校验和 partial decode 契约。
 - [x] 实现 compile-only、default-off 的单实例 Named Pipe、当前用户/SYSTEM DACL、remote rejection、受管串行 handler、stop/join 和状态快照。
 - [x] 实现有界 framed read/write、payload 分配前 header 校验、绝对 deadline 和 Stop cancellation。
@@ -505,10 +505,10 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] broker consume 复核 session/request/deadline/generation/target；consumed audit 失败时烧毁授权且不返回 grant，并与 session Cancel 线性化。
 - [x] dispatcher 消费 durable one-shot grant，执行 11 个共享 `MemJsonTools`/`MemService` privileged adapter 和注入的 Lua host executor；`process_open` 受控推进 baseline，completion 保留 deadline 后确认语义。
 - [x] 对每个 consumed grant 同步持久化无 raw params/results 的 final execution outcome；schema 1 reload、post-effect audit failure 和 GUI health 可见性已有测试/gate。
+- [x] 增加 `native_agent_no_legacy_http_ipc` 静态 gate，禁止恢复旧 server、option/macro、监听地址和 CORS marker。
 - [ ] 完成 GUI approval click 与真实设备 smoke。
-- 没有需求时直接移除 IPC source 和 CMake wiring。
 
-退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
+退出条件：legacy HTTP 控制面不存在；Native IPC 不存在无审批的外部 target mutation 路径；GUI approval 与真实设备 smoke 有可重复记录。
 
 ### Phase 5：删除 Python MCP（已完成）
 
@@ -553,7 +553,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - connection：partial send/receive、timeout poison、重连 generation、并发 disconnect。
 - provider：完整/截断/重复终止/malformed SSE。
 - persistence：损坏 JSON、字段类型错误、临时文件替换失败、旧会话迁移。
-- IPC（若保留）：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
+- Native IPC：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
 
 ### 11.2 真实设备 smoke test
 
@@ -582,7 +582,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 重构完成必须同时满足：
 
-- Python MCP、FastMCP 配置和 HTTP 28100 server 已不存在。
+- Python MCP、FastMCP 配置和 legacy HTTP server 已不存在。
 - Agent 在无 Python 环境中可以完成进程、模块、内存、扫描、断点和符号工作流。
 - GUI、Agent 和可选 IPC 的设备业务调用都经过 `IMemService`。
 - Agent 广告的工具只有规范名称，没有当前重复 alias 和 symbol/scan 前置状态工具。
@@ -677,4 +677,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第三十六批加入 privileged execution outcome audit。新增 `IpcExecutionAuditRecord`/sink，只允许 approval/session/request、client/method/capability、authorized/observed context、success/completion 和 bounded error code；不含 params、result JSON 或 error message。现有 `IpcApprovalAuditLog` 升级到 schema 2，以 `approval_transition`/`execution_outcome` 共用 16 KiB record、4 MiB active + `.1`、最近 100 条与 failure health，并兼容 schema 1。dispatcher 对每个 consumed grant 在 response 前同步记录一次；deny/expire/consume 前 Cancel 不记录。consume audit 仍 fail closed，post-effect outcome audit 失败不改写真实回执。GUI 改为“特权安全审计”并区分审批/执行事件。security-audit 增至 6 组、dispatcher 增至 15 组、runtime 保持 10 组；Debug/Release 16/16，audit/dispatcher/runtime 各 50/50。隔离 full product link：AI-off `29477888` bytes / `B2B9E2C2753E53ABBDB63A29485D1D150A64D901961D221A30DAAF39DEC1188A`，AI-on `35727360` bytes / `F8A55F89685DD90B2EB6368FEC5A69B6C17F8011BEDB87696C1733D23FBF10B1`。
 
-三十六个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并评估 legacy HTTP IPC 的最终删除。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
+第三十七批彻底删除 legacy HTTP IPC。删除 `ipc/IpcServer.cpp`/`.h`、`ENABLE_LEGACY_HTTP_IPC`、`HAVE_LEGACY_HTTP_IPC`、main 的端口启停和旧 `IPC_SOURCES`；原迁移 gate 替换为 `native_agent_no_legacy_http_ipc`，静态拒绝旧 server 文件、option/macro、`IpcServer`、loopback 监听地址和 CORS marker 回归。直接连接 Android 二进制协议的 `tools/protocol_reference/amem_client.py` 保留为排障工具，不是 GUI HTTP client。Debug/Release 各 16/16 CTest 通过。隔离 `ENABLE_NATIVE_IPC=ON` full product link：AI-off `29477888` bytes / `3F6CD0307932994E9BE77852A50F19FF9BF78CFC593D4DEB5229A0B59D88B200`，AI-on `35727360` bytes / `8DD0D1DB2595A98ABBFA75DE7AE8A2E229F8E5E1634D8042B650D2F1486092CB`。
+
+三十七个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并补 fake transport 的迟到字节/partial I/O 覆盖。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。

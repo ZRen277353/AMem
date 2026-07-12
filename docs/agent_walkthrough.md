@@ -301,7 +301,7 @@ canonical breakpoint mutation 在同一个 MAIN transaction 内接收设备确�
 - `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的多步清理/open/set PID
 
-另一个 GUI/Agent/HTTP IPC caller 可在两条命令之间插入。
+另一个 GUI/Agent/Native IPC caller 可在两条命令之间插入。
 
 ### 5.5 工具结果
 
@@ -385,7 +385,8 @@ old recv times out
 主退出顺序：
 
 ```text
-IpcServer::Stop() [only HAVE_LEGACY_HTTP_IPC]
+ShutdownSystemNativeAgentRuntime()
+  -> cancel approvals / stop pipe / join handler and request worker
   -> HttpClient::shutdown()
   -> AgentTaskExecutor::shutdown() and join
   -> DisconnectMultiPort()
@@ -394,12 +395,12 @@ IpcServer::Stop() [only HAVE_LEGACY_HTTP_IPC]
 
 当前边界：
 
-- IPC 只 join accept thread，不 join client handler。
+- Native IPC Stop 会取消审批与活动请求，并 join pipe handler 和 request worker。
 - HTTP 最后 callback 不在 `inFlight_` 计数内。
 - HTTP 只等待 3 秒，worker 仍是 detached。
 - Agent 工具 worker 会取消 queued/active task，并等待 active executor 返回后 join。
 
-因此工具 shutdown 已闭环，但整个应用退出仍受 HTTP 和 IPC detached task 约束。若调试退出崩溃、静态析构异常或偶发访问，应先检查这两类任务；设备 socket 在工具 worker join 后才断开。
+因此工具与 Native IPC shutdown 已闭环，但整个应用退出仍受 provider HTTP detached task 约束。若调试退出崩溃、静态析构异常或偶发访问，应先检查 HTTP worker/callback；设备 socket 在 Native IPC 与工具 worker join 后才断开。
 
 GUI 的 connect/disconnect/auto-reconnect 现在通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease，因此关闭会等待在途请求释放。该不变量已有无设备锁测试，但真实三端口 client 的并发压力与迟到字节仍缺 fake transport/loopback 覆盖。
 
@@ -488,48 +489,27 @@ broker `consume()` 在锁内复核 session/request/deadline/generation/target �
 
 `process_open` 是特殊的 `Selection` 路径：dispatcher 在 mutex 下暂时允许预期中的目标切换，调用 adapter 后从结构化结果取出新 snapshot，并与 service 当前 snapshot 精确比对；只有 connection generation 和完整 target 都一致时才推进 session baseline。其余方法仍绑定旧 baseline。Native completion 还新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，确保“截止时间后收到设备确认”不会被错误表述为未执行。
 
-### 9.2 默认关闭的 legacy HTTP 路径
+### 9.2 Python MCP 与 legacy HTTP 已删除
 
-默认构建不包含 `IpcServer.cpp`。显式配置 `ENABLE_LEGACY_HTTP_IPC=ON` 后，HTTP IPC 调用仍不进入内置 Agent 循环：
+FastMCP package、配置、安装入口和旧 loopback HTTP server 已从 `NativeAgent` 删除。产品不再提供端口式 HTTP 控制面，也没有恢复它的 CMake 选项或 compile macro。`tools/protocol_reference/amem_client.py` 只用于直接排查 Android 二进制协议，不是 GUI IPC client，也不参与 Agent 运行。
 
-```text
-local HTTP client
-  -> HTTP POST 127.0.0.1:28100
-  -> IpcServer::DispatchRequest()
-  -> registered C++ handler
-  -> client_singleton command
-```
+### 9.3 Native IPC 与内置 Agent
 
-### 9.3 与内置 Agent 的差异
+| 维度 | 内置 Agent | Native IPC |
+|------|------------|------------|
+| 授权 | `AgentRunner` 写审批 | Hello 仅 Observe；每个 privileged request 使用 GUI one-shot grant |
+| 业务 adapter | `MemJsonTools` / `LuaJsonTool` | 同一套 `MemJsonTools` / `LuaJsonTool` |
+| 地址字符串 `"1234"` | 拒绝，必须显式 `0x` | 拒绝，必须显式 `0x` |
+| 生命周期 | run context + cancellation + owned tool worker | session/request id + cancellation + owned pipe/worker |
+| 工具集合 | LuaJIT: 24；无 LuaJIT: 23 | 24-name catalog；Lua host 不可用时返回 feature error |
 
-| 维度 | 内置 Agent | HTTP IPC |
-|------|------------|---------|
-| 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
-| 错误 | `ToolResult` JSON audit | `success/error` HTTP JSON |
-| 地址字符串 `"1234"` | 所有地址字段拒绝；退役工具不可执行 | decimal |
-| 生命周期 | runId + cancellation + connection/target snapshot | detached IPC handler，无 request cancellation |
-| 工具集合 | LuaJIT: 24 广告 / 24 可执行 / 0 隐藏；无 LuaJIT: 23/23/0 | 29 个 legacy method |
+两条路径共享业务解析和目标语义，但授权主体、wire envelope 和审计日志不同。新增能力时更新 `IpcMethodCatalog` 和静态 capability gate，不复制第二套参数解析或结果 schema。
 
-跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
+### 9.4 Native IPC 安全与响应
 
-Python MCP package、配置和安装入口已经删除。静态提取显示 opt-in HTTP IPC 仍有 29 个方法；内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 没有同名 IPC 方法，typed read/write、分页、错误和 feature availability 也不一致。不要把 HTTP IPC 描述为受支持的外部 Agent 面。
+Native IPC 编译和运行均默认关闭。显式启用后，Named Pipe 使用当前用户/SYSTEM DACL、拒绝 remote client、单实例、严格 Hello、payload 上限、绝对 deadline、request id 和 Cancel。Hello 不授予长期 privileged capability；目标选择、目标修改和 host execution 必须逐请求审批，并在执行前消费 durable one-shot grant。
 
-### 9.4 IPC 安全
-
-默认构建不监听 28100；显式启用后的 IPC 仍然：
-
-- 无认证。
-- 允许 `Access-Control-Allow-Origin: *`。
-- 接受浏览器 OPTIONS。
-- 暴露写内存、进程、断点和 Lua。
-
-因此 loopback 不是充分安全边界。新增 IPC 方法前，先处理 A-01，而不是只增加参数校验。
-
-### 9.5 IPC 响应
-
-请求解析已有 1 MiB 上限。响应当前构造完整 JSON 后只调用一次 `send()`；Winsock 允许 short write。客户端收到截断 JSON 时，应检查服务端发送循环，不能用盲目重试掩盖。
-
-client timeout 不会取消旧 C++ handler。没有 server request id/cancellation 前，自动重试可能放大资源占用并重叠修改共享 symbol/target 状态，因此当前文档不提供 retry-safe 方法清单。
+framed writer 使用 overlapped exact write 处理 short write；Stop 通过 stop event 和 `CancelIoEx` 中断等待并 join owner。客户端 timeout 通过 request deadline/cancellation 进入同一状态机，但不能撤销已发送到 Android 设备的副作用。不同 Windows 用户/session 与真实 remote client 的负向验证仍需补齐。
 
 ## 10. 扩展时的检查步骤
 
@@ -542,7 +522,7 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 5. 设计输出上限/分页，避免把完整大列表塞给模型。
 6. 选择 `ToolSafety`，并同步 `DefaultSystemPrompt.h`。
 7. 在 `ToolDefinitions.cpp` 注册。
-8. 不向旧 HTTP IPC 增加方法；外部自动化必须等待受限 transport 决策并复用 `MemService`。
+8. 若向 Native IPC 暴露能力，更新共享 catalog/adapter、capability、target policy 和 approval 测试。
 9. 若包含多个设备命令，增加事务锁/revision 或服务端复合命令。
 10. 测试 Stop、目标切换、超时和退出。
 11. 更新 capability matrix，验证 feature gate 下工具可见性一致。
@@ -567,14 +547,14 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 4. 敏感字段在序列化前 redaction。
 5. 使用经过 Windows 目标已存在场景验证的原子替换。
 
-### 10.4 替换或删除 IPC
+### 10.4 维护 Native IPC
 
 1. 先确认鉴权/capability。
 2. transport adapter 只映射 `MemService` 参数、错误和上限，不复制业务逻辑。
-3. 使用 `sendAll()` 和响应上限。
+3. 保持 framed exact read/write、请求/响应硬上限和严格 UTF-8。
 4. handler 必须可停止和 join。
-5. 明确重试是否安全；有共享状态副作用的方法不应自动重试。
-6. timeout 不等于服务端取消；没有 request id/cancellation 时避免盲目重试。
+5. 保持 Hello Observe-only；privileged method 只通过逐请求 durable grant。
+6. timeout/Cancel 必须绑定 request id；不得声称能撤销已发送设备副作用。
 
 ## 11. 排障速查
 
@@ -591,9 +571,9 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 | 切会话后 prompt 变了 | 会话文件中的 `systemPrompt`/`tokenLimit` |
 | API key 配置消失 | `ai_config.json` 是否损坏后被启动流程覆盖 |
 | 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
-| IPC client 返回无效 JSON | IPC 单次 `send()` 是否 short write、响应是否过大 |
-| IPC 与内置地址不同 | 无前缀字符串的 reject/decimal 差异，统一改成 `0x...` |
-| 退出偶发崩溃 | HTTP callback 和 legacy IPC handler 两类 detached task；工具 worker 应已 join，native pipe 当前未启动且测试路径会 join |
+| Native IPC client 收不到完整帧 | header/payload 上限、deadline、partial close 和 terminal Error drain |
+| Native IPC privileged 请求被拒绝 | GUI 是否批准、grant 是否因 target/generation/deadline/session 失效 |
+| 退出偶发崩溃 | provider HTTP callback 的 detached 生命周期；工具和 Native IPC worker 应已 join |
 
 ## 12. 建议的自动测试起点
 
@@ -631,8 +611,8 @@ Stop
   != roll back a sent write or persist its late result
 
 Exit
-  IPC Stop + HTTP bounded wait + tool worker join + device disconnect
-  != proof that HTTP/IPC detached work has ended
+  Native IPC cancel/join + HTTP bounded wait + tool worker join + device disconnect
+  != proof that provider HTTP detached work has ended
 
 Socket timeout
   -> poison session + advance generation

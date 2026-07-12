@@ -3,13 +3,13 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
 
 ## 1. 系统总览
 
-AMem 默认有 GUI 与内置 Agent 两个设备能力入口；迁移构建可显式加入第三个：
+AMem 默认有 GUI 与内置 Agent 两个设备能力入口；显式编译并由用户启用后可加入 Native IPC：
 
 ```text
 GUI windows --------------------+
@@ -17,10 +17,10 @@ GUI windows --------------------+
 In-app AI Agent                 +--> MemService -> socket/client_singleton.h
 ChatWindow -> ToolDefinitions --+                    -> WinSocketClientMgr
                                 |                    -> Android server/device
-Opt-in HTTP IPC :28100 ---------+
+Native Named Pipe IPC ----------+
 ```
 
-`socket/client_singleton.h` 及 `socket/*Commands.cpp` 是设备协议的主要真相源。GUI、内置 Agent 和 IPC handler 都不应各自重写协议。
+`socket/client_singleton.h` 及 `socket/*Commands.cpp` 是设备协议的主要真相源。GUI、内置 Agent 和 Native IPC 都不应各自重写协议。
 
 内置 Agent 完成四件事：
 
@@ -29,7 +29,7 @@ Opt-in HTTP IPC :28100 ---------+
 3. 模型返回 tool call 时，执行预算控制、写类审批、工具调用和结果回喂。
 4. 保存会话并记录 run trace。
 
-启用后的 HTTP IPC 不经过 `AgentController`、`AgentRunner` 或内置审批框，handler 会直接调用设备命令。默认关闭消除了标准构建的监听面，但 opt-in 入口仍未鉴权，因此其代码级安全问题尚未关闭。
+Native IPC 不经过模型编排，但复用 server-owned catalog、`MemJsonTools`、target binding、逐请求审批和 outcome audit；它不是绕过内置安全边界的第二套设备实现。
 
 ## 2. 目录与职责
 
@@ -47,7 +47,7 @@ Opt-in HTTP IPC :28100 ---------+
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
-| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity`, `IpcServer` | native frame/I/O/Hello/request runtime、逐请求 privileged approval/execution；默认关闭的回环 HTTP JSON 入口 |
+| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity` | native frame/I/O/Hello/request runtime、逐请求 privileged approval/execution |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
@@ -168,15 +168,13 @@ HTTP 2xx 不等于 provider stream 完整：
 
 ## 5. 实际线程与生命周期模型
 
-内置工具执行已经收敛到一个受管 worker；legacy HTTP client handler 的生命周期仍未闭环。Native runtime 持有一个可 join 的串行 server/handler thread；request session 再拥有一个 joinable serial dispatch worker，使 handler reader 可在执行期间接收 Cancel。产品当前不启动这些 native 线程：
+内置工具执行已经收敛到一个受管 worker。Native runtime 持有一个可 join 的串行 server/handler thread；request session 再拥有一个 joinable serial dispatch worker，使 handler reader 可在执行期间接收 Cancel。产品启动时不创建这些 native 线程：
 
 | 线程/任务 | 创建位置 | 所有权现状 | 主要行为 |
 |-----------|----------|------------|----------|
 | ImGui 主线程 | `main.cpp` | 主循环拥有 | UI、run 状态、会话、队列消费 |
 | HTTP worker | `HttpClient::postAsync()` | detached，`inFlight_` 计数 | HTTPS、SSE、provider 完成回调 |
 | Agent 工具 worker | `AgentTaskExecutor` 构造 | 单个 joinable `std::thread` | 串行取队列、同步调用 `ToolExecutor`、投递 completion callback |
-| IPC accept thread | `IpcServer::Start()` | `serverThread_`，可 join | accept 客户端 |
-| IPC client handler | `IpcServer::ServerThread()` | 每连接 detached，未登记 | HTTP 解析、handler、发送响应 |
 | Native pipe server/handler | `NativeAgentIpcWindow` -> `NativeAgentRuntime::start()` -> `NamedPipeServer::start()` | 用户显式启用后，system runtime 持有单个 joinable `std::thread` | overlapped accept、串行 handshake/session handler、stop event/`CancelIoEx`、实例复用 |
 | Native request dispatch | `NativeAgentRuntime` -> `IpcRequestSession::run()` | 每个已建立 session 一个 owned/joinable worker | 单 active request、Observe dispatch、server-owned capability 检查、cooperative deadline/Cancel、bounded response |
 
@@ -203,13 +201,12 @@ HTTP 2xx 不等于 provider stream 完整：
 | runId 过滤 | 迟到结果不污染新 UI run；mutation/session-effect 结果仍进入独立 Audit 表 | 迟到操作没有设备副作用 |
 | `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
 | `DeviceSession` poison | 推进 generation、拒绝新请求并等待显式重连 | 自动恢复 driver/process/scan/breakpoint 状态 |
-| 外部 HTTP client timeout | client 停止等待 | detached IPC handler/设备请求已取消 |
 
 ### 5.3 退出顺序与边界
 
 `main.cpp` 当前按条件依次调用：
 
-1. `IpcServer::Stop()`（仅 `HAVE_LEGACY_HTTP_IPC`）
+1. `ShutdownSystemNativeAgentRuntime()`（仅 `HAVE_NATIVE_IPC`）
 2. `HttpClient::shutdown()`
 3. `AgentTaskExecutor::shutdown()`
 4. `DisconnectMultiPort()`
@@ -217,13 +214,7 @@ HTTP 2xx 不等于 provider stream 完整：
 
 工具路径已有明确的排空保证：`AgentTaskExecutor::shutdown()` 停止接收新任务，标记 active/queued task 取消，向未开始任务交付取消结果，并 join 唯一 worker。返回后不会再有 Agent 工具访问 socket，因此设备断开排在它之后。
 
-进程级 teardown 仍不是完整排空保证：
-
-- IPC Stop 不等待 client handler。
-- HTTP 在完成回调前减少 `inFlight_`。
-- HTTP 等待上限为 3 秒，且 worker 仍是 detached。
-
-因此只可把 **Agent 工具 shutdown** 称为已 join；整个应用退出仍受 HTTP/IPC detached task 限制，不能宣称所有后台任务已排空。
+Native IPC Stop 会取消并 join server handler 与 request worker。进程级 teardown 仍不是完整排空保证，因为 provider HTTP 在完成回调前减少 `inFlight_`，等待上限为 3 秒且 worker 仍是 detached。因此只可把 **Agent 工具与 Native IPC shutdown** 称为已 join；整个应用退出仍受 provider HTTP detached task 限制，不能宣称所有后台任务已排空。
 
 连接按钮、自动重连和退出现在都通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease。连接替换会等待活动请求释放，失败连接会 poison 并推进 generation。该锁序已有无设备测试，真实三端口并发和迟到字节仍需 fake transport/loopback 压力验证。
 
@@ -243,7 +234,7 @@ Idle
   -> FollowUp -> WaitingModel
 ```
 
-写类审批只存在于内置 Agent。HTTP IPC 请求不经过该状态机。
+写类审批由内置 Agent run state 和 Native IPC one-shot broker 分别承载；两者共享 method safety/target policy，但不共享 UI 会话状态。
 
 `AgentRunner` 会保持工具调用顺序：结果必须和当前 pending call 的 id/name/arguments 匹配，否则停止当前批次。runId 再在 UI 消息层隔离上一个 run 的迟到结果。
 
@@ -338,7 +329,7 @@ canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC scan
 
 ### 8.3 地址语义
 
-内置 Agent 的 raw/typed memory、scan ranges、disassembly、`pointer_resolve` offsets 和 breakpoint 地址均只接受带 `0x` 前缀的字符串；退役 alias 不可执行。HTTP IPC 对无前缀字符串仍按十进制解析，因此跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
+内置 Agent 与 Native IPC 共享 `MemJsonTools`，raw/typed memory、scan ranges、disassembly、`pointer_resolve` offsets 和 breakpoint 地址均只接受带 `0x` 前缀的字符串；退役 alias 不可执行。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
@@ -431,50 +422,23 @@ dispatcher 对每个成功消费的 grant 在返回 response 前同步调用一�
 
 Native response completion 现在区分 `timed_out_before_start`、已开始但超时的 `timed_out` 和设备已确认完成的 `completed_after_deadline`。后者保留成功回执，不能因 deadline 已过而改写成“未执行”。同理，grant consume 后但 adapter/send 前的 Cancel 返回 `cancelled_before_send`，已经发送的操作继续依赖底层回执表达确定性。
 
-### 10.2 Legacy HTTP 协议
+### 10.2 Python MCP 与 Legacy HTTP IPC 已删除
 
-默认构建不包含 `IpcServer.cpp`。只有 `ENABLE_LEGACY_HTTP_IPC=ON` 时，`IpcServer` 才监听 `127.0.0.1:28100` 并接受：
+FastMCP package、`.mcp.json`、安装元数据、IDE 配置、`ipc/IpcServer.*`、端口 28100 启停代码和迁移 CMake 选项已经从 `NativeAgent` 删除。`native_agent_no_legacy_http_ipc` 静态 gate 禁止旧路径、宏、端口与 CORS 标记回归。`tools/protocol_reference/amem_client.py` 仅是可选的 Android wire-protocol 排障脚本，直接连接 Android 服务端，不连接 GUI IPC，不参与产品构建，也不能作为新的 Agent adapter。
 
-```json
-{
-  "method": "read_memory",
-  "params": {
-    "address": "0x1234",
-    "size": 16
-  }
-}
-```
-
-响应为：
-
-```json
-{
-  "success": true,
-  "result": {}
-}
-```
-
-请求 parser 已校验 method/path/Content-Length，并设置 1 MiB 请求上限。当前响应发送只有一次 `send()`，没有 short-write 循环。
-
-### 10.3 Python MCP 已删除
-
-FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAgent` 删除。`tools/protocol_reference/amem_client.py` 仅是可选的 Android wire-protocol 排障脚本，不连接 GUI IPC，不参与产品构建，也不能作为新的 Agent adapter。
-
-当前两个可调用面仍不一一对应：
+当前两个受支持的调用面共享 canonical catalog 与 adapter：
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
 | 内置 Agent（LuaJIT） | 24 个广告定义 / 24 个可执行名称 | 0 个 hidden alias；退役调用仅保留为历史文本 |
 | 内置 Agent（无 LuaJIT） | 23 个广告定义 / 23 个可执行名称 | 0 个 hidden alias；`lua_execute` 不注册 |
-| Opt-in HTTP IPC | 29 | 原始 C++ handler；不经过 Agent 审批、target context 或统一结果契约 |
+| Native IPC | 24-name server catalog | 23 个 `MemService` adapter；`lua_execute` 依赖注入的 Lua host，缺失时拒绝 |
 
-内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 HTTP IPC 的 feature-gate 和结果行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
+新增能力时不能只验证“socket 命令存在”，还要同时验证 catalog capability、target policy、feature gate 和共享 JSON 结果契约。
 
-### 10.4 当前 IPC 安全边界
+### 10.3 当前 IPC 安全边界
 
-默认关闭已移除标准构建的监听面。显式启用时，IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS；任意可访问该端口的本地客户端都能绕过内置 Agent 的写审批。因此不要新增 IPC 能力；替换或删除它之前，必须先考虑鉴权、浏览器访问和 capability。
-
-外部 client timeout 只结束调用方等待，不会停止 detached C++ handler。没有 server request id/cancellation 前，不得建议自动重试；retry-safe 还必须包含“旧请求继续运行也不会破坏共享状态/资源”的判断。
+Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实例 pipe、Observe-only Hello 与逐请求 privileged approval 建立本机身份和 capability 边界。它没有网络/CORS 暴露面，也没有长期 privileged grant。client timeout/Cancel 通过 request id 发 cooperative cancellation；已发送 mutation 仍必须按 completion receipt 判断，不得自动重试不具备幂等性的操作。
 
 ## 11. 维护不变量与当前缺口
 
@@ -510,7 +474,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 2. 明确它绑定哪个资源：process、scan session、symbol table、breakpoint 或全局 driver。
 3. 判断是 target mutation、stateful read 还是纯 read，并同步默认 prompt。
 4. 在 `ToolDefinitions.cpp` 添加 schema、局部长度上限和 executor。
-5. 不向旧 HTTP IPC 增加方法；若决定保留外部自动化，按计划通过受限 Named Pipe adapter 暴露 `MemService` 契约。
+5. 外部自动化只通过受限 Native Named Pipe adapter 暴露 `MemService` 契约；不得恢复 HTTP 控制入口。
 6. 对地址统一要求 `0x`，对列表设计分页和输出上限。
 7. 若是复合操作，设计事务/revision，而不是连续调用两条各自加锁的命令。
 8. 写工具审批必须显示并校验目标 PID/revision。
@@ -543,7 +507,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 - config/index 损坏恢复
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
-- legacy IPC HTTP parser/auth/sendAll
+- Native IPC GUI approval click 与真实 Android privileged operation
 - Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - fake transport partial I/O、迟到响应和三端口 reconnect

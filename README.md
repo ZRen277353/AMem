@@ -201,9 +201,9 @@ build/Release/ImGuiProject.exe
 3. 打开 AI Chat，选择目标进程后发起调试任务。
 4. 涉及进程切换、写内存、扫描、断点或 Lua 的操作会按安全分类请求确认。
 
-Python MCP 代理已经从 `NativeAgent` 分支删除。默认构建也不编译或启动旧
-HTTP IPC；仅可通过 `ENABLE_LEGACY_HTTP_IPC=ON` 显式恢复该未鉴权迁移入口。
-它不作为新的外部 AI 集成接口。协议排障脚本位于
+Python MCP 代理和旧的未鉴权 HTTP IPC 已经从 `NativeAgent` 分支删除，
+不再存在端口 28100 或迁移构建开关。原生 Named Pipe IPC 仍需显式编译并由
+用户在 GUI 中启用。协议排障脚本位于
 `tools/protocol_reference/`，不参与产品构建或运行。
 
 
@@ -216,7 +216,7 @@ HTTP IPC；仅可通过 `ENABLE_LEGACY_HTTP_IPC=ON` 显式恢复该未鉴权迁�
 option(USE_DX11 "Use DirectX 11 backend" OFF)
 option(USE_DX12 "Use DirectX 12 backend" ON)
 option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
-option(ENABLE_LEGACY_HTTP_IPC "Enable legacy unauthenticated HTTP IPC" OFF)
+option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 
 # Capstone 库路径
 set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation directory")

@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android device over Socket and provides memory scanning, hardware breakpoint debugging, a hex memory viewer, value freezing, ELF symbol resolution, and Lua scripting. The UI is built with Dear ImGui (docking branch) rendered via DirectX 12.
 
-On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server. Native framing, secured transport, strict Hello/request sessions, a complete method catalog, an owned runtime, explicit control, and a bounded privileged approval state machine exist under `ipc/` and `gui/`. Hello grants only `Observe`; privileged methods use a fresh per-request GUI approval instead of a standing capability. Broker `consume()` burns authorization and withholds the grant unless the consumed transition is durable. The dispatcher executes approved requests through 11 shared `MemJsonTools`/`MemService` adapters or the injected Lua host boundary, with `process_open` as a controlled baseline transition. The same bounded plaintext JSONL now distinguishes approval transitions and final execution outcomes without params, result JSON, or error messages. `ENABLE_NATIVE_IPC` defaults OFF; compiled builds start with the pipe stopped.
+On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy and unauthenticated loopback HTTP IPC server have been removed. Native framing, secured transport, strict Hello/request sessions, a complete method catalog, an owned runtime, explicit control, and a bounded privileged approval state machine exist under `ipc/` and `gui/`. Hello grants only `Observe`; privileged methods use a fresh per-request GUI approval instead of a standing capability. Broker `consume()` burns authorization and withholds the grant unless the consumed transition is durable. The dispatcher executes approved requests through 11 shared `MemJsonTools`/`MemService` adapters or the injected Lua host boundary, with `process_open` as a controlled baseline transition. The same bounded plaintext JSONL now distinguishes approval transitions and final execution outcomes without params, result JSON, or error messages. `ENABLE_NATIVE_IPC` defaults OFF; compiled builds start with the pipe stopped.
 
-The `NativeAgent` branch is migrating all front ends to one native `MemService` and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
+The `NativeAgent` branch is migrating all front ends to one native `MemService`. Legacy HTTP IPC is deleted; optional external automation uses the default-off Native Named Pipe adapter. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
 
 Language: C++17. Platform: Windows 10/11 x64 only. `tools/protocol_reference/amem_client.py` is an optional standard-library diagnostic probe, not a build/runtime dependency.
 
@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 23 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups; the total suite has sixteen CTests. Coverage includes JSONL bounds/failures/schema-1 compatibility, durable grant withholding, identity/context checks, one-shot burning, consume/Cancel races, execution-outcome summaries, all approved adapters, post-consume cancellation, controlled selection, and deadline completion. Live GUI approval clicks, opt-in legacy IPC, real Android transport, and device paths still need coverage.
+`native_agent_mem_service` contains 23 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups; the total suite has sixteen CTests. Coverage includes JSONL bounds/failures/schema-1 compatibility, durable grant withholding, identity/context checks, one-shot burning, consume/Cancel races, execution-outcome summaries, all approved adapters, post-consume cancellation, controlled selection, deadline completion, and a static guard against restoring legacy HTTP IPC. Live GUI approval clicks, real Android transport, and device paths still need coverage.
 
 ## Dependencies
 
@@ -41,9 +41,9 @@ Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly i
 - **Optional**: Keystone — assembly-to-machine-code. Static `/MT`: `vcpkg install keystone:x64-windows-static` (or set `keystone_ROOT`). Linked into the exe.
 - **Static single-exe distribution**: the whole app links `/MT` (static CRT via `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` + CMP0091) plus static capstone/keystone/OpenSSL/LuaJIT. **This is a hard constraint**: the prebuilt `lua51.lib` and official `capstone.lib` are both `/MT` (LIBCMT), so the exe must be `/MT` to avoid CRT conflicts. Result: `bin/ImGuiProject.exe` (~34MB) is fully self-contained — no capstone/keystone/OpenSSL DLLs, no VC runtime DLLs, no VC++ Redistributable needed; only Windows 10/11 x64 system DLLs. Copy the exe alone to another machine and it runs.
 
-CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_LEGACY_HTTP_IPC` (default OFF), `ENABLE_NATIVE_IPC` (default OFF, compile-only), `LUAJIT_STATIC` (default ON).
+CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_NATIVE_IPC` (default OFF, compile-only), `LUAJIT_STATIC` (default ON).
 
-Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_LEGACY_HTTP_IPC`, `HAVE_NATIVE_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
+Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_NATIVE_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
 
 ## Architecture
 
@@ -53,19 +53,19 @@ The free functions declared in `socket/client_singleton.h` (`ReadProcessMemoryBy
 
 1. **GUI windows** (`gui/`) call them directly in response to user actions.
 2. **In-app AI agent** (`gui/ai/ToolDefinitions.cpp`) wraps them as tool executors registered with `ToolExecutor`.
-3. An explicit `ENABLE_LEGACY_HTTP_IPC=ON` build includes **HTTP IPC** (`ipc/IpcServer.cpp`), whose legacy JSON handlers call the same functions without in-app Agent approval.
+3. An explicit `ENABLE_NATIVE_IPC=ON` build includes the secured Named Pipe runtime; it starts stopped and requires a GUI action.
 
 ```
-GUI windows ─────┐
-in-app AI  ──────┼──▶ MemService / socket command layer ──▶ WinSocketClientMgr ──▶ Android
-opt-in HTTP IPC ──┘
+GUI windows ────────┐
+in-app AI  ─────────┼──▶ MemService / socket command layer ──▶ WinSocketClientMgr ──▶ Android
+native Named Pipe ──┘
 ```
 
-**Practical consequence:** adding a new device capability usually means (a) add the socket command in `socket/*Commands.cpp` + declare it in `client_singleton.h`, then (b) expose it through `MemService` to the GUI and/or canonical AI catalog. Do not expand the legacy HTTP IPC while its replacement decision is pending.
+**Practical consequence:** adding a new device capability usually means (a) add the socket command in `socket/*Commands.cpp` + declare it in `client_singleton.h`, then (b) expose it through `MemService` to the GUI, canonical AI catalog, and/or native IPC catalog.
 
 ### Entry point & rendering
 
-- `main.cpp` — creates the Win32 window, drives the render loop (`Gui::mainLoop()`), installs `ExceptionHandler.h` (crash dumps), and starts port 28100 only behind `HAVE_LEGACY_HTTP_IPC`.
+- `main.cpp` — creates the Win32 window, drives the render loop (`Gui::mainLoop()`), installs `ExceptionHandler.h` (crash dumps), and performs joined shutdown. It has no HTTP IPC listener.
 - `renderer/DX12Renderer` — DirectX 12 device/swapchain/frame management (extracted out of `main.cpp`).
 - `renderer/StyleSetup` — ImGui style + Chinese font loading.
 
@@ -137,21 +137,15 @@ The transport-independent codec uses an explicit 24-byte little-endian header: `
 
 `IpcApprovalBroker` owns authorization, not execution. Catalog metadata is server-owned; records exclude params/results and are bounded. `consume()` revalidates session/request/deadline/generation/target, burns the record before unlocked audit, and returns a grant only for a durable consumed transition. Audit failure returns `approval_audit_failed` with no grant and no reusable authorization; consume and session Cancel are linearized by the broker state. The production dispatcher consumes the grant, checks its request metadata, and synchronously emits one `execution_outcome` with authorized/observed snapshots and final completion. Outcome-audit failure is visible in the shared audit health but cannot rewrite a sent operation's real receipt. Hello remains Observe-only, so every privileged device/host call still needs its own approved grant.
 
-### Legacy IPC server (`ipc/IpcServer.cpp`)
-
-A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:28100 only**. It is excluded from default builds and starts from `main.cpp` only with `ENABLE_LEGACY_HTTP_IPC=ON`. It accepts `POST /` with body `{ "method": "...", "params": {...} }` and returns `{ "success": bool, "result"/"error": ... }`. Methods are registered in `RegisterBuiltinMethods()` and call the same socket commands as the GUI.
-
-Loopback is not authentication. The current server has no token, allows `Access-Control-Allow-Origin: *`, accepts browser preflight, bypasses the in-app write approval path, detaches each client handler, and sends each response with one `send()` call. Do not add privileged methods without addressing authentication/capabilities, browser access, handler drainage, and partial sends.
-
 ### Removed Python MCP proxy
 
-The FastMCP package, `.mcp.json`, packaging metadata, and IDE configurations have been deleted from `NativeAgent`. Do not restore a Python wrapper around the legacy HTTP IPC. `tools/protocol_reference/amem_client.py` is a manual Android wire-protocol probe only and is not an Agent integration.
+The FastMCP package, legacy HTTP server, `.mcp.json`, packaging metadata, and IDE configurations have been deleted from `NativeAgent`. Do not restore a Python proxy or unauthenticated HTTP control path. `tools/protocol_reference/amem_client.py` is a manual Android wire-protocol probe only and is not an Agent integration.
 
-The remaining HTTP IPC path does not pass through `AgentRunner` approval. All in-app address fields require explicit `0x` strings, while IPC still treats unprefixed strings as decimal. With LuaJIT the in-app registry has 24 canonical definitions; without it the count is 23. IPC has 29 legacy methods with different target, result, and feature-gate semantics. Keep a generated capability matrix until IPC is replaced or deleted. An HTTP client timeout does not cancel the detached C++ handler, so automatic retry can overlap an old request.
+All canonical in-app and native IPC address fields use shared adapters and require explicit `0x` strings. With LuaJIT the in-app registry has 24 canonical definitions; without it the count is 23. Native IPC retains the 24-name catalog but rejects `lua_execute` when the injected Lua host is unavailable. Keep catalog and feature-gate checks machine-verifiable.
 
 ### Lua scripting (`lua/`, gated by `HAVE_LUAJIT`)
 
-`LuaEngine` (singleton) owns the LuaJIT state. `LuaAPI*.cpp` expose C++ bindings: `LuaAPI_Memory` (memory/scan/breakpoints), `LuaAPI_ImGui` (drawing), `LuaAPI_Assembly`. Lua is reachable from the GUI (`LuaScriptWindow`, `LuaImGuiWindow`), from the feature-gated canonical AI tool `lua_execute`, and from the IPC `execute_lua` method. Retired in-app `execute_lua` calls survive only as inert session history. Agent Lua execution is target-bound, cannot extend the absolute task deadline, and cannot be retracted after it starts.
+`LuaEngine` (singleton) owns the LuaJIT state. `LuaAPI*.cpp` expose C++ bindings: `LuaAPI_Memory` (memory/scan/breakpoints), `LuaAPI_ImGui` (drawing), `LuaAPI_Assembly`. Lua is reachable from the GUI (`LuaScriptWindow`, `LuaImGuiWindow`) and from the feature-gated canonical `lua_execute` tool used by the in-app Agent and native IPC host boundary. Retired `execute_lua` calls survive only as inert session history. Agent Lua execution is target-bound, cannot extend the absolute task deadline, and cannot be retracted after it starts.
 
 ### Version system
 
@@ -159,7 +153,7 @@ The remaining HTTP IPC path does not pass through `AgentRunner` approval. All in
 
 ## Key Patterns
 
-- **Singletons everywhere (Meyer's)**: `WinSocketClientMgr`, `SocketRequestManager`, `LuaEngine`, `IpcServer`, `AppContext`, `EventBus`, and most AI components (`ProviderRegistry`, `ToolExecutor`, `ApiKeyStore`, `AiSettings`, `SessionManager`, `UIMessageQueue`) use `static` local in `GetInstance()`/`Get()`.
+- **Singletons remain common (Meyer's)**: `WinSocketClientMgr`, `SocketRequestManager`, `LuaEngine`, `AppContext`, `EventBus`, and most AI components (`ProviderRegistry`, `ToolExecutor`, `ApiKeyStore`, `AiSettings`, `SessionManager`, `UIMessageQueue`) use `static` local in `GetInstance()`/`Get()`.
 - **Socket thread safety**: never issue a raw send/receive pair without the normal `SocketCommand::execute*` path. It holds the connection lease, recursive per-port transaction gate, and request-response mutex; responses from concurrent callers will interleave if the last lock is bypassed.
 - **Single-command locking is not a transaction**: `ScanSetRange`→scan, `SymbolInit`→`SymbolGetList`, and process switching are multi-command shared-state sequences. Add a higher-level transaction/revision/epoch when correctness spans more than one request.
 - **Pointer transaction**: `pointer_resolve` holds `SocketCommand::TransactionLease` across module lookup and every dereference, then validates the full target after releasing it. Do not acquire the AppContext process-state mutex while the transaction gate is held.
