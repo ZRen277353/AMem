@@ -375,6 +375,23 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcProtocolTests
+        tests/IpcProtocolTests.cpp
+        ipc/IpcProtocol.cpp
+    )
+    target_include_directories(NativeIpcProtocolTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcProtocolTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcProtocolTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcProtocolTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_protocol COMMAND NativeIpcProtocolTests)
+
     add_executable(NativeAgentMemTests
         tests/MemServiceTests.cpp
         mem/Address.cpp
