@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 49 个可执行名称，其中 25 个为隐藏兼容 alias，provider 实际收到 24 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 54 个可执行名称，其中 30 个为隐藏兼容 alias，provider 实际收到 24 个定义。
 
 ### 1.2 加载 provider 配置
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-十六个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+二十一个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-module/pointer/symbol resolution、四个 canonical scan 工具和 raw/typed memory read/write 都已在 service 边界消费 context。`pointer_resolve` 在一个 read transaction 中完成 module list 和全部 pointer read。scan 返回的 epoch 约束 refine/results/clear；symbol list 续页同样携带最新 `symbol_epoch`，且 module resolve + init + list/find 位于一个 MAIN transaction。旧 scan/symbol 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。breakpoint 和 Lua 仍只有 Controller 出队和结果回收保护。
+module/pointer/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 以最多 100 项分页。旧 scan/symbol/breakpoint 名称仍可执行但不再广告，其自身保留 legacy 参数和较弱回执。Lua 仍只有 Controller 出队和结果回收保护。
 
 ### 5.3 受管工具队列
 
@@ -287,6 +287,8 @@ connect/disconnect/reconnect 持有 exclusive lifecycle lease；I/O 错误、EOF
 canonical scan 另持有 scan domain mutex 和 MAIN transaction gate：start 覆盖 set-range+scan，results 覆盖 count+page，clear 用后续 count=0 确认。长扫描的 progress callback 观察 cancellation token，并经 DEBUG 端口请求 stop；若主命令仍返回 terminal count，结果标为 `completed_after_cancel_request`，否则 sent request 保留 `completion_unknown`。
 
 canonical symbol 另持有 symbol domain mutex 和 MAIN transaction gate。`symbol_resolve`/`symbol_list` 都在 gate 内完成 module 唯一匹配、`SymbolInit` 和 find/page；init 取得 gate 后才推进 epoch，保证 epoch 顺序与实际 mutation 顺序一致。offset > 0 的 list 必须携带上一页 epoch，跨前端 init 会返回 `symbol_session_changed`。
+
+canonical breakpoint mutation 在同一个 MAIN transaction 内接收设备确认并更新 cleanup tracker。cleanup 持 gate 完成 snapshot + remove；断线只清本地 tracker，避免把旧地址施加到新 target。若 request 已开始但未收到响应，service 返回非重试 `completion_unknown`；确认完成后即使 cancellation/deadline 已到，也保留 `completed_after_*`。hits socket 响应按块读取并丢弃页外数据，Agent 的寄存器和时间使用字符串避免 64 位精度损失。
 
 以下序列仍不是事务：
 
@@ -447,13 +449,13 @@ MCP client
 |------|------------|---------|
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
-| 地址字符串 `"1234"` | 规范 raw/typed memory 地址和 pointer offsets 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
+| 地址字符串 `"1234"` | 规范 raw/typed memory、pointer offsets 和 breakpoint 地址拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 24 个广告定义 / 49 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | 24 个广告定义 / 54 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
-静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `read_disassembly`/`symbol_resolve` 也没有同名 IPC 方法。无 LuaJIT 时三层还会以“返回 unavailable / 未注册 / 仍展示工具”三种方式表现。不要再用“暴露全部 C++ 能力”描述 MCP。
+静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `read_disassembly`/`symbol_resolve`/`breakpoint_hits` 也没有同名 IPC 方法。无 LuaJIT 时三层还会以“返回 unavailable / 未注册 / 仍展示工具”三种方式表现。不要再用“暴露全部 C++ 能力”描述 MCP。
 
 ### 9.2 IPC 安全
 
@@ -538,7 +540,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 18 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan 与 symbol session/epoch/分页、scan 取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 19 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan/symbol session、breakpoint receipt/hit paging、scan 取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
