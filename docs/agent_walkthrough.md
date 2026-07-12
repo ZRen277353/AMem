@@ -152,13 +152,14 @@ removeFromActive()
 
 所以 `HttpClient::shutdown()` 观察到 `inFlight_ == 0` 时，最后一个完成回调可能仍在运行。这是 A-05 的具体来源。
 
-另一个完成条件问题在 provider 层：
+provider 完成条件在独立状态机中统一：
 
-- Claude 收到 `message_stop` 会设置 `completed`，但完成回调不检查。
-- DeepSeek 收到 `finish_reason` 会设置 `finished`，但完成回调不检查。
-- OpenAI 不记录 stream terminal；公共 parser 还会过滤 `[DONE]`。
+- `SSEParser` 按分片/行拼接 `data:`，把 `[DONE]` 交给回调，并在 EOF flush 最后一个未闭合事件。
+- Claude event 先经 `InspectClaudeStreamEvent()`，要求 `message_start` 与 `message_stop`。
+- OpenAI/DeepSeek event 先经 `InspectOpenAICompatibleStreamEvent()`，要求合法 `choices` 起始，并接受非空 `finish_reason` 或 `[DONE]` 作为 terminal。
+- `StreamTerminalTracker` 保留首个 malformed/schema error；重复 terminal 是幂等的。
 
-因此 HTTP 2xx 正常关闭但 SSE 被截断时，三类 provider 都可能提交部分文本/tool arguments。partial 内容可以展示，但在看到合法 terminal 前不应进入工具执行。
+HTTP 2xx 正常关闭但 SSE 截断、malformed 或完全不是 SSE 时，完成回调返回 `InvalidResponse`。partial 文本/tool arguments 仍在错误响应中，`ChatWindow` 会显示错误并在 tool-call 处理前退出，因此不会执行。
 
 ## 4. 主线程消费模型结果
 
@@ -577,9 +578,9 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；当前共 18 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 的 14 组覆盖完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE、分片与 partial error retention。当前共 19 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
 
-1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
+1. 用本机假 provider HTTP/TLS 覆盖真实 content receiver、状态码和 full-response 解析。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用真实 Android 设备记录三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复结果。

@@ -6,7 +6,7 @@
 
 本文记录当前工作区中仍存在的问题，以及已经落地的修复摘要。目标架构和分阶段关闭方案见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。搜索/扫描协议自身的问题不在本文审计范围内。
 
-本次结论来自静态代码审阅、调用链核对、native framing/framed I/O/Hello/request-session/本机 Named Pipe transport 无设备测试，没有连接 Android 设备，也没有执行 provider、不同用户/remote IPC 或应用退出阶段的端到端压力测试。优先级含义：
+本次结论来自静态代码审阅、调用链核对、provider SSE parser/terminal state machine、native framing/framed I/O/Hello/request-session/本机 Named Pipe transport 无设备测试，没有连接 Android 设备，也没有执行真实 provider HTTP、不同用户/remote IPC 或应用退出阶段的端到端压力测试。优先级含义：
 
 - **P0**：可能造成未授权调用、错误目标写入、协议串包、并发数据竞争、启动数据破坏或退出期悬空访问，应优先处理。
 - **P1**：明显影响可靠性、审计完整性、资源边界或敏感数据安全。
@@ -34,11 +34,11 @@
 | A-15 | P2 | 未修复 | 设置草稿不完整，且无法从 UI 删除 provider key |
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
 | A-17 | P2 | 已修复 | Python MCP/legacy HTTP 已删除；Agent 与 Native IPC 共用 24-name catalog 和 adapter |
-| A-18 | P1 | 未修复 | 三类 provider 都会把缺少终止事件的截断 SSE 当成功 |
+| A-18 | P1 | 已修复 | 三类 provider 统一验证 start/terminal/malformed；截断 partial 只作为错误展示 |
 | A-19 | P0 | 已修复 | partial I/O/timeout/EOF 会 poison+close；旧 endpoint 字节不能跨 reconnect generation |
 | A-20 | P0 | 已修复 | 三端口 manager 与 request/lifecycle lease 已统一，并有真实 loopback 和故障压力测试 |
 | A-21 | P2 | 未修复 | provider context 能力未参与 token 裁剪和输出预留 |
-| A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接、工具 worker 和 Native IPC；provider 与真实环境仍缺回归测试 |
+| A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接、工具 worker、provider stream 状态机和 Native IPC；真实环境仍缺回归测试 |
 
 ## 当前未解决问题
 
@@ -244,7 +244,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 建议删除该瞬时字段，或定义明确的“最近一次决策”生命周期。
 
-### A-18：截断 SSE 被当作成功响应
+### A-18：截断 SSE 被当作成功响应（已修复）
 
 **证据**
 
@@ -257,12 +257,12 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 服务端、代理或中间网络若正常结束 HTTP/chunked body，却没有发 provider 终止事件，部分文本会被持久化为完整回答；更危险的是半截 tool arguments 可能进入校验/执行路径。即使参数最终因 JSON 无效被拒绝，错误也会被误归为模型工具参数问题，而不是截断流。
 
-**建议**
+**关闭证据**
 
-- 每个 streaming provider 明确记录“看见合法开始”和“看见合法终止”。
-- HTTP 2xx 但缺终止事件时返回 `InvalidResponse`，保留 partial content 仅供 UI 显示，不进入工具执行。
-- 公共 SSE parser 不应吞掉 provider 需要的终止语义，或应单独暴露 terminal callback。
-- 增加完整、截断、重复终止、malformed event、非 SSE 2xx body 的单测。
+- `SSEParser` 已从 `HttpClient.cpp` 提取为纯组件，不再过滤 `[DONE]`，并覆盖分片、多行 `data:`、EOF flush 与 callback exception。
+- `StreamTerminalTracker` 统一记录合法 start、terminal 和首个 malformed/schema error。Claude 要求 `message_start`/`message_stop`；OpenAI/DeepSeek 要求合法 `choices` 起始，并接受非空 `finish_reason` 或 `[DONE]`。
+- 三个 provider 在 HTTP 2xx 完成时强制验证 tracker；失败响应保留 partial message/tool calls，但 `CompletionResponse.error` 使 `ChatWindow` 在工具校验与执行前退出。
+- `native_provider_stream_terminal` 的 14 组测试覆盖完整、截断、重复终止、空 `finish_reason`、malformed、terminal-without-start、非 SSE 2xx 状态和 partial tool-call retention；Debug/Release 完整 19/19 CTest 通过。
 
 ### A-21：provider context 能力没有参与请求预算
 
@@ -286,9 +286,9 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。Debug/Release 当前各有 18 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
+仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试。Debug/Release 当前各有 19 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
 
-- 三类 provider 的 SSE/full-response parser 和终止语义。
+- 三类 provider 的真实 HTTP/TLS 与 full-response 端到端解析。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
 - config/index 损坏与错误字段类型。
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
@@ -310,6 +310,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | A-06 legacy detached handler/partial send | legacy handler 已随 HTTP server 删除；Native IPC 使用 owned/joinable handler、overlapped exact I/O、Stop event 与 `CancelIoEx` |
 | A-14 地址进制跨前端不一致 | Agent 与 Native IPC 共用 `MemJsonTools`，所有地址字段拒绝无前缀字符串并要求显式 `0x` |
 | A-17 Agent/外部控制契约分裂 | Python MCP 和 legacy HTTP 已删除；Native IPC 与 Agent 对齐 24-name catalog、共享 adapter、target policy 与 feature gate |
+| A-18 截断 SSE 被当作成功 | 公共 parser 暴露 `[DONE]`，三个 provider 统一验证 start/terminal/malformed；partial error 不进入工具执行，14 组纯测试覆盖完整与失败语义 |
 | A-19 timeout 后复用旧流导致串包 | `IWindowsSocketOps` 注入测试固定 partial send/receive、`WSAETIMEDOUT`/EOF poison+close、旧 lease 失效；迟到旧字节保留在旧 endpoint，新 generation 只读取新 endpoint |
 | A-20 connect/disconnect 与在途请求缺少互斥 | `MultiPortClientManager` 在一个 exclusive lifecycle lease 内管理三端口、状态清理和失败回滚；真实三连接 loopback、活动 request 阻塞 disconnect、单端口 poison、全端口重连与 50 轮 generation 已覆盖 |
 | Native IPC wire contract 未固定 | `IpcProtocol` 使用显式 24-byte little-endian header、精确版本与 request-id 规则、UTF-8 和 payload 硬上限；跨 polling timeout 的 partial frame 会有界保留并继续读取，partial close 仍是 protocol error；终止 Error 后做 100 ms 可取消 drain |
@@ -347,7 +348,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 1. 保持 Native IPC compile/runtime default-off；补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability。
 2. 为已落地的 poison/lifecycle gate 增加真实 Android 设备压力与恢复记录。
 3. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。
-4. 校验 provider 流式终止事件，并建立无需设备的 parser/config/state-machine 回归测试。
+4. 收敛 detached HTTP worker 生命周期，并建立真实 provider HTTP/TLS 与 full-response 回归测试。
 5. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。
 6. 增加端到端资源/context 上限和列表分页。
 7. 明确第三方 endpoint、会话明文与 provider key 删除策略。

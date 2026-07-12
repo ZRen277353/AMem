@@ -161,10 +161,10 @@ User send
 HTTP 2xx 不等于 provider stream 完整：
 
 - Claude 只有收到 `message_stop` 才是完整流。
-- OpenAI/DeepSeek 需要合法 `finish_reason` 或等价终止信号。
-- 公共 `SSEParser` 当前会过滤 `[DONE]`。
+- OpenAI/DeepSeek 需要合法的非空 `choices` 起始事件，并以非空 `finish_reason` 或 `[DONE]` 终止。
+- 公共 `SSEParser` 会把 `[DONE]` 原样交给 provider，并在 EOF flush 未闭合的最后一个事件。
 
-当前实现没有在完成回调中强制校验这些终止条件。Claude 的 `completed` 和 DeepSeek 的 `finished` 会被设置但不读取，OpenAI 不记录终止状态。因此截断的文本/tool fragments 可能被作为成功 `Completion`。修复前，不能把 2xx + connection close 当作模型完整回答。
+`StreamTerminalTracker` 记录合法 start、terminal 与首个 malformed/schema error。三个 provider 仅在 HTTP 成功且 tracker 验证通过后提交成功；截断或 malformed 流返回 `InvalidResponse`。已经收到的文本和 tool fragments 保留在错误响应中供 UI 显示，但 `ChatWindow` 在 `response.error` 分支结束处理，不会校验或执行这些 tool calls。重复 terminal（例如 `finish_reason` 后再 `[DONE]`）是幂等的。
 
 ## 5. 实际线程与生命周期模型
 
@@ -500,9 +500,9 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。连同四个静态 gate，Debug/Release 当前各有 18 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试，覆盖 SSE 分片/多行、`[DONE]`、EOF flush、callback exception、完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE 与 partial tool-call error retention。连同四个静态 gate，Debug/Release 当前各有 19 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
 
-- provider SSE/full-response 解析和完整终止验证
+- provider 真实 HTTP/TLS 与 full-response 端到端解析
 - ChatSession 通用工具配对与预算裁剪
 - config/index 损坏恢复
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
