@@ -125,6 +125,7 @@ public:
     bool scanCountSucceeds = true;
     bool scanResultsSucceed = true;
     bool scanClearSucceeds = true;
+    bool scanRemoveSucceeds = true;
     int scanReportedCount = -1;
     bool changeTargetAfterScan = false;
     bool changeGenerationAfterScan = false;
@@ -136,6 +137,7 @@ public:
     int scanCountCalls = 0;
     int scanResultPageCalls = 0;
     int scanClearCalls = 0;
+    int scanRemoveCalls = 0;
     std::optional<Mem::ScanStartRequest> lastScanStart;
     std::optional<Mem::ScanRefineRequest> lastScanRefine;
     uint64_t symbolEpochValue = 0;
@@ -389,19 +391,29 @@ public:
         }
 
         Mem::ScanExecutionBackendResult startScan(
-            const Mem::ScanStartRequest& request) override {
+            const Mem::ScanStartRequest& request,
+            const Mem::ScanProgressSink& progress) override {
             ++backend_.scanStartCalls;
             ++backend_.scanEpochValue;
             backend_.lastScanStart = request;
+            if (progress) {
+                progress(Mem::ScanProgressUpdate{
+                    0.5f, 2, 4096, 8192});
+            }
             return backend_.scanExecutionResult();
         }
 
         Mem::ScanExecutionBackendResult refineScan(
             const Mem::ScanSessionSnapshot&,
-            const Mem::ScanRefineRequest& request) override {
+            const Mem::ScanRefineRequest& request,
+            const Mem::ScanProgressSink& progress) override {
             ++backend_.scanRefineCalls;
             ++backend_.scanEpochValue;
             backend_.lastScanRefine = request;
+            if (progress) {
+                progress(Mem::ScanProgressUpdate{
+                    1.0f, 1, 8192, 8192});
+            }
             return backend_.scanExecutionResult();
         }
 
@@ -438,6 +450,26 @@ public:
                 return false;
             }
             backend_.scanResultsData.clear();
+            return true;
+        }
+
+        bool removeScanResults(
+            const std::vector<uint64_t>& addresses) override {
+            ++backend_.scanRemoveCalls;
+            ++backend_.scanEpochValue;
+            if (!backend_.scanRemoveSucceeds) {
+                return false;
+            }
+            backend_.scanResultsData.erase(
+                std::remove_if(
+                    backend_.scanResultsData.begin(),
+                    backend_.scanResultsData.end(),
+                    [&](const Mem::ScanResultItem& item) {
+                        return std::binary_search(
+                            addresses.begin(), addresses.end(),
+                            item.address);
+                    }),
+                backend_.scanResultsData.end());
             return true;
         }
 
@@ -1794,7 +1826,13 @@ void testScanSessionService() {
     startRequest.start = 0x1000;
     startRequest.end = 0x9000;
     startRequest.value = {42, 0, 0, 0};
-    const auto started = service.startScan(context, startRequest);
+    std::vector<Mem::ScanProgressUpdate> progressUpdates;
+    const auto started = service.startScan(
+        context,
+        startRequest,
+        [&](const Mem::ScanProgressUpdate& update) {
+            progressUpdates.push_back(update);
+        });
     expect(started.ok() && started.value().session.epoch == 2 &&
                started.value().session.resultCount == 3 &&
                started.value().session.target == backend.targetSnapshot() &&
@@ -1803,7 +1841,10 @@ void testScanSessionService() {
                backend.beginScanTransactionCalls == 1 &&
                backend.lastScanStart &&
                backend.lastScanStart->memoryRegion ==
-                   Mem::ScanMemoryRegion::CHeap,
+                   Mem::ScanMemoryRegion::CHeap &&
+               progressUpdates.size() == 1 &&
+               progressUpdates.front().progress == 0.5f &&
+               progressUpdates.front().scannedBytes == 4096,
            "scan start should set range and execute inside one tracked session transaction");
 
     Mem::ScanResultsRequest pageRequest;
@@ -1854,12 +1895,26 @@ void testScanSessionService() {
 
     const auto restarted = service.startScan(context, startRequest);
     expect(restarted.ok(), "scan start should replace an invalidated session");
+
+    Mem::ScanRemoveRequest removeRequest;
+    removeRequest.expectedEpoch = restarted.value().session.epoch;
+    removeRequest.addresses = {0x2000, 0x2000};
+    const auto removed = service.removeScanResults(context, removeRequest);
+    expect(removed.ok() && removed.value().requested == 1 &&
+               removed.value().previousCount == 3 &&
+               removed.value().currentCount == 2 &&
+               removed.value().previousEpoch ==
+                   restarted.value().session.epoch &&
+               removed.value().currentEpoch == backend.scanEpochValue &&
+               backend.scanRemoveCalls == 1,
+           "scan result removal must deduplicate addresses and confirm count plus epoch in one transaction");
+
     Mem::ScanClearRequest clearRequest;
-    clearRequest.expectedEpoch = restarted.value().session.epoch;
+    clearRequest.expectedEpoch = removed.value().currentEpoch;
     const auto cleared = service.clearScan(context, clearRequest);
     expect(cleared.ok() &&
                cleared.value().clearedEpoch ==
-                   restarted.value().session.epoch &&
+                   removed.value().currentEpoch &&
                backend.scanResultsData.empty() &&
                backend.scanClearCalls == 1,
            "scan clear should verify the remote result set is empty");
@@ -1888,6 +1943,18 @@ void testScanSessionService() {
     const auto pattern = unknownService.startScan(
         unknownService.captureContext(true), patternRequest);
     expect(pattern.ok(), "byte-pattern scan start should be supported");
+
+    Mem::ScanStartRequest combinedRegion = startRequest;
+    combinedRegion.memoryRegion = static_cast<Mem::ScanMemoryRegion>(
+        static_cast<int32_t>(Mem::ScanMemoryRegion::CHeap) |
+        static_cast<int32_t>(Mem::ScanMemoryRegion::CData) |
+        static_cast<int32_t>(Mem::ScanMemoryRegion::Anonymous));
+    const auto combined = unknownService.startScan(
+        unknownService.captureContext(true), combinedRegion);
+    expect(combined.ok() && unknownBackend.lastScanStart &&
+               unknownBackend.lastScanStart->memoryRegion ==
+                   combinedRegion.memoryRegion,
+           "GUI scan memory-region combinations must remain valid service requests");
 
     Mem::ScanStartRequest invalidBetween = startRequest;
     invalidBetween.mode = Mem::ScanMode::Between;

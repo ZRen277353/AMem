@@ -108,13 +108,22 @@ uint32_t scanModeFlag(ScanMode mode) {
     }
 }
 
-struct ScanCancelContext {
+struct ScanCallbackContext {
     CancellationToken cancellation;
+    const ScanProgressSink* progress = nullptr;
     bool stopIssued = false;
 };
 
-void requestScanStop(float, uint64_t, uint64_t, uint64_t, void* userData) {
-    auto* context = static_cast<ScanCancelContext*>(userData);
+void handleScanProgress(float progress,
+                        uint64_t matchCount,
+                        uint64_t scannedBytes,
+                        uint64_t totalBytes,
+                        void* userData) {
+    auto* context = static_cast<ScanCallbackContext*>(userData);
+    if (context && context->progress && *context->progress) {
+        (*context->progress)(ScanProgressUpdate{
+            progress, matchCount, scannedBytes, totalBytes});
+    }
     if (!context || context->stopIssued || !context->cancellation ||
         !context->cancellation->load(std::memory_order_acquire)) {
         return;
@@ -195,30 +204,32 @@ public:
     }
 
     ScanExecutionBackendResult startScan(
-        const ScanStartRequest& request) override {
+        const ScanStartRequest& request,
+        const ScanProgressSink& progress) override {
         if (!valid()) {
             return {};
         }
-        ScanCancelContext cancel{cancellation_, false};
+        ScanCallbackContext callbackContext{
+            cancellation_, &progress, false};
         std::vector<unsigned char> value = request.value;
         ScanExecutionIoResult io;
         if (request.kind == ScanStartKind::BytePattern) {
             io = ScanHEXValueTracked(
                 request.start, request.end, value,
-                &requestScanStop, &cancel, PORT_MAIN);
+                &handleScanProgress, &callbackContext, PORT_MAIN);
         } else if (request.kind == ScanStartKind::Unknown) {
             const uint32_t flags =
                 scanModeFlag(request.mode) |
                 scanDataTypeFlag(request.dataType);
             io = ScanFuzzyValueTracked(
-                flags, &requestScanStop, &cancel,
+                flags, &handleScanProgress, &callbackContext,
                 request.start, request.end, PORT_MAIN);
         } else {
             const uint32_t flags =
                 scanModeFlag(request.mode) |
                 scanDataTypeFlag(request.dataType);
             io = ScanValueTracked(
-                flags, value, &requestScanStop, &cancel,
+                flags, value, &handleScanProgress, &callbackContext,
                 request.start, request.end, PORT_MAIN);
         }
         return toBackendScanResult(io, cancellation_);
@@ -226,18 +237,20 @@ public:
 
     ScanExecutionBackendResult refineScan(
         const ScanSessionSnapshot& session,
-        const ScanRefineRequest& request) override {
+        const ScanRefineRequest& request,
+        const ScanProgressSink& progress) override {
         if (!valid()) {
             return {};
         }
-        ScanCancelContext cancel{cancellation_, false};
+        ScanCallbackContext callbackContext{
+            cancellation_, &progress, false};
         std::vector<unsigned char> value = request.value;
         const uint32_t flags =
             scanModeFlag(request.mode) |
             scanDataTypeFlag(session.dataType);
         const ScanExecutionIoResult io = ScanNextValueTracked(
             value, static_cast<int>(flags),
-            &requestScanStop, &cancel,
+            &handleScanProgress, &callbackContext,
             session.start, session.end, PORT_MAIN);
         return toBackendScanResult(io, cancellation_);
     }
@@ -276,6 +289,11 @@ public:
 
     bool clearScan() override {
         return valid() && ClearScanResult(PORT_MAIN);
+    }
+
+    bool removeScanResults(
+        const std::vector<uint64_t>& addresses) override {
+        return valid() && RemoveScanResult(addresses, PORT_MAIN);
     }
 
 private:

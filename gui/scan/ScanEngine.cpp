@@ -2,8 +2,8 @@
 #include "../AppContext.h"
 #include "../ColorScheme.h"
 #include "../Gui.h"
+#include "../../mem/IMemService.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -12,25 +12,6 @@
 #include <vector>
 #include <cerrno>
 #include <cstdlib>
-
-// 静态回调函数，用于扫描进度
-static void ScanProgressCallbackStatic(float progress, uint64_t matchCount, uint64_t scannedBytes, uint64_t totalBytes, void* userData)
-{
-    ScanWindow* window = static_cast<ScanWindow*>(userData);
-    if (window) {
-        window->updateScanProgress(progress, matchCount, scannedBytes, totalBytes);
-    }
-}
-
-static int GetScanResultCountForUi()
-{
-    int count = GetScanResultCount();
-    if (count < 0) {
-        Gui::log("获取扫描结果数量失败");
-        return 0;
-    }
-    return count;
-}
 
 static bool IsScanProcessRevisionCurrent(uint64_t expectedProcessRevision)
 {
@@ -44,6 +25,51 @@ static void ResetScanProgressForUi(ScanWindow* window)
     window->scanMatchCount = 0;
     window->scanScannedBytes = 0;
     window->scanTotalBytes = 0;
+}
+
+static Mem::ScanMode ToMemScanMode(int scanType)
+{
+    switch (scanType) {
+        case UNKNOW_VAL:       return Mem::ScanMode::Unknown;
+        case ACCURATE_VAL:     return Mem::ScanMode::Exact;
+        case LARGER_THAN_VAL:  return Mem::ScanMode::Greater;
+        case LESS_THAN_VAL:    return Mem::ScanMode::Less;
+        case BETWEEN_VAL:      return Mem::ScanMode::Between;
+        case ADD_UNKNOW_VAL:   return Mem::ScanMode::Increased;
+        case ADD_ACCURATE_VAL: return Mem::ScanMode::IncreasedBy;
+        case SUB_UNKNOW_VAL:   return Mem::ScanMode::Decreased;
+        case SUB_ACCURATE_VAL: return Mem::ScanMode::DecreasedBy;
+        case CHANGED_VAL:      return Mem::ScanMode::Changed;
+        case UNCHANGED_VAL:    return Mem::ScanMode::Unchanged;
+        default:               return Mem::ScanMode::Exact;
+    }
+}
+
+static Mem::ScanDataType ToMemScanDataType(int valueType)
+{
+    switch (valueType) {
+        case 0:  return Mem::ScanDataType::Byte;
+        case 1:  return Mem::ScanDataType::Word;
+        case 2:  return Mem::ScanDataType::Dword;
+        case 3:  return Mem::ScanDataType::Qword;
+        case 4:  return Mem::ScanDataType::Float;
+        case 5:  return Mem::ScanDataType::Double;
+        default: return Mem::ScanDataType::Dword;
+    }
+}
+
+static Mem::ScanMemoryRegion ToMemScanMemoryRegion(uint32_t memoryTypes)
+{
+    if (memoryTypes == static_cast<uint32_t>(MemoryType::All)) {
+        return Mem::ScanMemoryRegion::All;
+    }
+    return static_cast<Mem::ScanMemoryRegion>(static_cast<int32_t>(memoryTypes));
+}
+
+static void LogScanServiceError(const char* action, const Mem::Error& error)
+{
+    Gui::log("%s失败 [%s]: %s", action,
+             Mem::errorCodeName(error.code), error.message.c_str());
 }
 
 static bool ParseUnsignedIntegerStrict(const std::string& input, int base, uint64_t maxValue, uint64_t& value)
@@ -279,115 +305,6 @@ std::string ScanWindow::formatValueOutput(const unsigned char* data, int type)
     return oss.str();
 }
 
-void ScanWindow::performFirstScan()
-{
-    // 验证扫描参数
-    if (!validateScanParameters(true)) {
-        return;
-    }
-    
-    // 准备数值字节
-    std::vector<unsigned char> valueBytes;
-    if (!prepareValueBytes(valueBytes, true)) {
-        return;
-    }
-    
-    int currentScanType = scanType;
-    int currentValueType = valueType;
-    uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
-    uint32_t currentValueTypeFlag = getValueTypeFlag();
-    uint32_t flags = getScanTypeFlag() | currentValueTypeFlag;
-    uint32_t memoryTypeFlags = selectedMemoryTypes;
-    
-    // 设置内存类型范围
-    if (!ScanSetRange(memoryTypeFlags)) {
-        Gui::log("设置扫描范围失败");
-        return;
-    }
-    
-    // 重置进度状态
-    scanInProgress = true;
-    scanCompleted = false;
-    scanError = false;
-    scanCancelled = false;
-    activeScanType = currentScanType;
-    activeScanValueType = currentValueType;
-    scanResultValueType = currentValueType;
-    ResetScanProgressForUi(this);
-    
-    Gui::log("开始首次扫描...");
-    Gui::log("扫描类型: %s", getScanTypeName(currentScanType));
-    Gui::log("数值类型: %s", getValueTypeName(currentValueType));
-    Gui::log("内存类型标志: 0x%X", memoryTypeFlags);
-    
-    // 检查是否需要显示搜索值
-    bool needValue1 = !(scanType == UNKNOW_VAL || scanType == ADD_UNKNOW_VAL || 
-                       scanType == SUB_UNKNOW_VAL || scanType == CHANGED_VAL || 
-                       scanType == UNCHANGED_VAL);
-    bool needValue2 = (scanType == BETWEEN_VAL);
-    
-    if (needValue1) {
-        Gui::log("搜索值: %s", valueBuf);
-        if (needValue2) {
-            Gui::log("范围: %s - %s", valueBuf, value2Buf);
-        }
-    }
-    
-    // 执行扫描（带进度回调的异步调用）
-    int newResultCount = 0;
-    if (currentScanType == UNKNOW_VAL) {//模糊扫描
-        newResultCount = ScanFuzzyValueWithProgress(currentValueTypeFlag, ScanProgressCallbackStatic, this);
-    } else {//精确扫描
-        newResultCount = ScanValueWithProgress(flags, valueBytes, ScanProgressCallbackStatic, this);
-    }
-    if (!IsScanProcessRevisionCurrent(expectedProcessRevision)) {
-        scanInProgress = false;
-        return;
-    }
-    
-    scanInProgress = false;
-    scanCompleted = true;
-    
-    if (scanCancelled) {
-        Gui::log("扫描已被取消");
-        int currentResults = GetScanResultCountForUi(); // 获取当前实际结果数
-        totalScanResults = currentResults;
-        if (currentResults > 0) {
-            resultOffset = 0;  // 重置偏移量
-            loadScanResultsForRevision(expectedProcessRevision);
-        }
-    } else if (newResultCount >= 0) {
-        totalScanResults = newResultCount;
-        if (newResultCount > 0) {
-            Gui::log("首次扫描完成，找到 %d 个结果", newResultCount);
-            resultOffset = 0;  // 重置偏移量
-            loadScanResultsForRevision(expectedProcessRevision);
-        } else {
-            Gui::log("扫描完成，未找到匹配结果");
-            if (selectedMemoryTypes == 0) {
-                Gui::log("警告: 未选择任何内存类型");
-            }
-            // 清空显示的结果
-            {
-                std::lock_guard<std::mutex> lock(scanResultsMutex);
-                scanResults.clear();
-                selectedScanResults.clear();
-            }
-            resultOffset = 0;
-        }
-    } else {
-        scanError = true;
-        Gui::log("扫描过程中发生错误");
-        totalScanResults = 0;
-        {
-            std::lock_guard<std::mutex> lock(scanResultsMutex);
-            scanResults.clear();
-            selectedScanResults.clear();
-        }
-        resultOffset = 0;
-    }
-}
-
 // 异步版本的首次扫描
 void ScanWindow::performFirstScanAsync()
 {
@@ -412,18 +329,26 @@ void ScanWindow::performFirstScanAsync()
         return;
     }
     
-    int currentScanType = scanType;
-    int currentValueType = valueType;
-    uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
-    uint32_t currentValueTypeFlag = getValueTypeFlag();
-    uint32_t flags = getScanTypeFlag() | currentValueTypeFlag;
-    uint32_t memoryTypeFlags = selectedMemoryTypes;
-    
-    // 设置内存类型范围
-    if (!ScanSetRange(memoryTypeFlags)) {
-        Gui::log("设置扫描范围失败");
+    const int currentScanType = scanType;
+    const int currentValueType = valueType;
+    const uint32_t memoryTypeFlags = selectedMemoryTypes;
+    Mem::ScanStartRequest request;
+    request.kind = currentScanType == UNKNOW_VAL
+        ? Mem::ScanStartKind::Unknown
+        : Mem::ScanStartKind::Value;
+    request.dataType = ToMemScanDataType(currentValueType);
+    request.mode = ToMemScanMode(currentScanType);
+    request.memoryRegion = ToMemScanMemoryRegion(memoryTypeFlags);
+    request.value = std::move(valueBytes);
+
+    Mem::OperationContext context = memService_.captureContext(true);
+    if (!context.target) {
+        Gui::log("首次扫描失败: 当前进程目标不可用");
         return;
     }
+    const uint64_t expectedProcessRevision = context.target->processRevision;
+    scanCancellation_ = std::make_shared<std::atomic<bool>>(false);
+    context.cancellation = scanCancellation_;
     
     // 重置进度状态
     scanInProgress = true;
@@ -440,146 +365,57 @@ void ScanWindow::performFirstScanAsync()
     Gui::log("数值类型: %s", getValueTypeName(currentValueType));
     Gui::log("内存类型标志: 0x%X", memoryTypeFlags);
     
-    // 启动异步扫描线程
-    scanThread.launch([this, flags, valueBytes, currentScanType, currentValueType, currentValueTypeFlag, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) mutable {
-        int newResultCount = 0;
-        
-        // 执行扫描（带进度回调）
-        if (currentScanType == UNKNOW_VAL) {
-            newResultCount = ScanFuzzyValueWithProgress(currentValueTypeFlag, ScanProgressCallbackStatic, this);
-        } else {
-            // lambda 内部的 valueBytes 现在是可变的
-            newResultCount = ScanValueWithProgress(flags, valueBytes, ScanProgressCallbackStatic, this);
-        }
+    scanThread.launch([this, context, request, currentValueType, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) {
+        const auto response = memService_.startScan(
+            context, request,
+            [this](const Mem::ScanProgressUpdate& update) {
+                updateScanProgress(update.progress, update.matchCount,
+                                   update.scannedBytes, update.totalBytes);
+            });
         if (!IsScanProcessRevisionCurrent(expectedProcessRevision)) {
             scanInProgress = false;
             return;
         }
-        
-        // 扫描完成，更新状态
-        scanInProgress = false;
-        scanCompleted = true;
-        
-        if (scanCancelled) {
-            Gui::log("扫描已被取消");
-            int currentResults = GetScanResultCountForUi();
-            totalScanResults = currentResults;
-            if (currentResults > 0) {
-                scanResultValueType = currentValueType;
-                resultOffset = 0;  // 重置偏移量
-                loadScanResultsForRevision(expectedProcessRevision);
-            }
-        } else if (newResultCount >= 0) {
-            totalScanResults = newResultCount;
-            if (newResultCount > 0) {
-                Gui::log("首次扫描完成，找到 %d 个结果", newResultCount);
-                scanResultValueType = currentValueType;
-                resultOffset = 0;  // 重置偏移量
-                loadScanResultsForRevision(expectedProcessRevision);
-            } else {
-                Gui::log("扫描完成，未找到匹配结果");
-                std::lock_guard<std::mutex> lock(scanResultsMutex);
-                scanResults.clear();
-                selectedScanResults.clear();
-                resultOffset = 0;
-            }
-        } else {
-            scanError = true;
-            Gui::log("扫描过程中发生错误");
-            totalScanResults = 0;
-            std::lock_guard<std::mutex> lock(scanResultsMutex);
-            scanResults.clear();
-            selectedScanResults.clear();
-            resultOffset = 0;
-        }
-    });
-}
 
-void ScanWindow::performNextScan()
-{
-    // 验证扫描参数
-    if (!validateScanParameters(false)) {
-        return;
-    }
-    
-    // 准备数值字节
-    std::vector<unsigned char> valueBytes;
-    if (!prepareValueBytes(valueBytes, false)) {
-        return;
-    }
-    
-    int currentScanType = scanType;
-    int currentValueType = valueType;
-    uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
-    uint32_t flags = getScanTypeFlag() | getValueTypeFlag();
-    
-    // 重置进度状态
-    scanInProgress = true;
-    scanCompleted = false;
-    scanError = false;
-    scanCancelled = false;
-    activeScanType = currentScanType;
-    activeScanValueType = currentValueType;
-    scanResultValueType = currentValueType;
-    ResetScanProgressForUi(this);
-    
-    Gui::log("开始再次扫描...");
-    Gui::log("扫描类型: %s", getScanTypeName(currentScanType));
-    Gui::log("数值类型: %s", getValueTypeName(currentValueType));
-    Gui::log("当前结果数: %d", totalScanResults.load());
-    
-    // 检查是否需要显示搜索值
-    bool needValue1 = !(scanType == ADD_UNKNOW_VAL || scanType == SUB_UNKNOW_VAL || 
-                       scanType == CHANGED_VAL || scanType == UNCHANGED_VAL);
-    bool needValue2 = (scanType == BETWEEN_VAL);
-    
-    if (needValue1) {
-        Gui::log("搜索值: %s", valueBuf);
-        if (needValue2) {
-            Gui::log("范围: %s - %s", valueBuf, value2Buf);
-        }
-    }
-    
-    // 执行再次扫描（带进度回调的异步调用）
-    int newResultCount = ScanNextValueWithProgress(valueBytes, flags, ScanProgressCallbackStatic, this);
-    if (!IsScanProcessRevisionCurrent(expectedProcessRevision)) {
-        scanInProgress = false;
-        return;
-    }
-    
-    scanInProgress = false;
-    scanCompleted = true;
-    
-    if (scanCancelled) {
-        Gui::log("扫描已被取消");
-        int currentResults = GetScanResultCountForUi(); // 获取当前实际结果数
-        totalScanResults = currentResults;
-        if (currentResults > 0) {
-            scanResultValueType = currentValueType;
-            resultOffset = 0;  // 重置偏移量
-            loadScanResultsForRevision(expectedProcessRevision);
-        }
-    } else if (newResultCount >= 0) {
-        totalScanResults = newResultCount;
-        if (newResultCount > 0) {
-            Gui::log("再次扫描完成，找到 %d 个结果", newResultCount);
-            scanResultValueType = currentValueType;
-            resultOffset = 0;  // 重置偏移量
-            loadScanResultsForRevision(expectedProcessRevision);
-        } else {
-            Gui::log("扫描完成，未找到匹配结果");
-            // 清空显示的结果
+        if (!response.ok()) {
+            scanError = true;
+            scanCompleted = false;
+            scanEpoch = 0;
+            totalScanResults = 0;
+            resultOffset = 0;
             {
                 std::lock_guard<std::mutex> lock(scanResultsMutex);
                 scanResults.clear();
                 selectedScanResults.clear();
             }
-            resultOffset = 0;
+            LogScanServiceError("首次扫描", response.error());
+            scanInProgress = false;
+            return;
         }
-    } else {
-        scanError = true;
-        Gui::log("扫描过程中发生错误");
-    }
+
+        const auto& summary = response.value();
+        scanEpoch = summary.session.epoch;
+        totalScanResults = static_cast<int>(summary.session.resultCount);
+        scanResultValueType = currentValueType;
+        resultOffset = 0;
+        scanCancelled = summary.completedAfterCancelRequest;
+        scanCompleted = true;
+        if (summary.completedAfterCancelRequest) {
+            Gui::log("停止请求发出后扫描仍返回了已确认结果，共 %d 个",
+                     totalScanResults.load());
+        } else {
+            Gui::log("首次扫描完成，找到 %d 个结果", totalScanResults.load());
+        }
+
+        if (totalScanResults.load() > 0) {
+            loadScanResultsForRevision(expectedProcessRevision);
+        } else {
+            std::lock_guard<std::mutex> lock(scanResultsMutex);
+            scanResults.clear();
+            selectedScanResults.clear();
+        }
+        scanInProgress = false;
+    });
 }
 
 // 异步版本的再次扫描
@@ -606,10 +442,22 @@ void ScanWindow::performNextScanAsync()
         return;
     }
     
-    uint32_t flags = getScanTypeFlag() | getValueTypeFlag();
-    int currentScanType = scanType;
-    int currentValueType = valueType;
-    uint64_t expectedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
+    const int currentScanType = scanType;
+    const int currentValueType = valueType;
+    Mem::ScanRefineRequest request;
+    request.expectedEpoch = scanEpoch.load();
+    request.dataType = ToMemScanDataType(currentValueType);
+    request.mode = ToMemScanMode(currentScanType);
+    request.value = std::move(valueBytes);
+
+    Mem::OperationContext context = memService_.captureContext(true);
+    if (!context.target) {
+        Gui::log("再次扫描失败: 当前进程目标不可用");
+        return;
+    }
+    const uint64_t expectedProcessRevision = context.target->processRevision;
+    scanCancellation_ = std::make_shared<std::atomic<bool>>(false);
+    context.cancellation = scanCancellation_;
     
     // 重置进度状态
     scanInProgress = true;
@@ -626,47 +474,57 @@ void ScanWindow::performNextScanAsync()
     Gui::log("数值类型: %s", getValueTypeName(currentValueType));
     Gui::log("当前结果数: %d", totalScanResults.load());
     
-    // 启动异步扫描线程
-    scanThread.launch([this, flags, valueBytes, currentValueType, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) mutable {
-        // 执行再次扫描（带进度回调）
-        // lambda 内部的 valueBytes 现在是可变的
-        int newResultCount = ScanNextValueWithProgress(valueBytes, flags, ScanProgressCallbackStatic, this);
+    scanThread.launch([this, context, request, currentValueType, expectedProcessRevision](const std::atomic<bool>& /*cancel*/) {
+        const auto response = memService_.refineScan(
+            context, request,
+            [this](const Mem::ScanProgressUpdate& update) {
+                updateScanProgress(update.progress, update.matchCount,
+                                   update.scannedBytes, update.totalBytes);
+            });
         if (!IsScanProcessRevisionCurrent(expectedProcessRevision)) {
             scanInProgress = false;
             return;
         }
-        
-        // 扫描完成，更新状态
-        scanInProgress = false;
-        scanCompleted = true;
-        
-        if (scanCancelled) {
-            Gui::log("扫描已被取消");
-            int currentResults = GetScanResultCountForUi();
-            totalScanResults = currentResults;
-            if (currentResults > 0) {
-                scanResultValueType = currentValueType;
-                resultOffset = 0;  // 重置偏移量
-                loadScanResultsForRevision(expectedProcessRevision);
-            }
-        } else if (newResultCount >= 0) {
-            totalScanResults = newResultCount;
-            if (newResultCount > 0) {
-                Gui::log("再次扫描完成，找到 %d 个结果", newResultCount);
-                scanResultValueType = currentValueType;
-                resultOffset = 0;  // 重置偏移量
-                loadScanResultsForRevision(expectedProcessRevision);
-            } else {
-                Gui::log("扫描完成，未找到匹配结果");
+
+        if (!response.ok()) {
+            scanError = true;
+            scanCompleted = false;
+            if (response.error().code != Mem::ErrorCode::CancelRequested &&
+                response.error().code != Mem::ErrorCode::InvalidArgument) {
+                scanEpoch = 0;
+                totalScanResults = 0;
+                resultOffset = 0;
                 std::lock_guard<std::mutex> lock(scanResultsMutex);
                 scanResults.clear();
                 selectedScanResults.clear();
-                resultOffset = 0;
             }
-        } else {
-            scanError = true;
-            Gui::log("扫描过程中发生错误");
+            LogScanServiceError("再次扫描", response.error());
+            scanInProgress = false;
+            return;
         }
+
+        const auto& summary = response.value();
+        scanEpoch = summary.session.epoch;
+        totalScanResults = static_cast<int>(summary.session.resultCount);
+        scanResultValueType = currentValueType;
+        resultOffset = 0;
+        scanCancelled = summary.completedAfterCancelRequest;
+        scanCompleted = true;
+        if (summary.completedAfterCancelRequest) {
+            Gui::log("停止请求发出后再次扫描仍返回了已确认结果，共 %d 个",
+                     totalScanResults.load());
+        } else {
+            Gui::log("再次扫描完成，找到 %d 个结果", totalScanResults.load());
+        }
+
+        if (totalScanResults.load() > 0) {
+            loadScanResultsForRevision(expectedProcessRevision);
+        } else {
+            std::lock_guard<std::mutex> lock(scanResultsMutex);
+            scanResults.clear();
+            selectedScanResults.clear();
+        }
+        scanInProgress = false;
     });
 }
 
@@ -675,9 +533,14 @@ void ScanWindow::performNewScan()
     scanResultsRefreshThread.stop();
     addressListRefreshThread.stop();
 
-    // 清除之前的扫描结果
-    if (!ClearScanResult()) {
-        Gui::log("清除扫描结果失败");
+    Mem::ScanClearRequest request;
+    request.expectedEpoch = scanEpoch.load();
+    const auto response = memService_.clearScan(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        LogScanServiceError("清除扫描结果", response.error());
+    } else {
+        Gui::log("已清除扫描结果");
     }
     
     {
@@ -688,6 +551,7 @@ void ScanWindow::performNewScan()
     
     totalScanResults = 0;
     resultOffset = 0;
+    scanEpoch = 0;
     scanResultValueType = valueType;
     
     // 重置进度状态
@@ -696,7 +560,7 @@ void ScanWindow::performNewScan()
     scanError = false;
     scanCancelled = false;
     
-    Gui::log("已清除扫描结果，准备新建扫描");
+    Gui::log("本地扫描状态已重置，可以开始新扫描");
 }
 
 
@@ -739,7 +603,8 @@ bool ScanWindow::validateScanParameters(bool isFirstScan)
     
     // 验证扫描类型的有效性
     if (isFirstScan) {
-        if (scanType == ADD_UNKNOW_VAL || scanType == SUB_UNKNOW_VAL || 
+        if (scanType == ADD_UNKNOW_VAL || scanType == ADD_ACCURATE_VAL ||
+            scanType == SUB_UNKNOW_VAL || scanType == SUB_ACCURATE_VAL ||
             scanType == CHANGED_VAL || scanType == UNCHANGED_VAL) {
             Gui::log("错误: '%s' 只能在再次扫描中使用，请先进行未知初始值或精确数值扫描", getScanTypeName(scanType));
             return false;
@@ -984,37 +849,6 @@ std::string ScanWindow::formatScanResultValueHex(uint64_t value, int type)
     }
 
     return oss.str();
-}
-
-uint32_t ScanWindow::getScanTypeFlag()
-{
-    switch (scanType) {
-        case UNKNOW_VAL: return _UNKNOW_VAL;
-        case ACCURATE_VAL: return _ACCURATE_VAL;
-        case LARGER_THAN_VAL: return _LARGER_THAN_VAL;
-        case LESS_THAN_VAL: return _LESS_THAN_VAL;
-        case BETWEEN_VAL: return _BETWEEN_VAL;
-        case ADD_UNKNOW_VAL: return _ADD_UNKNOW_VAL;
-        case ADD_ACCURATE_VAL: return _ADD_ACCURATE_VAL;
-        case SUB_UNKNOW_VAL: return _SUB_UNKNOW_VAL;
-        case SUB_ACCURATE_VAL: return _SUB_ACCURATE_VAL;
-        case CHANGED_VAL: return _CHANGED_VAL;
-        case UNCHANGED_VAL: return _UNCHANGED_VAL;
-        default: return _ACCURATE_VAL;
-    }
-}
-
-uint32_t ScanWindow::getValueTypeFlag()
-{
-    switch (valueType) {
-        case 0: return BYTE_;      // 1字节
-        case 1: return WORD_;      // 2字节
-        case 2: return DWORD_;     // 4字节
-        case 3: return QWORD_;     // 8字节
-        case 4: return FLOAT_;     // 单精度浮点
-        case 5: return DOUBLE_;    // 双精度浮点
-        default: return DWORD_;
-    }
 }
 
 uint32_t ScanWindow::getValueTypeSize()

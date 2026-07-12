@@ -2,6 +2,7 @@
 #include "../AppContext.h"
 #include "../ColorScheme.h"
 #include "../Gui.h"
+#include "../../mem/IMemService.h"
 #include "../../imgui/imgui.h"
 #include "../../socket/client_singleton.h"
 #include <algorithm>
@@ -480,51 +481,69 @@ void ScanWindow::loadScanResultsForRevision(uint64_t expectedProcessRevision)
         resultOffset = offset;
     }
 
-    int remaining = totalResults - offset;
-    int count = resultPageSize < remaining ? resultPageSize : remaining;
-    if (count <= 0) return;  // 防止无效的count值
+    const int remaining = totalResults - offset;
+    const int count = resultPageSize < remaining ? resultPageSize : remaining;
+    if (count <= 0) return;
 
-    std::vector<std::pair<uint64_t, uint64_t>> rawResults;
-    // 不预先resize，让GetScanResult根据实际返回的数量来设置大小
-    // rawResults.clear();
-    rawResults.reserve(count);
-    Gui::log("loadScanResults: resultOffset %d, count %d", offset, count);
-
-    if (GetScanResult(offset, count, rawResults)) {
-        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
-            return;
+    const uint64_t expectedScanEpoch = scanEpoch.load();
+    Mem::ScanResultsRequest request;
+    request.expectedEpoch = expectedScanEpoch;
+    request.offset = static_cast<size_t>(offset);
+    request.limit = static_cast<size_t>(count);
+    const auto response = memService_.scanResults(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        Gui::log("加载扫描结果失败 [%s]: %s",
+                 Mem::errorCodeName(response.error().code),
+                 response.error().message.c_str());
+        if (response.error().code == Mem::ErrorCode::ScanSessionChanged ||
+            response.error().code == Mem::ErrorCode::NoScanSession) {
+            scanEpoch = 0;
+            totalScanResults = 0;
+            resultOffset = 0;
+            std::lock_guard<std::mutex> lock(scanResultsMutex);
+            scanResults.clear();
+            selectedScanResults.clear();
         }
-        // 使用互斥锁保护，因为此函数可能从扫描线程中调用
-        std::lock_guard<std::mutex> lock(scanResultsMutex);
-        if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
-            return;
-        }
-
-        scanResults.clear();
-        scanResults.reserve(rawResults.size());
-
-        for (const auto& result : rawResults) {
-            ScanResultItem item;
-            item.address = result.first;
-            item.value = result.second; // 保持原始值
-            item.previousValue = result.second;  // 初始化previousValue，避免首次刷新误报变化
-            item.valueChanged = false;
-            item.changeTime = 0.0f;
-
-            // 根据数值类型正确截断和格式化数据
-            item.valueStr = formatScanResultValue(result.second, scanResultValueType.load());
-            scanResults.push_back(item);
-        }
-
-        // 重置选择状态
-        selectedScanResults.clear();
-        selectedScanResults.resize(scanResults.size(), 0);
-        sortScanResultsForDisplay();
-
-        Gui::log("已加载 %d 个扫描结果 (偏移: %d)", (int)scanResults.size(), offset);
-    } else {
-        Gui::log("加载扫描结果失败");
+        return;
     }
+
+    const auto& page = response.value();
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) !=
+            expectedProcessRevision ||
+        page.session.target.processRevision != expectedProcessRevision ||
+        scanEpoch.load() != expectedScanEpoch) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(scanResultsMutex);
+    if (AppContext::Get().processRevision.load(std::memory_order_acquire) !=
+            expectedProcessRevision ||
+        scanEpoch.load() != expectedScanEpoch) {
+        return;
+    }
+
+    totalScanResults = static_cast<int>(page.total);
+    scanEpoch = page.session.epoch;
+    resultOffset = static_cast<int>(page.offset);
+    scanResults.clear();
+    scanResults.reserve(page.items.size());
+    for (const auto& result : page.items) {
+        ScanResultItem item;
+        item.address = result.address;
+        item.value = result.value;
+        item.previousValue = result.value;
+        item.valueChanged = false;
+        item.changeTime = 0.0f;
+        item.valueStr = formatScanResultValue(
+            result.value, scanResultValueType.load());
+        scanResults.push_back(std::move(item));
+    }
+
+    selectedScanResults.assign(scanResults.size(), 0);
+    sortScanResultsForDisplay();
+    Gui::log("已加载 %d 个扫描结果 (偏移: %d)",
+             static_cast<int>(scanResults.size()), resultOffset.load());
 }
 
 void ScanWindow::refreshScanResultsValues(int refreshValueType, bool warnLargePage)

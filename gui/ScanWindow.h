@@ -2,6 +2,7 @@
 
 #include "Window.h"
 #include "MemoryTypes.h"
+#include "../mem/MemTypes.h"
 #include "../utils/ScopedThread.h"
 #include <vector>
 #include <string>
@@ -10,9 +11,13 @@
 #include <atomic>
 #include <functional>
 
+namespace Mem {
+class IMemService;
+}
+
 class ScanWindow : public Window {
 public:
-    ScanWindow();
+    explicit ScanWindow(Mem::IMemService& memService);
     ~ScanWindow();
     unsigned int getWindowFlags() const override;
 
@@ -42,6 +47,7 @@ public:
     std::atomic<int> totalScanResults{0};
     std::atomic<bool> scanCompleted{false};
     std::atomic<bool> scanError{false};
+    std::atomic<uint64_t> scanEpoch{0};
 
     // 结果分页
     std::atomic<int> resultOffset{0};
@@ -91,6 +97,8 @@ public:
     void updateScanProgress(float progress, uint64_t matchCount, uint64_t scannedBytes, uint64_t totalBytes);
 
 private:
+    Mem::IMemService& memService_;
+    Mem::CancellationToken scanCancellation_;
     void drawScanPanel();
     void drawResultsPanel();
     void drawAddressListPanel();
@@ -100,11 +108,10 @@ private:
     void resetProcessState();
 
     // 扫描功能
-    void performFirstScan();
     void performFirstScanAsync();
-    void performNextScan();
     void performNextScanAsync();
     void performNewScan();
+    void requestScanCancellation();
     void loadScanResults();
     void loadScanResultsForRevision(uint64_t expectedProcessRevision);
     void refreshAddressValues();
@@ -128,8 +135,6 @@ private:
     std::string formatValueOutput(const unsigned char* data, int type);
     std::string formatScanResultValue(uint64_t value, int type);
     std::string formatScanResultValueHex(uint64_t value, int type);
-    uint32_t getScanTypeFlag();
-    uint32_t getValueTypeFlag();
     uint32_t getValueTypeSize();
     const char* getScanTypeName(int scanType) const;
     const char* getValueTypeName(int valueType) const;

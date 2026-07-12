@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -404,6 +405,29 @@ struct ScanExecutionBackendResult {
     bool cancelRequested = false;
 };
 
+struct ScanProgressUpdate {
+    float progress = 0.0f;
+    uint64_t matchCount = 0;
+    uint64_t scannedBytes = 0;
+    uint64_t totalBytes = 0;
+};
+
+using ScanProgressSink = std::function<void(const ScanProgressUpdate&)>;
+
+struct ScanRemoveRequest {
+    std::optional<uint64_t> expectedEpoch;
+    std::vector<uint64_t> addresses;
+};
+
+struct ScanRemoveResult {
+    uint64_t previousEpoch = 0;
+    uint64_t currentEpoch = 0;
+    size_t requested = 0;
+    size_t previousCount = 0;
+    size_t currentCount = 0;
+    TargetSnapshot target;
+};
+
 struct MemoryReadRequest {
     uint64_t address = 0;
     uint32_t size = 0;
@@ -489,6 +513,7 @@ inline constexpr size_t kMaxBreakpointHitCount = 100000;
 inline constexpr size_t kMaxScanValueBytes = 4096;
 inline constexpr size_t kMaxScanResultPageSize = 1000;
 inline constexpr size_t kMaxScanResultCount = 5000000;
+inline constexpr size_t kMaxScanResultRemovalCount = 100000;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
 inline constexpr size_t kMaxDriverCardBytes = 4096;
 inline constexpr size_t kMaxScalarTypeNameBytes = 64;

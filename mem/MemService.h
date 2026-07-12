@@ -62,16 +62,21 @@ public:
         const BreakpointHitBatchRequest& request) override;
     Result<ScanSummary> startScan(
         const OperationContext& context,
-        const ScanStartRequest& request) override;
+        const ScanStartRequest& request,
+        const ScanProgressSink& progress = {}) override;
     Result<ScanSummary> refineScan(
         const OperationContext& context,
-        const ScanRefineRequest& request) override;
+        const ScanRefineRequest& request,
+        const ScanProgressSink& progress = {}) override;
     Result<ScanResultPage> scanResults(
         const OperationContext& context,
         const ScanResultsRequest& request) override;
     Result<ScanClearResult> clearScan(
         const OperationContext& context,
         const ScanClearRequest& request) override;
+    Result<ScanRemoveResult> removeScanResults(
+        const OperationContext& context,
+        const ScanRemoveRequest& request) override;
     Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) override;

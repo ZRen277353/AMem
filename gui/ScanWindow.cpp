@@ -5,7 +5,7 @@
 #include "EventBus.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
@@ -13,7 +13,8 @@
 #include <vector>
 
 
-ScanWindow::ScanWindow()
+ScanWindow::ScanWindow(Mem::IMemService& memService)
+    : memService_(memService)
 {
     name = "数值扫描";
     observedProcessRevision = AppContext::Get().processRevision.load(std::memory_order_acquire);
@@ -26,20 +27,23 @@ unsigned int ScanWindow::getWindowFlags() const
 
 ScanWindow::~ScanWindow()
 {
-    // ScopedThread 析构时自动 requestStop + join
-    // 但扫描线程依赖 scanCancelled 标志来中断服务端操作
+    requestScanCancellation();
+    scanThread.stop();
+    scanResultsRefreshThread.stop();
+    addressListRefreshThread.stop();
+}
+
+void ScanWindow::requestScanCancellation()
+{
     scanCancelled = true;
-    if (scanInProgress) {
-        StopSearchScan(PORT_DEBUG);
+    if (scanCancellation_) {
+        scanCancellation_->store(true, std::memory_order_release);
     }
 }
 
 void ScanWindow::resetProcessState()
 {
-    scanCancelled = true;
-    if (scanInProgress) {
-        StopSearchScan(PORT_DEBUG);
-    }
+    requestScanCancellation();
     scanThread.stop();
     scanResultsRefreshThread.stop();
     addressListRefreshThread.stop();
@@ -59,7 +63,9 @@ void ScanWindow::resetProcessState()
     scanCompleted = false;
     scanError = false;
     scanCancelled = false;
+    scanCancellation_.reset();
     scanInProgress = false;
+    scanEpoch = 0;
     scanResultsRefreshProgress = 0;
     scanResultsRefreshTotal = 0;
     addressListRefreshProgress = 0;

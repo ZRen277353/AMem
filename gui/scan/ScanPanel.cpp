@@ -2,10 +2,11 @@
 #include "../AppContext.h"
 #include "../ColorScheme.h"
 #include "../Gui.h"
+#include "../../mem/IMemService.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <cstring>
 #include <cstdint>
+#include <utility>
 
 void ScanWindow::drawScanRangeSettings()
 {
@@ -140,19 +141,14 @@ void ScanWindow::drawScanProgressBar()
         // 取消扫描按钮
         ImGui::Spacing();
         if (ImGui::Button("取消扫描", ImVec2(-1, 0))) {
-            scanCancelled = true;
-            // 使用 PORT_DEBUG 端口发送取消命令到服务端
-            if (StopSearchScan(PORT_DEBUG)) {
-                Gui::log("用户取消了扫描，已发送停止命令到服务端");
-            } else {
-                Gui::log("用户取消了扫描，但发送停止命令失败（将等待本地线程结束）");
-            }
+            requestScanCancellation();
+            Gui::log("已请求停止扫描，等待服务端返回终态");
         }
     } else if (scanCompleted) {
         // 显示扫描完成状态
         ImGui::Separator();
         if (scanCancelled) {
-            ImGui::TextColored(ColorScheme::WarningBright, "扫描已取消");
+            ImGui::TextColored(ColorScheme::WarningBright, "停止请求后已收到扫描终态");
         } else {
             ImGui::TextColored(ColorScheme::SuccessBright, "扫描已完成");
         }
@@ -170,7 +166,7 @@ void ScanWindow::drawScanProgressBar()
             }
         } else {
             if (scanCancelled) {
-                ImGui::TextColored(ColorScheme::WarningBright, "扫描被中断");
+                ImGui::TextColored(ColorScheme::WarningBright, "停止请求后结果已确认");
             } else {
                 ImGui::TextColored(ColorScheme::WarningBright, "未找到匹配结果");
             }
@@ -355,16 +351,7 @@ void ScanWindow::drawScanPanel()
             ImGui::BeginDisabled();
         }
         if (ImGui::Button("清空结果", ImVec2(-1, 0))) {
-            if (ClearScanResult()) {
-                std::lock_guard<std::mutex> lock(scanResultsMutex);
-                scanResults.clear();
-                selectedScanResults.clear();
-                totalScanResults = 0;
-                resultOffset = 0;
-                Gui::log("已清空所有扫描结果");
-            } else {
-                Gui::log("清空扫描结果失败");
-            }
+            performNewScan();
         }
         if (scanInProgress) {
             ImGui::EndDisabled();
@@ -380,6 +367,9 @@ void ScanWindow::drawScanPanel()
         }
 
         if (selectedCount > 0) {
+            if (scanInProgress) {
+                ImGui::BeginDisabled();
+            }
             if (ImGui::Button("移除选中", ImVec2(-1, 0))) {
                 std::vector<uint64_t> addressesToRemove;
                 {
@@ -391,18 +381,41 @@ void ScanWindow::drawScanPanel()
                     }
                 }
 
-                if (!addressesToRemove.empty() && RemoveScanResult(addressesToRemove)) {
-                    Gui::log("已移除 %d 个结果", (int)addressesToRemove.size());
-                    // 更新总结果数
-                    int updatedCount = GetScanResultCount();
-                    if (updatedCount < 0) {
-                        Gui::log("获取扫描结果数量失败");
+                if (!addressesToRemove.empty()) {
+                    Mem::ScanRemoveRequest request;
+                    request.expectedEpoch = scanEpoch.load();
+                    request.addresses = std::move(addressesToRemove);
+                    const auto response = memService_.removeScanResults(
+                        memService_.captureContext(true), request);
+                    if (response.ok()) {
+                        scanEpoch = response.value().currentEpoch;
+                        totalScanResults = static_cast<int>(response.value().currentCount);
+                        Gui::log("已移除 %d 个结果，剩余 %d 个",
+                                 static_cast<int>(response.value().previousCount -
+                                                  response.value().currentCount),
+                                 totalScanResults.load());
+                        if (totalScanResults.load() > 0) {
+                            loadScanResults();
+                        } else {
+                            std::lock_guard<std::mutex> lock(scanResultsMutex);
+                            scanResults.clear();
+                            selectedScanResults.clear();
+                            resultOffset = 0;
+                        }
                     } else {
-                        totalScanResults = updatedCount;
-                        loadScanResults(); // 重新加载结果
+                        Gui::log("移除扫描结果失败 [%s]: %s",
+                                 Mem::errorCodeName(response.error().code),
+                                 response.error().message.c_str());
+                        if (response.error().code == Mem::ErrorCode::ScanSessionChanged ||
+                            response.error().code == Mem::ErrorCode::NoScanSession) {
+                            scanEpoch = 0;
+                            totalScanResults = 0;
+                            resultOffset = 0;
+                            std::lock_guard<std::mutex> lock(scanResultsMutex);
+                            scanResults.clear();
+                            selectedScanResults.clear();
+                        }
                     }
-                } else {
-                    Gui::log("移除结果失败");
                 }
 
                 // 清空选择状态
@@ -410,6 +423,9 @@ void ScanWindow::drawScanPanel()
                     std::lock_guard<std::mutex> lock(scanResultsMutex);
                     std::fill(selectedScanResults.begin(), selectedScanResults.end(), 0);
                 }
+            }
+            if (scanInProgress) {
+                ImGui::EndDisabled();
             }
         }
 
@@ -447,8 +463,14 @@ void ScanWindow::drawScanPanel()
         }
 
         // 结果操作按钮
+        if (scanInProgress) {
+            ImGui::BeginDisabled();
+        }
         if (ImGui::Button("加载结果", ImVec2(-1, 0))) {
             loadScanResults();
+        }
+        if (scanInProgress) {
+            ImGui::EndDisabled();
         }
 
         if (ImGui::Button("导出结果", ImVec2(-1, 0))) {

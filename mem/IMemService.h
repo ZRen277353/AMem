@@ -58,16 +58,21 @@ public:
         const BreakpointHitBatchRequest& request) = 0;
     virtual Result<ScanSummary> startScan(
         const OperationContext& context,
-        const ScanStartRequest& request) = 0;
+        const ScanStartRequest& request,
+        const ScanProgressSink& progress = {}) = 0;
     virtual Result<ScanSummary> refineScan(
         const OperationContext& context,
-        const ScanRefineRequest& request) = 0;
+        const ScanRefineRequest& request,
+        const ScanProgressSink& progress = {}) = 0;
     virtual Result<ScanResultPage> scanResults(
         const OperationContext& context,
         const ScanResultsRequest& request) = 0;
     virtual Result<ScanClearResult> clearScan(
         const OperationContext& context,
         const ScanClearRequest& request) = 0;
+    virtual Result<ScanRemoveResult> removeScanResults(
+        const OperationContext& context,
+        const ScanRemoveRequest& request) = 0;
     virtual Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) = 0;

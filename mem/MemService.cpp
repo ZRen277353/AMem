@@ -189,26 +189,26 @@ size_t scanDataTypeSize(ScanDataType type) {
 }
 
 bool isValidScanMemoryRegion(ScanMemoryRegion region) {
-    switch (region) {
-        case ScanMemoryRegion::All:
-        case ScanMemoryRegion::Anonymous:
-        case ScanMemoryRegion::CAlloc:
-        case ScanMemoryRegion::CHeap:
-        case ScanMemoryRegion::CData:
-        case ScanMemoryRegion::CBss:
-        case ScanMemoryRegion::JavaHeap:
-        case ScanMemoryRegion::Java:
-        case ScanMemoryRegion::Stack:
-        case ScanMemoryRegion::Video:
-        case ScanMemoryRegion::CodeApp:
-        case ScanMemoryRegion::CodeSystem:
-        case ScanMemoryRegion::Ashmem:
-        case ScanMemoryRegion::Bad:
-        case ScanMemoryRegion::Other:
-            return true;
-        default:
-            return false;
+    const int32_t raw = static_cast<int32_t>(region);
+    if (region == ScanMemoryRegion::All ||
+        region == ScanMemoryRegion::Other) {
+        return true;
     }
+    constexpr int32_t allowed =
+        static_cast<int32_t>(ScanMemoryRegion::Anonymous) |
+        static_cast<int32_t>(ScanMemoryRegion::CAlloc) |
+        static_cast<int32_t>(ScanMemoryRegion::CHeap) |
+        static_cast<int32_t>(ScanMemoryRegion::CData) |
+        static_cast<int32_t>(ScanMemoryRegion::CBss) |
+        static_cast<int32_t>(ScanMemoryRegion::JavaHeap) |
+        static_cast<int32_t>(ScanMemoryRegion::Java) |
+        static_cast<int32_t>(ScanMemoryRegion::Stack) |
+        static_cast<int32_t>(ScanMemoryRegion::Video) |
+        static_cast<int32_t>(ScanMemoryRegion::CodeApp) |
+        static_cast<int32_t>(ScanMemoryRegion::CodeSystem) |
+        static_cast<int32_t>(ScanMemoryRegion::Ashmem) |
+        static_cast<int32_t>(ScanMemoryRegion::Bad);
+    return raw > 0 && (raw & ~allowed) == 0;
 }
 
 bool isValueStartMode(ScanMode mode) {
@@ -1614,7 +1614,8 @@ Result<BreakpointHitBatch> MemService::breakpointHitBatch(
 
 Result<ScanSummary> MemService::startScan(
     const OperationContext& context,
-    const ScanStartRequest& request) {
+    const ScanStartRequest& request,
+    const ScanProgressSink& progress) {
     const auto start = Clock::now();
     if (const auto error = validateScanStartRequest(request)) {
         return failureFrom<ScanSummary>(*error, start);
@@ -1657,7 +1658,7 @@ Result<ScanSummary> MemService::startScan(
     }
 
     const ScanExecutionBackendResult backendResult =
-        transaction->startScan(request);
+        transaction->startScan(request, progress);
     const uint64_t completedEpoch = transaction->scanEpoch();
     transaction.reset();
 
@@ -1721,7 +1722,8 @@ Result<ScanSummary> MemService::startScan(
 
 Result<ScanSummary> MemService::refineScan(
     const OperationContext& context,
-    const ScanRefineRequest& request) {
+    const ScanRefineRequest& request,
+    const ScanProgressSink& progress) {
     const auto start = Clock::now();
     if (!isRefineMode(request.mode)) {
         return Result<ScanSummary>::failure(
@@ -1799,7 +1801,8 @@ Result<ScanSummary> MemService::refineScan(
             scanDataTypeSize(scanSession_->dataType), 0);
     }
     const ScanExecutionBackendResult backendResult =
-        transaction->refineScan(*scanSession_, normalized);
+        transaction->refineScan(
+            *scanSession_, normalized, progress);
     const uint64_t completedEpoch = transaction->scanEpoch();
     transaction.reset();
 
@@ -2038,6 +2041,123 @@ Result<ScanClearResult> MemService::clearScan(
     result.completedAfterDeadline = Clock::now() >= context.deadline;
     result.target = *context.target;
     return Result<ScanClearResult>::success(
+        std::move(result), elapsedMilliseconds(start));
+}
+
+Result<ScanRemoveResult> MemService::removeScanResults(
+    const OperationContext& context,
+    const ScanRemoveRequest& request) {
+    const auto start = Clock::now();
+    if (request.addresses.empty() ||
+        request.addresses.size() > kMaxScanResultRemovalCount) {
+        return Result<ScanRemoveResult>::failure(
+            ErrorCode::InvalidArgument,
+            "scan result removal requires from 1 to 100000 addresses",
+            false,
+            elapsedMilliseconds(start));
+    }
+    std::vector<uint64_t> addresses = request.addresses;
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(
+        std::unique(addresses.begin(), addresses.end()), addresses.end());
+
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    if (!scanSession_) {
+        return failureFrom<ScanRemoveResult>(noScanSessionError(), start);
+    }
+    if (request.expectedEpoch &&
+        *request.expectedEpoch != scanSession_->epoch) {
+        return failureFrom<ScanRemoveResult>(
+            scanSessionChangedError(), start);
+    }
+    if (!context.target || scanSession_->target != *context.target) {
+        scanSession_.reset();
+        return failureFrom<ScanRemoveResult>(
+            scanSessionChangedError(), start);
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanRemoveResult>(*error, start);
+    }
+
+    const uint64_t previousEpoch = scanSession_->epoch;
+    auto transaction = backend_.beginScanTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanRemoveResult>(*error, start);
+        }
+        return Result<ScanRemoveResult>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the scan transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (transaction->scanEpoch() != previousEpoch) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanRemoveResult>(
+            scanSessionChangedError(), start);
+    }
+
+    int before = -1;
+    if (!transaction->scanResultCount(before) || before < 0 ||
+        static_cast<size_t>(before) > kMaxScanResultCount) {
+        transaction.reset();
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanRemoveResult>(*error, start);
+        }
+        return Result<ScanRemoveResult>::failure(
+            ErrorCode::ProtocolError,
+            "failed to read the scan result count before removal",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    const bool removeSent = transaction->removeScanResults(addresses);
+    int after = -1;
+    const bool countConfirmed = removeSent &&
+        transaction->scanResultCount(after);
+    const uint64_t currentEpoch = transaction->scanEpoch();
+    transaction.reset();
+
+    if (!removeSent || !countConfirmed) {
+        scanSession_.reset();
+        return Result<ScanRemoveResult>::failure(
+            ErrorCode::CompletionUnknown,
+            "scan result removal may have been sent but could not be confirmed; start a new scan",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (after < 0 || after > before ||
+        static_cast<size_t>(before - after) > addresses.size() ||
+        currentEpoch == previousEpoch) {
+        scanSession_.reset();
+        return Result<ScanRemoveResult>::failure(
+            ErrorCode::ProtocolError,
+            "scan result removal returned an inconsistent count or epoch",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        scanSession_.reset();
+        return failureFrom<ScanRemoveResult>(*error, start);
+    }
+    if (backend_.scanEpoch() != currentEpoch) {
+        scanSession_.reset();
+        return failureFrom<ScanRemoveResult>(
+            scanSessionChangedError(), start);
+    }
+
+    scanSession_->epoch = currentEpoch;
+    scanSession_->resultCount = static_cast<size_t>(after);
+
+    ScanRemoveResult result;
+    result.previousEpoch = previousEpoch;
+    result.currentEpoch = currentEpoch;
+    result.requested = addresses.size();
+    result.previousCount = static_cast<size_t>(before);
+    result.currentCount = static_cast<size_t>(after);
+    result.target = *context.target;
+    return Result<ScanRemoveResult>::success(
         std::move(result), elapsedMilliseconds(start));
 }
 

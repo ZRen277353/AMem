@@ -26,16 +26,20 @@ public:
     virtual uint64_t scanEpoch() const = 0;
     virtual bool setRange(ScanMemoryRegion memoryRegion) = 0;
     virtual ScanExecutionBackendResult startScan(
-        const ScanStartRequest& request) = 0;
+        const ScanStartRequest& request,
+        const ScanProgressSink& progress) = 0;
     virtual ScanExecutionBackendResult refineScan(
         const ScanSessionSnapshot& session,
-        const ScanRefineRequest& request) = 0;
+        const ScanRefineRequest& request,
+        const ScanProgressSink& progress) = 0;
     virtual bool scanResultCount(int& count) = 0;
     virtual bool fetchScanResults(
         size_t offset,
         size_t limit,
         std::vector<ScanResultItem>& results) = 0;
     virtual bool clearScan() = 0;
+    virtual bool removeScanResults(
+        const std::vector<uint64_t>& addresses) = 0;
 };
 
 class IMemSymbolTransaction {

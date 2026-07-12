@@ -245,7 +245,7 @@ void CEWindow::onDraw()
 // 窗口管理方法 — 使用 Gui::getOrCreate 简化
 void CEWindow::openScanWindow()
 {
-    Gui::getOrCreate<ScanWindow>();
+    Gui::getOrCreate<ScanWindow>(Mem::getSystemMemService());
 }
 
 void CEWindow::openMemoryViewerWindow()
