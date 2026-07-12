@@ -139,31 +139,31 @@ std::string execGetStatus(const std::string& /*argsJson*/,
 // driver_initialize
 std::string execDriverInitialize(const std::string& argsJson,
                                  const Mem::OperationContext& context) {
-    return getAgentMemTools().driverInitialize(argsJson, false, context);
+    return getAgentMemTools().driverInitialize(argsJson, context);
 }
 
 // canonical memory_read
 std::string execMemoryRead(const std::string& argsJson,
                            const Mem::OperationContext& context) {
-    return getAgentMemTools().memoryRead(argsJson, false, context);
+    return getAgentMemTools().memoryRead(argsJson, context);
 }
 
 // canonical memory_read_value
 std::string execMemoryReadValue(const std::string& argsJson,
                                 const Mem::OperationContext& context) {
-    return getAgentMemTools().memoryReadValue(argsJson, false, context);
+    return getAgentMemTools().memoryReadValue(argsJson, context);
 }
 
 // memory_write
 std::string execMemoryWrite(const std::string& argsJson,
                             const Mem::OperationContext& context) {
-    return getAgentMemTools().memoryWrite(argsJson, false, context);
+    return getAgentMemTools().memoryWrite(argsJson, context);
 }
 
 // canonical memory_write_value
 std::string execMemoryWriteValue(const std::string& argsJson,
                                  const Mem::OperationContext& context) {
-    return getAgentMemTools().memoryWriteValue(argsJson, false, context);
+    return getAgentMemTools().memoryWriteValue(argsJson, context);
 }
 
 // scan session
@@ -190,7 +190,7 @@ std::string execScanClear(const std::string& argsJson,
 // canonical module_list
 std::string execModuleList(const std::string& argsJson,
                            const Mem::OperationContext& context) {
-    return getAgentMemTools().moduleList(argsJson, false, context);
+    return getAgentMemTools().moduleList(argsJson, context);
 }
 
 // process_list
@@ -209,13 +209,13 @@ std::string execOpenProcess(const std::string& argsJson,
 // canonical module_resolve
 std::string execModuleResolve(const std::string& argsJson,
                               const Mem::OperationContext& context) {
-    return getAgentMemTools().moduleResolve(argsJson, false, context);
+    return getAgentMemTools().moduleResolve(argsJson, context);
 }
 
 // canonical pointer_resolve
 std::string execPointerResolve(const std::string& argsJson,
                                const Mem::OperationContext& context) {
-    return getAgentMemTools().pointerResolve(argsJson, false, context);
+    return getAgentMemTools().pointerResolve(argsJson, context);
 }
 
 std::string execDisassemble(

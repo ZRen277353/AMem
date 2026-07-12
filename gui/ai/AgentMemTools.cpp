@@ -126,76 +126,29 @@ std::string scalarValueText(const json& args) {
     return text;
 }
 
-Mem::Result<Mem::ScalarType> scalarTypeArgument(
-    const json& args,
-    bool allowLegacyArguments) {
-    std::string type;
-    if (allowLegacyArguments && args.contains("value_type") &&
-        !args.at("value_type").is_null()) {
-        type = optionalString(args, "value_type");
-    } else {
-        type = optionalString(args, "data_type");
-    }
+Mem::Result<Mem::ScalarType> scalarTypeArgument(const json& args) {
+    std::string type = optionalString(args, "data_type");
     if (type.empty()) {
         type = "dword";
     }
     return Mem::parseScalarType(type);
 }
 
-std::string moduleNameArgument(const json& args,
-                               bool allowLegacyArguments) {
-    const char* key = "module_name";
-    if (allowLegacyArguments && !args.contains(key) &&
-        args.contains("name")) {
-        key = "name";
-    }
-    const std::string name = optionalString(args, key);
+std::string moduleNameArgument(const json& args) {
+    const std::string name = optionalString(args, "module_name");
     if (name.empty()) {
-        throw std::runtime_error(
-            allowLegacyArguments
-                ? "module_name or name must be a non-empty string"
-                : "module_name must be a non-empty string");
+        throw std::runtime_error("module_name must be a non-empty string");
     }
     return name;
 }
 
-Mem::Result<uint64_t> parseAddressArgument(const json& value,
-                                           bool allowLegacyAddress) {
+Mem::Result<uint64_t> parseAddressArgument(const json& value) {
     if (value.is_string()) {
-        return Mem::parseAddress(value.get<std::string>(), !allowLegacyAddress);
-    }
-    if (allowLegacyAddress && value.is_number_unsigned()) {
-        return Mem::Result<uint64_t>::success(value.get<uint64_t>());
-    }
-    if (allowLegacyAddress && value.is_number_integer()) {
-        const long long address = value.get<long long>();
-        if (address >= 0) {
-            return Mem::Result<uint64_t>::success(
-                static_cast<uint64_t>(address));
-        }
+        return Mem::parseAddress(value.get<std::string>(), true);
     }
     return Mem::Result<uint64_t>::failure(
         Mem::ErrorCode::InvalidArgument,
-        allowLegacyAddress
-            ? "address must be a non-negative integer or hexadecimal string"
-            : "address must be an explicit 0x-prefixed hexadecimal string");
-}
-
-std::string pointerModuleNameArgument(const json& args,
-                                      bool allowLegacyArguments) {
-    const char* key = "module_name";
-    if (allowLegacyArguments && !args.contains(key) &&
-        args.contains("module")) {
-        key = "module";
-    }
-    const std::string name = optionalString(args, key);
-    if (name.empty()) {
-        throw std::runtime_error(
-            allowLegacyArguments
-                ? "module_name or module must be a non-empty string"
-                : "module_name must be a non-empty string");
-    }
-    return name;
+        "address must be an explicit 0x-prefixed hexadecimal string");
 }
 
 std::string lowerAscii(std::string value) {
@@ -460,12 +413,12 @@ void parseCanonicalScanRange(const json& args,
     start = 0;
     end = (std::numeric_limits<uint64_t>::max)();
     if (args.contains("start") && !args.at("start").is_null()) {
-        const auto parsed = parseAddressArgument(args.at("start"), false);
+        const auto parsed = parseAddressArgument(args.at("start"));
         if (!parsed.ok()) throw std::runtime_error(parsed.error().message);
         start = parsed.value();
     }
     if (args.contains("end") && !args.at("end").is_null()) {
-        const auto parsed = parseAddressArgument(args.at("end"), false);
+        const auto parsed = parseAddressArgument(args.at("end"));
         if (!parsed.ok()) throw std::runtime_error(parsed.error().message);
         end = parsed.value();
     }
@@ -487,20 +440,10 @@ json scanSessionJson(const Mem::ScanSessionSnapshot& session) {
     };
 }
 
-std::string writeHexArgument(const json& args, bool allowLegacyArguments) {
-    const char* key = "data_hex";
-    if (allowLegacyArguments && !args.contains(key)) {
-        if (args.contains("hex_string")) {
-            key = "hex_string";
-        } else if (args.contains("hex")) {
-            key = "hex";
-        }
-    }
+std::string writeHexArgument(const json& args) {
+    constexpr const char* key = "data_hex";
     if (!args.contains(key) || !args.at(key).is_string()) {
-        throw std::runtime_error(
-            allowLegacyArguments
-                ? "data_hex, hex_string, or hex must be a string"
-                : "data_hex must be a string");
+        throw std::runtime_error("data_hex must be a string");
     }
     const std::string value = args.at(key).get<std::string>();
     if (value.size() > 16u * 1024u) {
@@ -635,22 +578,13 @@ std::string AgentMemTools::status(
 
 std::string AgentMemTools::driverInitialize(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
-        const char* key = "card";
-        if (allowLegacyArguments && !args.contains(key) &&
-            args.contains("card_name")) {
-            key = "card_name";
-        }
         Mem::DriverInitializeRequest request;
-        request.card = optionalString(args, key);
+        request.card = optionalString(args, "card");
         if (request.card.empty()) {
-            throw std::runtime_error(
-                allowLegacyArguments
-                    ? "card or card_name must be a non-empty string"
-                    : "card must be a non-empty string");
+            throw std::runtime_error("card must be a non-empty string");
         }
 
         const auto response = service_.initializeDriver(context, request);
@@ -677,52 +611,6 @@ std::string AgentMemTools::driverInitialize(
     } catch (const std::exception& error) {
         return exceptionResult("driver_initialize", error);
     }
-}
-
-std::string AgentMemTools::serverVersion(
-    const std::string& /*argsJson*/,
-    const Mem::OperationContext& context) {
-    const auto response = service_.status(context);
-    if (!response.ok()) {
-        return errorResult(response.error(), response.durationMs());
-    }
-    if (!response.value().serverVersion) {
-        return errorResult(
-            Mem::Error{Mem::ErrorCode::ProtocolError,
-                       "server version is unavailable", true},
-            response.durationMs());
-    }
-
-    json output;
-    output["success"] = true;
-    output["version"] = *response.value().serverVersion;
-    output["version_string"] = response.value().serverVersionString;
-    output["meta"] = resultMeta(response.durationMs(),
-                                response.value().connectionGeneration);
-    return output.dump();
-}
-
-std::string AgentMemTools::architecture(
-    const std::string& /*argsJson*/,
-    const Mem::OperationContext& context) {
-    const auto response = service_.status(context);
-    if (!response.ok()) {
-        return errorResult(response.error(), response.durationMs());
-    }
-    if (!response.value().architectureType) {
-        return errorResult(
-            Mem::Error{Mem::ErrorCode::ProtocolError,
-                       "memory architecture is unavailable", true},
-            response.durationMs());
-    }
-
-    json output;
-    output["success"] = true;
-    output["type"] = *response.value().architectureType;
-    output["name"] = response.value().architectureName;
-    output["meta"] = resultMeta(response.durationMs(),
-                                response.value().connectionGeneration);
-    return output.dump();
 }
 
 std::string AgentMemTools::processList(
@@ -798,7 +686,6 @@ std::string AgentMemTools::processOpen(
 
 std::string AgentMemTools::moduleList(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
@@ -807,10 +694,7 @@ std::string AgentMemTools::moduleList(
         request.offset = optionalSize(args, "offset", 0,
                                       (std::numeric_limits<int>::max)());
         request.limit = optionalSize(
-            args,
-            "count",
-            allowLegacyArguments ? 1000 : 200,
-            Mem::kMaxModulePageSize);
+            args, "count", 200, Mem::kMaxModulePageSize);
 
         const auto response = service_.listModules(context, request);
         if (!response.ok()) {
@@ -843,20 +727,17 @@ std::string AgentMemTools::moduleList(
                                     &response.value().target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "legacy module list" : "module_list",
-            error);
+        return exceptionResult("module_list", error);
     }
 }
 
 std::string AgentMemTools::moduleResolve(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         Mem::ModuleResolveRequest request;
-        request.name = moduleNameArgument(args, allowLegacyArguments);
+        request.name = moduleNameArgument(args);
 
         const auto response = service_.resolveModule(context, request);
         if (!response.ok()) {
@@ -877,15 +758,12 @@ std::string AgentMemTools::moduleResolve(
                                     &response.value().target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "get_module_base" : "module_resolve",
-            error);
+        return exceptionResult("module_resolve", error);
     }
 }
 
 std::string AgentMemTools::pointerResolve(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
@@ -894,10 +772,8 @@ std::string AgentMemTools::pointerResolve(
         }
 
         Mem::PointerResolveRequest request;
-        request.moduleName =
-            pointerModuleNameArgument(args, allowLegacyArguments);
-        const auto baseOffset = parseAddressArgument(
-            args.at("base_offset"), allowLegacyArguments);
+        request.moduleName = moduleNameArgument(args);
+        const auto baseOffset = parseAddressArgument(args.at("base_offset"));
         if (!baseOffset.ok()) {
             return errorResult(baseOffset.error(), baseOffset.durationMs());
         }
@@ -912,8 +788,7 @@ std::string AgentMemTools::pointerResolve(
             }
             request.offsets.reserve(args.at("offsets").size());
             for (const auto& value : args.at("offsets")) {
-                const auto offset =
-                    parseAddressArgument(value, allowLegacyArguments);
+                const auto offset = parseAddressArgument(value);
                 if (!offset.ok()) {
                     return errorResult(offset.error(), offset.durationMs());
                 }
@@ -922,12 +797,6 @@ std::string AgentMemTools::pointerResolve(
         }
         request.dereferenceFinal =
             optionalBool(args, "deref_final", true);
-        if (allowLegacyArguments && request.offsets.empty()) {
-            // The old helper returned module_base + base_offset immediately
-            // for an empty chain, regardless of deref_final.
-            request.dereferenceFinal = false;
-        }
-
         const auto response = service_.resolvePointer(context, request);
         if (!response.ok()) {
             return errorResult(response.error(), response.durationMs());
@@ -949,9 +818,7 @@ std::string AgentMemTools::pointerResolve(
                                     &value.target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "resolve_offset_chain" : "pointer_resolve",
-            error);
+        return exceptionResult("pointer_resolve", error);
     }
 }
 
@@ -963,7 +830,7 @@ std::string AgentMemTools::disassemble(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1010,7 +877,7 @@ std::string AgentMemTools::symbolResolve(
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         Mem::SymbolResolveRequest request;
-        request.moduleName = moduleNameArgument(args, false);
+        request.moduleName = moduleNameArgument(args);
         request.symbolName = optionalString(args, "symbol_name");
         if (request.symbolName.empty()) {
             throw std::runtime_error(
@@ -1048,7 +915,7 @@ std::string AgentMemTools::symbolList(
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         Mem::SymbolListRequest request;
-        request.moduleName = moduleNameArgument(args, false);
+        request.moduleName = moduleNameArgument(args);
         request.expectedEpoch =
             optionalEpochArgument(args, "symbol_epoch");
         request.offset = optionalSize(
@@ -1100,7 +967,7 @@ std::string AgentMemTools::breakpointSet(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1128,7 +995,7 @@ std::string AgentMemTools::breakpointRemove(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1152,7 +1019,7 @@ std::string AgentMemTools::breakpointSuspend(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1176,7 +1043,7 @@ std::string AgentMemTools::breakpointResume(
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1204,7 +1071,7 @@ std::string AgentMemTools::breakpointHits(
             throw std::runtime_error(
                 "offset is unsupported because breakpoint hit batches have no stable continuation cursor");
         }
-        const auto address = parseAddressArgument(args.at("address"), false);
+        const auto address = parseAddressArgument(args.at("address"));
         if (!address.ok()) {
             return errorResult(address.error(), address.durationMs());
         }
@@ -1505,15 +1372,13 @@ std::string AgentMemTools::scanClear(
 }
 
 std::string AgentMemTools::memoryRead(const std::string& argsJson,
-                                      bool allowLegacyAddress,
                                       const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto parsedAddress =
-            parseAddressArgument(args.at("address"), allowLegacyAddress);
+        const auto parsedAddress = parseAddressArgument(args.at("address"));
         if (!parsedAddress.ok()) {
             return errorResult(parsedAddress.error(), parsedAddress.durationMs());
         }
@@ -1547,20 +1412,18 @@ std::string AgentMemTools::memoryRead(const std::string& argsJson,
 
 std::string AgentMemTools::memoryReadValue(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto parsedAddress =
-            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        const auto parsedAddress = parseAddressArgument(args.at("address"));
         if (!parsedAddress.ok()) {
             return errorResult(parsedAddress.error(),
                                parsedAddress.durationMs());
         }
-        const auto parsedType = scalarTypeArgument(args, allowLegacyArguments);
+        const auto parsedType = scalarTypeArgument(args);
         if (!parsedType.ok()) {
             return errorResult(parsedType.error(), parsedType.durationMs());
         }
@@ -1599,31 +1462,26 @@ std::string AgentMemTools::memoryReadValue(
                                     &value.target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "read_value" : "memory_read_value",
-            error);
+        return exceptionResult("memory_read_value", error);
     }
 }
 
 std::string AgentMemTools::memoryWrite(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto parsedAddress =
-            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        const auto parsedAddress = parseAddressArgument(args.at("address"));
         if (!parsedAddress.ok()) {
             return errorResult(parsedAddress.error(), parsedAddress.durationMs());
         }
 
         Mem::MemoryWriteRequest request;
         request.address = parsedAddress.value();
-        request.bytes = parseHexBytes(
-            writeHexArgument(args, allowLegacyArguments));
+        request.bytes = parseHexBytes(writeHexArgument(args));
         if (request.bytes.size() > Mem::kMaxAgentMemoryWriteBytes) {
             throw std::runtime_error(
                 "memory write exceeds maximum size of 4096 bytes");
@@ -1654,27 +1512,24 @@ std::string AgentMemTools::memoryWrite(
                                     &receipt.target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "write_bytes" : "memory_write", error);
+        return exceptionResult("memory_write", error);
     }
 }
 
 std::string AgentMemTools::memoryWriteValue(
     const std::string& argsJson,
-    bool allowLegacyArguments,
     const Mem::OperationContext& context) {
     try {
         const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
         if (!args.contains("address")) {
             throw std::runtime_error("address is required");
         }
-        const auto parsedAddress =
-            parseAddressArgument(args.at("address"), allowLegacyArguments);
+        const auto parsedAddress = parseAddressArgument(args.at("address"));
         if (!parsedAddress.ok()) {
             return errorResult(parsedAddress.error(),
                                parsedAddress.durationMs());
         }
-        const auto parsedType = scalarTypeArgument(args, allowLegacyArguments);
+        const auto parsedType = scalarTypeArgument(args);
         if (!parsedType.ok()) {
             return errorResult(parsedType.error(), parsedType.durationMs());
         }
@@ -1714,9 +1569,7 @@ std::string AgentMemTools::memoryWriteValue(
                                     &receipt.target);
         return output.dump();
     } catch (const std::exception& error) {
-        return exceptionResult(
-            allowLegacyArguments ? "write_value" : "memory_write_value",
-            error);
+        return exceptionResult("memory_write_value", error);
     }
 }
 

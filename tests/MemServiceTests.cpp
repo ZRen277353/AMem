@@ -842,7 +842,6 @@ void testDriverInitializationAndSecretRedaction() {
     AI::AgentMemTools tools(adapterService);
     const json adapterResult = json::parse(tools.driverInitialize(
         std::string("{\"card\":\"") + secret + "\"}",
-        false,
         adapterService.captureContext(false)));
     expect(adapterResult.at("success").get<bool>() &&
                adapterResult.at("completion") == "completed" &&
@@ -893,9 +892,9 @@ void testAddressContract() {
                missingPrefix.error().code == Mem::ErrorCode::InvalidArgument,
            "canonical address must require 0x prefix");
 
-    const auto legacy = Mem::parseAddress("7FF0", false);
-    expect(legacy.ok() && legacy.value() == 0x7ff0,
-           "legacy address mode should remain available to hidden aliases");
+    const auto compatible = Mem::parseAddress("7FF0", false);
+    expect(compatible.ok() && compatible.value() == 0x7ff0,
+           "low-level compatibility mode should accept unprefixed hexadecimal addresses");
 
     const auto overflow = Mem::parseAddress("0x10000000000000000");
     expect(!overflow.ok(), "uint64 address overflow must fail");
@@ -2700,29 +2699,29 @@ void testAgentAdapter() {
 
     const json strictAddress = json::parse(
         tools.memoryRead(
-            R"({"address":"1000","size":4})", false, targetContext));
+            R"({"address":"1000","size":4})", targetContext));
     expect(!strictAddress.at("success").get<bool>() &&
                strictAddress.at("error").at("code") == "invalid_argument",
            "canonical memory_read should reject missing 0x prefix");
 
     const json read = json::parse(
         tools.memoryRead(
-            R"({"address":"0x1000","size":4})", false, targetContext));
+            R"({"address":"0x1000","size":4})", targetContext));
     expect(read.at("success").get<bool>() &&
                read.at("hex") == "DEADBEEF" &&
                read.at("data") == "DE AD BE EF",
            "memory adapter should expose compact and spaced hex");
 
-    const json legacyRead = json::parse(
+    const json integerRead = json::parse(
         tools.memoryRead(
-            R"({"address":4096,"size":4})", true, targetContext));
-    expect(legacyRead.at("success").get<bool>(),
-           "hidden legacy memory alias should accept integer addresses");
+            R"({"address":4096,"size":4})", targetContext));
+    expect(!integerRead.at("success").get<bool>() &&
+               integerRead.at("error").at("code") == "invalid_argument",
+           "memory_read should reject integer addresses");
 
     const json strictValueAddress = json::parse(
         tools.memoryReadValue(
             R"({"address":"1000","data_type":"dword"})",
-            false,
             targetContext));
     expect(!strictValueAddress.at("success").get<bool>() &&
                strictValueAddress.at("error").at("code") ==
@@ -2733,7 +2732,6 @@ void testAgentAdapter() {
     const json typedRead = json::parse(
         tools.memoryReadValue(
             R"({"address":"0x1000","data_type":"int32"})",
-            false,
             targetContext));
     expect(typedRead.at("success").get<bool>() &&
                typedRead.at("data_type") == "dword" &&
@@ -2742,18 +2740,18 @@ void testAgentAdapter() {
                typedRead.at("value_hex") == "0x12345678",
            "typed read adapter should expose normalized exact values");
 
-    const json legacyTypedRead = json::parse(
+    const json integerTypedRead = json::parse(
         tools.memoryReadValue(
             R"({"address":4096,"data_type":"dword"})",
-            true,
             targetContext));
-    expect(legacyTypedRead.at("success").get<bool>(),
-           "hidden read_value alias should accept integer addresses");
+    expect(!integerTypedRead.at("success").get<bool>() &&
+               integerTypedRead.at("error").at("code") ==
+                   "invalid_argument",
+           "memory_read_value should reject integer addresses");
 
     const json strictWriteAddress = json::parse(
         tools.memoryWrite(
             R"({"address":"2000","data_hex":"90 90"})",
-            false,
             targetContext));
     expect(!strictWriteAddress.at("success").get<bool>() &&
                strictWriteAddress.at("error").at("code") ==
@@ -2763,26 +2761,24 @@ void testAgentAdapter() {
     const json write = json::parse(
         tools.memoryWrite(
             R"({"address":"0x2000","data_hex":"90 90"})",
-            false,
             targetContext));
     expect(write.at("success").get<bool>() &&
                write.at("written_bytes") == 2 &&
                write.at("completion") == "completed",
            "canonical memory_write should expose a confirmed write receipt");
 
-    const json legacyWrite = json::parse(
+    const json legacyShapeWrite = json::parse(
         tools.memoryWrite(
             R"({"address":8192,"hex_string":"C0 03 5F D6"})",
-            true,
             targetContext));
-    expect(legacyWrite.at("success").get<bool>() &&
-               legacyWrite.at("written_bytes") == 4,
-           "hidden write_bytes alias should retain legacy argument forms");
+    expect(!legacyShapeWrite.at("success").get<bool>() &&
+               legacyShapeWrite.at("error").at("code") ==
+                   "invalid_argument",
+           "memory_write should reject legacy integer and hex_string arguments");
 
     const json strictTypedWriteAddress = json::parse(
         tools.memoryWriteValue(
             R"({"address":"2000","value":-1,"data_type":"word"})",
-            false,
             targetContext));
     expect(!strictTypedWriteAddress.at("success").get<bool>() &&
                strictTypedWriteAddress.at("error").at("code") ==
@@ -2792,7 +2788,6 @@ void testAgentAdapter() {
     const json typedWrite = json::parse(
         tools.memoryWriteValue(
             R"({"address":"0x2000","value":-1,"data_type":"int16"})",
-            false,
             targetContext));
     expect(typedWrite.at("success").get<bool>() &&
                typedWrite.at("data_type") == "word" &&
@@ -2802,19 +2797,18 @@ void testAgentAdapter() {
                    std::vector<unsigned char>({0xFF, 0xFF}),
            "typed write adapter should normalize and encode scalar values");
 
-    const json legacyTypedWrite = json::parse(
+    const json legacyShapeTypedWrite = json::parse(
         tools.memoryWriteValue(
             R"({"address":8192,"value":"0x7F","value_type":"int8"})",
-            true,
             targetContext));
-    expect(legacyTypedWrite.at("success").get<bool>() &&
-               legacyTypedWrite.at("hex") == "7F",
-           "hidden write_value alias should retain integer addresses");
+    expect(!legacyShapeTypedWrite.at("success").get<bool>() &&
+               legacyShapeTypedWrite.at("error").at("code") ==
+                   "invalid_argument",
+           "memory_write_value should reject legacy integer and value_type arguments");
 
     const json modulePage = json::parse(
         tools.moduleList(
             R"({"filter":"game","count":1})",
-            false,
             targetContext));
     expect(modulePage.at("success").get<bool>() &&
                modulePage.at("total") == 2 &&
@@ -2827,7 +2821,6 @@ void testAgentAdapter() {
     const json module = json::parse(
         tools.moduleResolve(
             R"({"module_name":"libgame.so"})",
-            false,
             targetContext));
     expect(module.at("success").get<bool>() &&
                module.at("module") == "/data/app/libgame.so" &&
@@ -2835,19 +2828,18 @@ void testAgentAdapter() {
                module.at("size") == 0x3000,
            "module_resolve adapter should return canonical module metadata");
 
-    const json legacyModule = json::parse(
+    const json legacyShapeModule = json::parse(
         tools.moduleResolve(
             R"({"name":"libc.so"})",
-            true,
             targetContext));
-    expect(legacyModule.at("success").get<bool>() &&
-               legacyModule.at("base") == "0x1000",
-           "hidden get_module_base alias should retain name arguments");
+    expect(!legacyShapeModule.at("success").get<bool>() &&
+               legacyShapeModule.at("error").at("code") ==
+                   "invalid_argument",
+           "module_resolve should reject the legacy name argument");
 
     const json ambiguousModule = json::parse(
         tools.moduleResolve(
             R"({"module_name":"libgame"})",
-            false,
             targetContext));
     expect(!ambiguousModule.at("success").get<bool>() &&
                ambiguousModule.at("error").at("code") ==
@@ -2861,7 +2853,6 @@ void testAgentAdapter() {
     const json pointer = json::parse(
         tools.pointerResolve(
             R"({"module_name":"libgame.so","base_offset":"0x10","offsets":["0x20"],"deref_final":true})",
-            false,
             targetContext));
     expect(pointer.at("success").get<bool>() &&
                pointer.at("module") == "/data/app/libgame.so" &&
@@ -2874,32 +2865,29 @@ void testAgentAdapter() {
     const json strictPointerOffset = json::parse(
         tools.pointerResolve(
             R"({"module_name":"libgame.so","base_offset":"10","offsets":[]})",
-            false,
             targetContext));
     expect(!strictPointerOffset.at("success").get<bool>() &&
                strictPointerOffset.at("error").at("code") ==
                    "invalid_argument",
            "canonical pointer_resolve should require 0x-prefixed offsets");
 
-    const json legacyPointer = json::parse(
+    const json legacyShapePointer = json::parse(
         tools.pointerResolve(
             R"({"module":"libgame.so","base_offset":16,"offsets":[32],"deref_final":false})",
-            true,
             targetContext));
-    expect(legacyPointer.at("success").get<bool>() &&
-               legacyPointer.at("address") == "0x6020" &&
-               legacyPointer.at("dereference_count") == 1,
-           "hidden resolve_offset_chain should retain legacy names and integer offsets");
+    expect(!legacyShapePointer.at("success").get<bool>() &&
+               legacyShapePointer.at("error").at("code") ==
+                   "invalid_argument",
+           "pointer_resolve should reject legacy module and integer offsets");
 
     const json legacyEmptyPointer = json::parse(
         tools.pointerResolve(
             R"({"module":"libgame.so","base_offset":16,"offsets":[],"deref_final":true})",
-            true,
             targetContext));
-    expect(legacyEmptyPointer.at("success").get<bool>() &&
-               legacyEmptyPointer.at("address") == "0x5010" &&
-               legacyEmptyPointer.at("dereference_count") == 0,
-           "hidden resolve_offset_chain should retain empty-chain behavior");
+    expect(!legacyEmptyPointer.at("success").get<bool>() &&
+               legacyEmptyPointer.at("error").at("code") ==
+                   "invalid_argument",
+           "pointer_resolve should reject the legacy empty-chain shape");
 
     const json strictDisassemblyAddress = json::parse(
         tools.disassemble(
@@ -3164,7 +3152,7 @@ void registerContextTestTools(AI::AgentMemTools& tools) {
         AI::ToolSafety::ReadOnly,
         [&tools](const std::string& args,
                  const Mem::OperationContext& context) {
-            return tools.memoryRead(args, false, context);
+            return tools.memoryRead(args, context);
         },
         AI::ToolTargetPolicy::Bound);
     registry.registerTool(
@@ -3172,7 +3160,7 @@ void registerContextTestTools(AI::AgentMemTools& tools) {
         AI::ToolSafety::Write,
         [&tools](const std::string& args,
                  const Mem::OperationContext& context) {
-            return tools.memoryWrite(args, false, context);
+            return tools.memoryWrite(args, context);
         },
         AI::ToolTargetPolicy::Bound);
 }
