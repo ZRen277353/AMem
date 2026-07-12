@@ -280,6 +280,7 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
         ipc/IpcFramedConnection.cpp
         ipc/IpcHandshakeSession.cpp
         ipc/IpcProtocol.cpp
+        ipc/IpcRequestProtocol.cpp
         ipc/NamedPipeServer.cpp
         ipc/NativePipeSecurity.cpp
     )
@@ -416,6 +417,25 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcRequestProtocolTests
+        tests/IpcRequestProtocolTests.cpp
+    )
+    target_include_directories(NativeIpcRequestProtocolTests PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_link_libraries(NativeIpcRequestProtocolTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcRequestProtocolTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcRequestProtocolTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcRequestProtocolTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_request_protocol COMMAND NativeIpcRequestProtocolTests)
+
     add_executable(NativeIpcHandshakeTests
         tests/IpcHandshakeSessionTests.cpp
     )
