@@ -58,11 +58,18 @@ bool isDriverTool(const std::string& tool) {
     return tool == "driver_initialize" || tool == "init_driver";
 }
 
+bool isSymbolSessionTool(const std::string& tool) {
+    return tool == "symbol_resolve" || tool == "symbol_list" ||
+           tool == "resolve_symbol" || tool == "symbol_init" ||
+           tool == "symbol_find";
+}
+
 const char* effectName(const std::string& tool) {
     if (isDriverTool(tool)) return "connection_mutation";
     if (tool == "process_open" || tool == "open_process")
         return "target_selection";
     if (isLuaTool(tool)) return "host_execution";
+    if (isSymbolSessionTool(tool)) return "session_mutation";
     if (tool.rfind("scan_", 0) == 0 || tool == "clear_scan")
         return "session_mutation";
     return "target_mutation";
@@ -71,6 +78,7 @@ const char* effectName(const std::string& tool) {
 const char* resourceDomainName(const std::string& tool) {
     if (isDriverTool(tool)) return "connection";
     if (isLuaTool(tool)) return "lua";
+    if (isSymbolSessionTool(tool)) return "symbol";
     if (tool.rfind("scan_", 0) == 0 || tool == "clear_scan")
         return "scan";
     if (tool.find("breakpoint") != std::string::npos)
@@ -204,6 +212,11 @@ AgentMutationAuditEntry entryFromJson(const json& record) {
 
 } // namespace
 
+bool shouldAuditMutationOutcome(ToolSafety safety,
+                                const std::string& toolName) {
+    return safety == ToolSafety::Write || isSymbolSessionTool(toolName);
+}
+
 AgentMutationAuditLog& AgentMutationAuditLog::getInstance() {
     // Intentionally process-lifetime: tool shutdown may append after the chat
     // window has been destroyed, and static destruction order is not stable.
@@ -223,7 +236,7 @@ AgentMutationAuditLog::AgentMutationAuditLog(
 
 bool AgentMutationAuditLog::append(const AgentMutationAuditEvent& event,
                                    std::string* error) {
-    if (event.safety != ToolSafety::Write) {
+    if (!shouldAuditMutationOutcome(event.safety, event.call.name)) {
         return true;
     }
 
@@ -233,7 +246,8 @@ bool AgentMutationAuditLog::append(const AgentMutationAuditEvent& event,
     record["run_id"] = event.runId;
     record["tool_call_id"] = event.call.id;
     record["tool"] = event.call.name;
-    record["safety"] = "write";
+    record["safety"] =
+        event.safety == ToolSafety::Write ? "write" : "read_only";
     record["effect"] = effectName(event.call.name);
     record["resource_domain"] = resourceDomainName(event.call.name);
     record["approval"] = approvalName(event.approval);

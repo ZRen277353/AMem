@@ -70,7 +70,7 @@ bool persistMutationOutcome(
     std::string& error) {
     ToolExecutor& tools = ToolExecutor::getInstance();
     const ToolSafety safety = tools.getToolSafety(call.name);
-    if (safety != ToolSafety::Write) {
+    if (!shouldAuditMutationOutcome(safety, call.name)) {
         return true;
     }
 
@@ -1787,9 +1787,8 @@ void ChatWindow::processToolCalls(const std::vector<ToolCall>& calls) {
 
 void ChatWindow::startToolExecution(const ToolCall& call) {
     activeToolRunId_ = agentController_.runId();
-    activeToolIsMutation_ =
-        ToolExecutor::getInstance().getToolSafety(call.name) ==
-        ToolSafety::Write;
+    activeToolIsMutation_ = shouldAuditMutationOutcome(
+        ToolExecutor::getInstance().getToolSafety(call.name), call.name);
     const std::string runId = activeToolRunId_;
     const Mem::OperationContext operationContext =
         agentController_.operationContext();

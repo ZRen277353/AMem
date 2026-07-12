@@ -45,6 +45,9 @@ struct AgentMutationAuditEntry {
     std::optional<Mem::TargetSnapshot> target;
 };
 
+bool shouldAuditMutationOutcome(ToolSafety safety,
+                                const std::string& toolName);
+
 class AgentMutationAuditLog {
 public:
     static AgentMutationAuditLog& getInstance();

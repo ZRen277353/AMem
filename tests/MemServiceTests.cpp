@@ -2278,6 +2278,25 @@ void testMutationAuditPersistence() {
     expect(audit.append(denied, &appendError),
            "denied mutation audit should persist: " + appendError);
 
+    AI::AgentMutationAuditEvent symbol = driver;
+    symbol.runId = "audit-symbol-run";
+    symbol.call = toolCall(
+        "audit-symbol-call", "symbol_resolve",
+        R"({"module_name":"libgame.so","symbol_name":"GameInit"})");
+    symbol.result.success = true;
+    symbol.result.errorMessage.clear();
+    symbol.result.resultJson =
+        R"({"success":true,"address":"0x5100","symbol_epoch":3})";
+    symbol.result.completion = AI::ToolCompletionState::Completed;
+    symbol.safety = AI::ToolSafety::ReadOnly;
+    symbol.targetPolicy = AI::ToolTargetPolicy::Bound;
+    symbol.approval = AI::MutationApproval::NotRequired;
+    expect(audit.append(symbol, &appendError) &&
+               audit.recent().back().effect == "session_mutation" &&
+               audit.recent().back().resourceDomain == "symbol" &&
+               audit.recent().back().approval == "not_required",
+           "symbol session mutation should be audited without write approval");
+
     AI::AgentMutationAuditEvent readOnly = driver;
     readOnly.runId = "audit-read-run";
     readOnly.safety = AI::ToolSafety::ReadOnly;

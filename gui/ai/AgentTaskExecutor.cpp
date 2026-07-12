@@ -243,7 +243,8 @@ void AgentTaskExecutor::deliver(QueuedTask task,
     outcome.approval = task.task.approval;
     outcome.durationMs = durationMs;
 
-    if (auditLog_ && outcome.safety == ToolSafety::Write) {
+    if (auditLog_ && shouldAuditMutationOutcome(
+                         outcome.safety, outcome.call.name)) {
         AgentMutationAuditEvent event;
         event.runId = outcome.runId;
         event.call = outcome.call;
