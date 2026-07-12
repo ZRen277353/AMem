@@ -134,7 +134,7 @@ int main(int, char**)
 #endif
 
 #ifdef HAVE_NATIVE_IPC
-    // Stop the explicit Observe-only pipe before device lifecycle teardown.
+    // Stop the opt-in pipe and its approved work before device teardown.
     NativeIpc::ShutdownSystemNativeAgentRuntime();
 #endif
 

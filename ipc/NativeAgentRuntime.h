@@ -15,6 +15,7 @@
 namespace NativeIpc {
 
 class IpcApprovalBroker;
+class IIpcHostMethodExecutor;
 
 enum class RuntimePhase {
   Idle,
@@ -54,7 +55,8 @@ public:
                      std::wstring pipeName = kDefaultPipeName,
                      HandshakeConfig handshakeConfig = {},
                      RequestSessionConfig requestConfig = {},
-                     IpcApprovalBroker *approvalBroker = nullptr);
+                     IpcApprovalBroker *approvalBroker = nullptr,
+                     IIpcHostMethodExecutor *hostExecutor = nullptr);
   ~NativeAgentRuntime();
 
   NativeAgentRuntime(const NativeAgentRuntime &) = delete;
@@ -74,6 +76,7 @@ private:
 
   Mem::IMemService &service_;
   IpcApprovalBroker *const approvalBroker_;
+  IIpcHostMethodExecutor *const hostExecutor_;
   const HandshakeConfig handshakeConfig_;
   const RequestSessionConfig requestConfig_;
   NamedPipeServer server_;

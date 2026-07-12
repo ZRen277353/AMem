@@ -42,13 +42,16 @@ bool ValidateCancelPayload(const std::string& payload,
                            std::string& error);
 
 enum class RequestCompletion {
-    RejectedBeforeStart,
-    CancelledBeforeStart,
-    CancelledBeforeSend,
-    CancelRequested,
-    CompletedAfterCancelRequest,
-    CompletionUnknown,
-    Completed,
+  RejectedBeforeStart,
+  CancelledBeforeStart,
+  CancelledBeforeSend,
+  TimedOutBeforeStart,
+  TimedOut,
+  CancelRequested,
+  CompletedAfterCancelRequest,
+  CompletedAfterDeadline,
+  CompletionUnknown,
+  Completed,
 };
 
 const char* RequestCompletionName(RequestCompletion completion);

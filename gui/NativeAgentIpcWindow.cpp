@@ -308,7 +308,7 @@ void NativeAgentIpcWindow::onDraw() {
   } else if (ImGui::Button("启用")) {
     std::wstring error;
     if (runtime.start(error)) {
-      Gui::log("Native Agent IPC 已启用（Observe）");
+      Gui::log("Native Agent IPC 已启用（Observe + 逐请求审批）");
     } else {
       const std::string message = utf8(error);
       Gui::log("Native Agent IPC 启用失败: %s", message.c_str());
@@ -323,7 +323,7 @@ void NativeAgentIpcWindow::onDraw() {
     ImGui::TableSetupColumn("项目", ImGuiTableColumnFlags_WidthFixed, 150.0f);
     ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthStretch);
     textRow("权限", "Observe");
-    textRow("特权能力", "禁用");
+    textRow("特权能力", "逐请求审批");
     textRow("运行阶段", phaseName(snapshot.phase));
     const std::string pipeName = utf8(snapshot.server.pipeName);
     textRow("管道", pipeName.c_str());

@@ -146,9 +146,21 @@ public:
 
   Mem::Result<Mem::WriteReceipt>
   writeMemory(const Mem::OperationContext &context,
-              const Mem::MemoryWriteRequest &) override {
+              const Mem::MemoryWriteRequest &request) override {
     ++writeCalls_;
-    return unsupported<Mem::WriteReceipt>(context);
+    const Mem::OperationContext current = captureContext(true);
+    if (context.connectionGeneration != current.connectionGeneration ||
+        context.target != current.target) {
+      return Mem::Result<Mem::WriteReceipt>::failure(
+          Mem::ErrorCode::TargetChanged,
+          "runtime write context changed before send", false, 1);
+    }
+    Mem::WriteReceipt value;
+    value.address = request.address;
+    value.requestedBytes = static_cast<uint32_t>(request.bytes.size());
+    value.writtenBytes = value.requestedBytes;
+    value.target = *current.target;
+    return Mem::Result<Mem::WriteReceipt>::success(std::move(value), 1);
   }
 
   Mem::Result<Mem::ScanSummary>
@@ -609,7 +621,7 @@ void testSessionInvalidationCancelsBoundApproval() {
   runtime.stop();
 }
 
-void testPrivilegedRequestSubmitsAndRemainsNonExecutable() {
+void testPrivilegedRequestExecutesOnlyAfterApproval() {
   StubMemService service;
   NativeIpc::IpcApprovalBroker broker;
   NativeIpc::NativeAgentRuntime runtime(
@@ -653,7 +665,7 @@ void testPrivilegedRequestSubmitsAndRemainsNonExecutable() {
          "client Cancel must revoke pending approval without a device call");
 
   client.request(81, "memory_write",
-                 {{"address", "0x1000"}, {"data", "OTHER_SECRET"}});
+                 {{"address", "0x1000"}, {"data_hex", "90 90"}});
   expect(waitUntil([&] { return broker.snapshot().size() == 2; }),
          "session should accept another request after cancellation response");
   const auto approved = broker.snapshot().back();
@@ -663,16 +675,15 @@ void testPrivilegedRequestSubmitsAndRemainsNonExecutable() {
                      service.captureContext(true))
              .ok,
          "GUI-equivalent decision should approve matching context");
-  const json disabled =
+  const json executed =
       responseJson(client.read(IpcProtocol::kMaxFramePayloadBytes,
-                               "approved-disabled response"),
+                               "approved execution response"),
                    IpcProtocol::MessageType::Response, 81);
-  expect(disabled["error"]["code"] == "approval_execution_disabled" &&
-             disabled["completion"] == "rejected_before_start" &&
+  expect(executed["ok"] == true && executed["completion"] == "completed" &&
              broker.find(approved.approvalId)->state ==
-                 NativeIpc::IpcApprovalState::Cancelled &&
-             service.writeCalls() == 0,
-         "approved request must remain non-executable in submission slice");
+                 NativeIpc::IpcApprovalState::Consumed &&
+             service.writeCalls() == 1,
+         "approved request must consume once before device execution");
 
   client.request(82, "status");
   try {
@@ -718,8 +729,8 @@ int main() {
        &testSessionCloseCancelsBoundApproval},
       {"session invalidation cancels bound approval",
        &testSessionInvalidationCancelsBoundApproval},
-      {"privileged request submits without execution",
-       &testPrivilegedRequestSubmitsAndRemainsNonExecutable},
+      {"privileged request executes only after approval",
+       &testPrivilegedRequestExecutesOnlyAfterApproval},
   };
 
   int failures = 0;

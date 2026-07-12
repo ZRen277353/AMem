@@ -214,6 +214,7 @@ set(LUA_SOURCES
     lua/LuaAPI_Memory.cpp
     lua/LuaAPI_ImGui.cpp
     lua/LuaAPI_Assembly.cpp
+    mem/LuaJsonTool.cpp
 )
 
 # 查找 LuaJIT 库
@@ -351,6 +352,9 @@ if(ENABLE_NATIVE_IPC)
     target_link_libraries(NativeIpcGuiControl PUBLIC
         NativeIpcTransport
     )
+    if(HAVE_LUAJIT)
+        target_compile_definitions(NativeIpcGuiControl PRIVATE HAVE_LUAJIT)
+    endif()
     if(MSVC)
         target_compile_options(NativeIpcGuiControl PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

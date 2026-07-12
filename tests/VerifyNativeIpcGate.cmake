@@ -14,6 +14,8 @@ file(READ "${SOURCE_ROOT}/ipc/IpcRequestSession.cpp" request_session_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalAudit.h" approval_audit_header)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalBroker.cpp" approval_broker_source)
+file(READ "${SOURCE_ROOT}/gui/ai/ToolDefinitions.cpp" tool_source)
+file(READ "${SOURCE_ROOT}/mem/LuaJsonTool.cpp" lua_tool_source)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -40,13 +42,13 @@ require_text("${cmake_source}" "explicit native IPC GUI control target"
 require_text("${cmake_source}" "conditional native IPC product link"
     "if(ENABLE_NATIVE_IPC)\n    target_compile_definitions(ImGuiProject PRIVATE HAVE_NATIVE_IPC)\n    target_link_libraries(ImGuiProject NativeIpcTransport NativeIpcGuiControl)")
 require_text("${main_source}" "native IPC joined shutdown gate"
-    "#ifdef HAVE_NATIVE_IPC\n    // Stop the explicit Observe-only pipe before device lifecycle teardown.\n    NativeIpc::ShutdownSystemNativeAgentRuntime();\n#endif")
+    "#ifdef HAVE_NATIVE_IPC\n    // Stop the opt-in pipe and its approved work before device teardown.\n    NativeIpc::ShutdownSystemNativeAgentRuntime();\n#endif")
 forbid_text("${main_source}" "native IPC automatic startup"
     "GetSystemNativeAgentRuntime().start")
 require_text("${control_source}" "user-initiated native IPC startup"
     "if (runtime.start(error))")
-require_text("${control_source}" "visible Observe-only capability"
-    "textRow(\"特权能力\", \"禁用\")")
+require_text("${control_source}" "visible per-request privileged approval"
+    "textRow(\"特权能力\", \"逐请求审批\")")
 require_text("${control_source}" "bounded GUI approval decision"
     "NativeIpc::DecideSystemIpcApproval(")
 require_text("${control_source}" "approval-aware runtime stop"
@@ -58,7 +60,9 @@ forbid_text("${control_source}" "raw approval result in GUI"
 require_text("${owner_source}" "stop-time approval invalidation"
     "approvalBroker->cancelAll();")
 require_text("${owner_source}" "runtime receives the system broker"
-    "RequestSessionConfig{}, approvalBroker_.get())")
+    "RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get())")
+require_text("${owner_source}" "runtime receives shared Lua host execution"
+    "Mem::executeLuaJson(service_, paramsJson, context)")
 require_text("${owner_source}" "persistent approval audit injection"
     "IpcApprovalBrokerConfig{},\n                                              approvalAudit_.get())")
 require_text("${control_source}" "visible approval audit status"
@@ -81,10 +85,16 @@ require_text("${request_session_source}" "server-owned approval submission gate"
     "dispatcher_.canSubmitForApproval(")
 require_text("${dispatcher_source}" "privileged request submission"
     "approvalBroker_->submit(submission)")
-require_text("${dispatcher_source}" "approved execution remains disabled"
+require_text("${dispatcher_source}" "privileged approval consumption"
+    "approvalBroker_->consume(")
+require_text("${dispatcher_source}" "grant-bound privileged execution"
+    "return executeApproved(request, context, descriptor,")
+forbid_text("${dispatcher_source}" "obsolete disabled execution response"
     "approval_execution_disabled")
-forbid_text("${dispatcher_source}" "privileged approval consumption"
-    "approvalBroker_->consume")
+require_text("${tool_source}" "in-app shared Lua host tool"
+    "Mem::executeLuaJson(")
+require_text("${lua_tool_source}" "shared Lua target revalidation"
+    "return contextErrorJson(context, service.captureContext(true));")
 require_text("${handshake_source}" "Observe-only grant remains fixed"
     "if (capability == IpcCapability::Observe) {\n            result.grantedCapabilities.push_back(capability);")
 

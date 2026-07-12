@@ -1,6 +1,8 @@
 #include "SystemNativeAgentRuntime.h"
 
+#include "IpcMemServiceDispatcher.h"
 #include "NativeAgentRuntime.h"
+#include "mem/LuaJsonTool.h"
 #include "mem/SystemMemService.h"
 
 #include <memory>
@@ -8,6 +10,38 @@
 
 namespace NativeIpc {
 namespace {
+
+class SystemHostMethodExecutor final : public IIpcHostMethodExecutor {
+public:
+  explicit SystemHostMethodExecutor(Mem::IMemService &service)
+      : service_(service) {}
+
+  bool supports(const std::string &method) const override {
+#ifdef HAVE_LUAJIT
+    return method == "lua_execute";
+#else
+    (void)method;
+    return false;
+#endif
+  }
+
+  std::string execute(const std::string &method, const std::string &paramsJson,
+                      const Mem::OperationContext &context) override {
+#ifdef HAVE_LUAJIT
+    if (method == "lua_execute") {
+      return Mem::executeLuaJson(service_, paramsJson, context);
+    }
+#else
+    (void)method;
+    (void)paramsJson;
+    (void)context;
+#endif
+    return R"({"success":false,"error":{"code":"unsupported","message":"host method is unavailable","retryable":false},"completion":"rejected_before_start"})";
+  }
+
+private:
+  Mem::IMemService &service_;
+};
 
 class SystemRuntimeOwner final {
 public:
@@ -17,7 +51,7 @@ public:
     if (!runtime_) {
       runtime_ = std::make_unique<NativeAgentRuntime>(
           Mem::getSystemMemService(), kDefaultPipeName, HandshakeConfig{},
-          RequestSessionConfig{}, approvalBroker_.get());
+          RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get());
     }
     return *runtime_;
   }
@@ -60,11 +94,16 @@ private:
           std::make_unique<IpcApprovalBroker>(IpcApprovalBrokerConfig{},
                                               approvalAudit_.get());
     }
+    if (!hostExecutor_) {
+      hostExecutor_ = std::make_unique<SystemHostMethodExecutor>(
+          Mem::getSystemMemService());
+    }
   }
 
   std::mutex mutex_;
   std::unique_ptr<IpcApprovalAuditLog> approvalAudit_;
   std::unique_ptr<IpcApprovalBroker> approvalBroker_;
+  std::unique_ptr<SystemHostMethodExecutor> hostExecutor_;
   std::unique_ptr<NativeAgentRuntime> runtime_;
 };
 

@@ -15,116 +15,23 @@
 #include "AgentMemTools.h"
 #include "AgentRunContext.h"
 
-#include "../../socket/socket_io_timeout.h"
-#include "../../third_party/nlohmann/json.hpp"
+#include "../../mem/LuaJsonTool.h"
 
 #ifdef HAVE_LUAJIT
-#include "../../lua/LuaEngine.h"
 #include "../../mem/SystemMemService.h"
 #endif
 
-#include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <exception>
-#include <initializer_list>
-#include <limits>
 #include <string>
 
 namespace AI {
 
 namespace {
 
-using nlohmann::json;
-
-constexpr size_t kMaxToolLuaCodeBytes = 256 * 1024;
-constexpr int kDefaultToolLuaTimeoutSeconds = 30;
-constexpr int kMaxToolLuaTimeoutSeconds = 300;
-
 // ---------------------------------------------------------------------------
 // JSON helpers
 // ---------------------------------------------------------------------------
-
-// Return a JSON error payload as a string. Any tool returning a non-empty
-// "error" field is treated as a failure by the chat UI / model.
-std::string makeError(const std::string& msg) {
-    json j;
-    j["error"] = msg;
-    return j.dump();
-}
-
-// Wrap a successful JSON value for return. Kept as a thin helper so the
-// executors read uniformly.
-std::string makeOk(const json& value) {
-    return value.dump();
-}
-
-// ---------------------------------------------------------------------------
-// Lua argument helpers
-// ---------------------------------------------------------------------------
-
-std::string firstStringArg(const json& args,
-                           std::initializer_list<const char*> names,
-                           const char* fieldName) {
-    for (const char* name : names) {
-        if (!args.contains(name) || args[name].is_null()) continue;
-        if (!args[name].is_string()) {
-            throw std::runtime_error(std::string(fieldName) + " must be a string");
-        }
-        return args[name].get<std::string>();
-    }
-    throw std::runtime_error(std::string("missing required property '") + fieldName + "'");
-}
-
-bool isBlankString(const std::string& value) {
-    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
-        return std::isspace(ch) != 0;
-    });
-}
-
-std::string requiredStringArg(const json& args,
-                              std::initializer_list<const char*> names,
-                              const char* fieldName,
-                              size_t maxBytes,
-                              bool allowBlank = false) {
-    std::string value = firstStringArg(args, names, fieldName);
-    if (!allowBlank && isBlankString(value)) {
-        throw std::runtime_error(std::string(fieldName) + " must not be empty");
-    }
-    if (value.size() > maxBytes) {
-        throw std::runtime_error(std::string(fieldName) + " is too long");
-    }
-    return value;
-}
-
-long long readIntegerValue(const json& value, const char* key) {
-    if (value.is_number_unsigned()) {
-        const uint64_t v = value.get<uint64_t>();
-        if (v > static_cast<uint64_t>((std::numeric_limits<long long>::max)())) {
-            throw std::runtime_error(std::string(key) + " out of range");
-        }
-        return static_cast<long long>(v);
-    }
-    if (value.is_number_integer()) {
-        return value.get<long long>();
-    }
-    throw std::runtime_error(std::string(key) + " must be an integer");
-}
-
-int optionalIntArg(const json& args,
-                   const char* key,
-                   int fallback,
-                   int minValue,
-                   int maxValue) {
-    if (!args.contains(key) || args[key].is_null()) {
-        return fallback;
-    }
-    const long long value = readIntegerValue(args[key], key);
-    if (value < minValue || value > maxValue) {
-        throw std::runtime_error(std::string(key) + " out of range");
-    }
-    return static_cast<int>(value);
-}
 
 // ---------------------------------------------------------------------------
 // Individual tool executors
@@ -270,103 +177,11 @@ std::string execSymbolList(
 std::string execLuaExecute(const std::string& argsJson,
                            const Mem::OperationContext& context) {
 #ifdef HAVE_LUAJIT
-    try {
-        const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
-        const std::string code = requiredStringArg(
-            args, {"code"}, "code", kMaxToolLuaCodeBytes);
-        const int timeoutSeconds = optionalIntArg(
-            args, "timeout_seconds", kDefaultToolLuaTimeoutSeconds,
-            1, kMaxToolLuaTimeoutSeconds);
-        if (context.cancellation &&
-            context.cancellation->load(std::memory_order_acquire)) {
-            json cancelled;
-            cancelled["success"] = false;
-            cancelled["error"] = {
-                {"code", "cancel_requested"},
-                {"message", "Lua execution was cancelled before it started"},
-                {"retryable", false},
-            };
-            cancelled["completion"] = "cancel_requested";
-            return cancelled.dump();
-        }
-
-        const Mem::OperationContext current =
-            Mem::getSystemMemService().captureContext(true);
-        if (const auto contextError = validateAgentRunContext(
-                context, current, ToolTargetPolicy::Bound)) {
-            json rejected;
-            rejected["success"] = false;
-            rejected["error"] = {
-                {"code", Mem::errorCodeName(contextError->code)},
-                {"message", contextError->message},
-                {"retryable", contextError->retryable},
-            };
-            rejected["completion"] = "rejected_before_start";
-            return rejected.dump();
-        }
-
-        const auto requestedDeadline = std::chrono::steady_clock::now() +
-            std::chrono::seconds(timeoutSeconds);
-        const auto effectiveDeadline =
-            (std::min)(requestedDeadline, context.deadline);
-        if (std::chrono::steady_clock::now() >= effectiveDeadline) {
-            json timedOut;
-            timedOut["success"] = false;
-            timedOut["error"] = {
-                {"code", "timeout"},
-                {"message", "Lua execution deadline expired before it started"},
-                {"retryable", false},
-            };
-            timedOut["completion"] = "timed_out_before_start";
-            return timedOut.dump();
-        }
-
-        SocketIoTimeout::ScopedTimeout luaTimeout(effectiveDeadline);
-        auto& engine = LuaEngine::GetInstance();
-        if (!engine.IsInitialized() && !engine.Initialize()) {
-            return makeError("Lua engine initialization failed: " + engine.GetLastError());
-        }
-        std::string output;
-        if (!engine.ExecuteStringCapture(
-                code,
-                "ai_tool",
-                output,
-                static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()))) {
-            json err;
-            const bool timedOut =
-                engine.GetLastError() == "Lua execution timed out";
-            err["success"] = false;
-            err["error"] = {
-                {"code", timedOut ? "timeout" : "internal_error"},
-                {"message", engine.GetLastError()},
-                {"retryable", false},
-            };
-            err["output"] = output;
-            err["completion"] = timedOut ? "timed_out" : "completed";
-            return err.dump();
-        }
-        json result;
-        result["success"] = true;
-        result["output"] = output;
-        const bool cancelledAfterStart = context.cancellation &&
-            context.cancellation->load(std::memory_order_acquire);
-        const bool completedAfterDeadline =
-            std::chrono::steady_clock::now() >= context.deadline;
-        result["completed_after_cancel_request"] = cancelledAfterStart;
-        result["completed_after_deadline"] = completedAfterDeadline;
-        result["completion"] = cancelledAfterStart
-            ? "completed_after_cancel_request"
-            : (completedAfterDeadline
-                   ? "completed_after_deadline"
-                   : "completed");
-        return makeOk(result);
-    } catch (const std::exception& e) {
-        return makeError(std::string("lua_execute: ") + e.what());
-    }
+  return Mem::executeLuaJson(Mem::getSystemMemService(), argsJson, context);
 #else
-    (void)context;
-    (void)argsJson;
-    return makeError("lua_execute unavailable: AMem was built without LuaJIT");
+  (void)argsJson;
+  (void)context;
+  return R"({"success":false,"error":{"code":"unsupported","message":"lua_execute unavailable: AMem was built without LuaJIT","retryable":false},"completion":"rejected_before_start"})";
 #endif
 }
 

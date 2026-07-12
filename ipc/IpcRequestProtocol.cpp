@@ -63,8 +63,9 @@ bool dumpBounded(const json& value,
 }
 
 bool isSuccessfulCompletion(RequestCompletion completion) {
-    return completion == RequestCompletion::Completed ||
-           completion == RequestCompletion::CompletedAfterCancelRequest;
+  return completion == RequestCompletion::Completed ||
+         completion == RequestCompletion::CompletedAfterCancelRequest ||
+         completion == RequestCompletion::CompletedAfterDeadline;
 }
 
 } // namespace
@@ -164,10 +165,16 @@ const char* RequestCompletionName(RequestCompletion completion) {
         return "cancelled_before_start";
     case RequestCompletion::CancelledBeforeSend:
         return "cancelled_before_send";
+    case RequestCompletion::TimedOutBeforeStart:
+      return "timed_out_before_start";
+    case RequestCompletion::TimedOut:
+      return "timed_out";
     case RequestCompletion::CancelRequested:
         return "cancel_requested";
     case RequestCompletion::CompletedAfterCancelRequest:
         return "completed_after_cancel_request";
+    case RequestCompletion::CompletedAfterDeadline:
+      return "completed_after_deadline";
     case RequestCompletion::CompletionUnknown:
         return "completion_unknown";
     case RequestCompletion::Completed:

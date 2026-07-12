@@ -142,6 +142,17 @@ void testResponseEnvelopeAndCompletionNames() {
                NativeIpc::RequestCompletion::RejectedBeforeStart)) ==
                "rejected_before_start",
            "approval rejection must have a stable completion name");
+    expect(std::string(NativeIpc::RequestCompletionName(
+               NativeIpc::RequestCompletion::TimedOutBeforeStart)) ==
+                   "timed_out_before_start" &&
+               std::string(NativeIpc::RequestCompletionName(
+                   NativeIpc::RequestCompletion::TimedOut)) == "timed_out",
+           "timeout completion names must remain distinct");
+
+    success.completion = NativeIpc::RequestCompletion::CompletedAfterDeadline;
+    expect(NativeIpc::BuildResponsePayload(success, payload, error) &&
+               json::parse(payload)["completion"] == "completed_after_deadline",
+           "confirmed completion after deadline must remain successful");
 }
 
 void testResponseValidationAndLimits() {
