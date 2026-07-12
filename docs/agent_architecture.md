@@ -419,11 +419,13 @@ handler/caller thread 持续读取 Request/Cancel，一个 owned joinable worker
 
 `NativePipeSecurity` 生成 protected DACL，仅向当前进程用户 SID 和 SYSTEM 授予 pipe read/write，不授予 owner/DACL 修改权。`NamedPipeServer` 固定 `\\.\pipe\AMem.NativeAgent.v1`，使用 `PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE` 和 `nMaxInstances=1`；同一个 server handle 在连接间复用。overlapped accept 与 client handler 串行运行在一个 owned thread 上，`stop()` 先发 stop event、对活动 handle 调用 `CancelIoEx`，再 join。状态快照提供 stopped/listening/connected/stopping/failed、累计连接数、名称和错误。
 
-`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> host executor -> broker -> approval audit；broker 每次状态转换在锁外同步写 `native_ipc_approval_audit.jsonl`。日志记录 timestamp、client/method/capability/state、session/request、generation/target 和当时剩余 deadline，不含 params/result；单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 显示最近 20 条、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。产品批准不再返回 `approval_execution_disabled`：dispatcher 消费 durable one-shot grant，在 adapter/send 前再次检查 Cancel/deadline，并验证 grant 与活动 request metadata 一致。
+`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> host executor -> broker -> security audit；同一个 `IpcApprovalAuditLog` 同步写 `native_ipc_approval_audit.jsonl`。schema 2 用 `approval_transition` 与 `execution_outcome` 区分授权状态和最终执行摘要；后者保存 authorized/observed generation/target、success、completion 与 bounded error code，不保存 params、result JSON 或 error message。loader 继续接受 schema 1 approval 记录。单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 的“特权安全审计”表显示最近 20 条、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。
 
 `IpcApprovalBroker` 已固定 privileged authorization 的纯状态机。submission 只接受 server session/request id、bounded client identity、catalog method 和显式 operation snapshot/deadline；capability/target policy 由 `IpcMethodCatalog` 决定，Observe 与 unknown method 不能入队。record 不含 params/result，live/history 各自有界。pending 可转 approved/denied/invalidated/expired/cancelled；approved 仍是 live/revocable 状态。`consume()` 在 mutex 内重新匹配 session/request/deadline/generation/target 并先把 record 置为 consumed；随后在锁外同步审计，只有 durable success 才构造 grant。失败返回 `approval_audit_failed`，record 保持 consumed，重试只得到 `approval_not_approved`。consume 与 session Cancel 的竞态只有一个 terminal winner。
 
 system owner 延迟持有 audit、broker、host executor 和 runtime。控制窗口先 expire/invalidate，再显示 pending decision 与 persistent audit health；Stop/session/request cancellation 均产生状态转换。submit/decide/cancel 的 audit failure 保持既有 safe authorization 结论并进入可见计数，只有 consume 把 durability 作为 grant 的必要条件。静态 gate 固定 fail-closed consume、grant-bound dispatcher execution、共享 Lua target 复核和 Observe-only Hello。Hello 的 capability 面未扩大，授权粒度改为逐请求。
+
+dispatcher 对每个成功消费的 grant 在返回 response 前同步调用一次 `IIpcExecutionAuditSink`。consume audit 发生在执行前，因此写盘失败可以 fail closed；execution outcome 发生在 adapter 之后，可能已经发送或完成设备 mutation，因此持久化失败只能更新 audit health，不能把 confirmed success、`completion_unknown` 或其他真实 completion 改写成审计错误。未消费 grant 的 deny/expire/cancel 不产生 execution outcome。
 
 `process_open` 是唯一允许改变 external session baseline 的 method。dispatcher 在 `baselineMutex_` 下标记 controlled selection，要求 grant snapshot 与旧 baseline 完全匹配；adapter 成功后解析返回的新 target，并同时确认 service 当前 snapshot、connection generation 与返回值一致，才原子推进 baseline。失败、返回值不完整或并发目标变化不会推进 baseline，并以结构化错误终止或使 session 失效。
 
@@ -534,7 +536,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 5 组 approval-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、14 组 dispatcher 与 10 组 runtime 测试。approval/dispatcher 测试覆盖 persistent bounds/failure、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、11 个 service adapter、注入 Lua host、controlled selection 和 deadline completion；audit 50/50、broker 100/100、dispatcher/runtime 各 50/50。连同四个静态 gate，Debug/Release 当前各有 16 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。audit/dispatcher 测试覆盖 persistent bounds/failure、schema-1 reload、无 raw data 的 outcome、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、11 个 service adapter、注入 Lua host、controlled selection 和 deadline completion；audit/dispatcher/runtime 各 50/50。连同四个静态 gate，Debug/Release 当前各有 16 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
@@ -542,7 +544,7 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
 - legacy IPC HTTP parser/auth/sendAll
-- Native IPC GUI approval click、真实 Android privileged device/host operation 与最终 execution-outcome audit
+- Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - fake transport partial I/O、迟到响应和三端口 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐

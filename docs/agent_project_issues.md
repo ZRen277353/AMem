@@ -51,7 +51,7 @@
 - `IpcServer::HandleClient()` 接受浏览器 `OPTIONS` 预检。
 - `IpcServer::BuildHttpResponse()` 返回 `Access-Control-Allow-Origin: *`。
 - 同一入口暴露 `write_memory`、断点、扫描、`execute_lua`、进程切换等有副作用的方法。
-- Native transport 已有 protected DACL、remote rejection、有界 framing、Observe-only Hello、严格 session、24-name catalog、完整 dispatcher、owned runtime 和显式 GUI control。privileged broker 已接 submission、decision、session/request cancellation、bounded persistent JSONL audit 与 fail-closed consume；批准后由 dispatcher 消费一次性 grant，11 个特权方法走共享 `MemJsonTools`/`MemService`，`lua_execute` 走注入 host executor。GUI 显示日志路径、最近转换和写入失败；尚缺最终 privileged execution outcome 的独立持久审计。
+- Native transport 已有 protected DACL、remote rejection、有界 framing、Observe-only Hello、严格 session、24-name catalog、完整 dispatcher、owned runtime 和显式 GUI control。privileged broker 已接 submission、decision、session/request cancellation、bounded persistent JSONL audit 与 fail-closed consume；批准后由 dispatcher 消费一次性 grant，11 个特权方法走共享 `MemJsonTools`/`MemService`，`lua_execute` 走注入 host executor。schema 2 同时持久化 approval transition 与最终 execution outcome，GUI 显示最近事件和写入失败；日志不含 params/result/error message。
 
 **影响**
 
@@ -61,7 +61,7 @@
 
 1. 保持 default-off gate，不把迁移选项暴露为普通用户设置；若继续保留 opt-in，先移除 CORS 和 `OPTIONS` 支持。
 2. 若确认需要外部自动化，保持已落地 GUI control 的 compile/runtime 双重默认关闭，不恢复 Python MCP。
-3. submission、session/request cancel、persistent audit、fail-closed consume、send-boundary target recheck 与 executor 已完成；下一步补最终执行结果审计、GUI 审批点击 smoke 和真实 Android device 验证。Hello 继续只授予 Observe，privileged authorization 必须保持逐请求。
+3. submission、session/request cancel、persistent security audit、fail-closed consume、send-boundary target recheck、executor 与 outcome audit 已完成；下一步补 GUI 审批点击 smoke 和真实 Android device 验证。Hello 继续只授予 Observe，privileged authorization 必须保持逐请求。
 4. 若没有明确外部调用方，删除整个 IPC source 和 CMake wiring。
 
 ### A-02：Agent 目标绑定已覆盖当前所有实际 send 边界（已修复）
@@ -396,13 +396,13 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 5 组 approval-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、14 dispatcher 和 10 runtime 测试。approval/dispatcher 覆盖 persistent bounds/failure、identity/context revalidation、fail-closed burning、consume/Cancel race、全部 approved adapter、Lua host 注入、selection baseline 与 deadline completion；audit 50/50、broker 100/100、dispatcher/runtime 各 50/50。native gate 固定 fail-closed broker consume、grant-bound dispatcher execution、共享 Lua target recheck 和 Observe-only Hello。Debug/Release 各有 16 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
+仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。audit/dispatcher 覆盖 persistent bounds/failure、schema-1 reload、无 raw data outcome、identity/context revalidation、fail-closed burning、consume/Cancel race、全部 approved adapter、Lua host 注入、selection baseline 与 deadline completion；audit/dispatcher/runtime 各 50/50，broker 100/100。native gate 固定 fail-closed broker consume、grant-bound dispatcher execution/outcome audit、共享 Lua target recheck 和 Observe-only Hello。Debug/Release 各有 16 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
 - config/index 损坏与错误字段类型。
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
-- Legacy IPC HTTP parser/partial send，以及 Native IPC GUI approval click、真实设备 privileged operation 与最终 execution-outcome audit。
+- Legacy IPC HTTP parser/partial send，以及 Native IPC GUI approval click 与真实设备 privileged operation。
 - 不同 Windows 用户/session 与真实 remote client 的 native transport 负向测试。
 - fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
 - C++ Agent/IPC capability、结果和 feature gate 对齐。
@@ -420,7 +420,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | Native IPC wire contract 未固定 | `IpcProtocol` 使用显式 24-byte little-endian header、精确版本与 request-id 规则、UTF-8 和 payload 硬上限；跨 polling timeout 的 partial frame 会有界保留并继续读取，partial close 仍是 protocol error；终止 Error 后做 100 ms 可取消 drain |
 | Native IPC 身份与 handler 生命周期没有基础边界 | protected DACL 只允许当前进程用户和 SYSTEM read/write；拒绝 remote client，单实例 handle 持续占有名称；accept/handler 同属一个 joinable thread，stop event + `CancelIoEx` 后 join；产品仍不启动 |
 | Native IPC 协议阶段缺少统一 runtime owner | `NativeAgentRuntime` 持有 server，串起 framed connection/Hello/Observe dispatcher/request session；Stop 取消并 join handler/worker，线程安全 snapshot 不保存请求参数或结果；server session id 跨 restart 单调且退出时精确取消绑定审批；产品默认 stopped，仅允许用户显式启用 Observe |
-| Native IPC privileged approval 没有可验证状态机 | broker management、session/request cancel、worker submission、bounded persistent audit、fail-closed consume 与 dispatcher/send-boundary 已接产品链；写盘失败时烧毁授权且不返回 grant；最终执行结果仍缺独立持久审计 |
+| Native IPC privileged approval 没有可验证状态机 | broker management、session/request cancel、worker submission、bounded persistent security audit、fail-closed consume、dispatcher/send-boundary 与最终 outcome 已接产品链；consume 写盘失败烧毁授权且不返回 grant，post-effect outcome 写盘失败保持真实回执并进入可见 health |
 | Agent breakpoint 直连 socket 且回执/本地 tracker 分离 | 五个规范工具经 `MemService` 绑定 target；mutation 区分未发送/拒绝/完成未知/确认完成，设备确认与 cleanup tracker 在同一 transaction 更新，hits 使用有界最新批次且不伪造 cursor |
 | Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
@@ -445,13 +445,14 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - `AgentTaskExecutor::shutdown()` 会 join；`HttpClient` 的 3 秒 bounded wait 仍不是 HTTP worker 已全部退出的证明。
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
 - IPC 绑定 loopback 可缩小暴露面，但在无鉴权且允许 CORS 时不是完整安全边界；native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权。尚未完成跨用户/session 与真实 remote client 负向验证。
+- execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
 - `installTempFile()` 已用于 `ApiKeyStore`、`AiSettings`、`SessionManager`，但 `ChatSession` 仍有独立且较弱的替换路径。
 - `DeviceSession` 已删除待处理字节清理恢复路径并 poison 失败连接，但尚缺 fake transport 对迟到字节/partial I/O 的完整证明。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
 ## 建议修复顺序
 
-1. 保持 HTTP IPC 与 native runtime default-off；保留已落地的 submission/management/cancellation/audit/fail-closed consume/dispatcher send boundary，并补最终执行结果审计和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability，也不能默认开启旧端口。
+1. 保持 HTTP IPC 与 native runtime default-off；保留已落地的 submission/management/cancellation/security audit/fail-closed consume/dispatcher send boundary，并补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability，也不能默认开启旧端口。
 2. 为已落地的 poison/lifecycle gate 增加 fake transport 与真实设备压力证明。
 3. 删除 legacy HTTP detached handler；native transport 已具备 join 基础，后续 frame/session handler 必须保持同一受管生命周期。
 4. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。

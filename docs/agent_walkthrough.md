@@ -482,7 +482,9 @@ Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 
 `NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 获得 server 单调 session id；stop/start 清诊断计数但不复用 id。snapshot 提供 phase、session count/id、活动 client identity/capability、最后状态和 request/response/cancel 计数，不保存 params/result。system owner 保证 audit、broker 和 host executor 都晚于 runtime 析构；窗口提供显式启停。编译与运行默认关闭，`main.cpp` 只在设备断连前 shutdown。handler 与 dispatch worker 都受管并 join。Hello 与 GUI 显示仍明确为 `Observe + 逐请求审批`，不会授予长期 privileged capability。
 
-privileged broker 已接入完整的 submission -> decision -> consume -> execution 产品链。worker 用 `{sessionId, requestId}` 提交 metadata 并保持 active request；Cancel/Stop/session 关闭产生精确终止状态。每次 broker 转换都同步调用锁外 `IpcApprovalAuditLog`：写 `native_ipc_approval_audit.jsonl`，轮转 `.1`，更新最近 100 条及成功/失败计数。GUI 显示最近 20 条。日志是明文，含 client/method/session/request/generation/target，但不含 params/results。broker `consume()` 在锁内复核 session/request/deadline/generation/target 并烧毁 record，再在锁外审计；只有 durable success 返回 grant，失败不可重试复用。dispatcher 随后校验 grant metadata，并在 adapter/send 前再次检查 Cancel/deadline。
+privileged broker 已接入完整的 submission -> decision -> consume -> execution 产品链。worker 用 `{sessionId, requestId}` 提交 metadata 并保持 active request；Cancel/Stop/session 关闭产生精确终止状态。共享 `IpcApprovalAuditLog` 写 `native_ipc_approval_audit.jsonl`，轮转 `.1`，更新最近 100 条及成功/失败计数。schema 2 把 broker 转换记为 `approval_transition`，把每个 consumed grant 的最终摘要记为 `execution_outcome`；旧 schema 1 仍可加载。日志是明文，含 client/method/session/request、authorized/observed generation/target、success、completion 和 error code，但不含 params、result JSON 或 error message。GUI“特权安全审计”显示最近 20 条。
+
+broker `consume()` 在锁内复核 session/request/deadline/generation/target 并烧毁 record，再在锁外审计；只有 durable success 返回 grant，失败不可重试复用。dispatcher 随后校验 grant metadata，在 adapter/send 前再次检查 Cancel/deadline，并在返回 response 前同步记录一次 outcome。consume 审计失败可阻止执行；outcome 审计发生在可能已发送的 mutation 之后，因此失败只进入可见 health，不覆盖真实 completion。deny、expire 或 consume 前 Cancel 没有 execution outcome。
 
 `process_open` 是特殊的 `Selection` 路径：dispatcher 在 mutex 下暂时允许预期中的目标切换，调用 adapter 后从结构化结果取出新 snapshot，并与 service 当前 snapshot 精确比对；只有 connection generation 和完整 target 都一致时才推进 session baseline。其余方法仍绑定旧 baseline。Native completion 还新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，确保“截止时间后收到设备确认”不会被错误表述为未执行。
 
@@ -595,13 +597,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 5 组 approval-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、14 组 dispatcher 和 10 组 runtime 测试。approval/dispatcher 测试覆盖 persistent bounds/failure、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、全部 approved adapter、Lua host 注入、process selection 与 deadline completion；Debug/Release 当前各有 16 项 CTest，dispatcher/runtime 各连续 50 次通过。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。audit/dispatcher 测试覆盖 persistent bounds/failure、schema-1 reload、无 raw data 的 outcome、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、全部 approved adapter、Lua host 注入、process selection 与 deadline completion；Debug/Release 当前各有 16 项 CTest，audit/dispatcher/runtime 各连续 50 次通过。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Native IPC dispatcher consume adapter 和真实 send-boundary 建立集成测试；persistent audit、fail-closed broker consume、submission、session/request cancel 与 GUI status gate 已有无设备测试。
+5. 用真实 GUI approval click 与 Android device 覆盖 privileged adapter/send-boundary；persistent security audit、fail-closed consume、execution outcome、session/request cancel 与 GUI status gate 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 
