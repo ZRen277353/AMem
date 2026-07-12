@@ -1341,8 +1341,38 @@ std::string execReadDisassembly(const std::string& argsJson) {
     }
 }
 
-// set_breakpoint
-std::string execSetBreakpoint(const std::string& argsJson) {
+std::string execBreakpointSet(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().breakpointSet(argsJson, context);
+}
+
+std::string execBreakpointRemove(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().breakpointRemove(argsJson, context);
+}
+
+std::string execBreakpointSuspend(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().breakpointSuspend(argsJson, context);
+}
+
+std::string execBreakpointResume(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().breakpointResume(argsJson, context);
+}
+
+std::string execBreakpointHits(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    return getAgentMemTools().breakpointHits(argsJson, context);
+}
+
+// Hidden compatibility implementation for set_breakpoint.
+std::string execSetBreakpointLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -1372,8 +1402,8 @@ std::string execSetBreakpoint(const std::string& argsJson) {
     }
 }
 
-// remove_breakpoint
-std::string execRemoveBreakpoint(const std::string& argsJson) {
+// Hidden compatibility implementation for remove_breakpoint.
+std::string execRemoveBreakpointLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -1392,8 +1422,8 @@ std::string execRemoveBreakpoint(const std::string& argsJson) {
     }
 }
 
-// suspend_breakpoint
-std::string execSuspendBreakpoint(const std::string& argsJson) {
+// Hidden compatibility implementation for suspend_breakpoint.
+std::string execSuspendBreakpointLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -1409,8 +1439,8 @@ std::string execSuspendBreakpoint(const std::string& argsJson) {
     }
 }
 
-// resume_breakpoint
-std::string execResumeBreakpoint(const std::string& argsJson) {
+// Hidden compatibility implementation for resume_breakpoint.
+std::string execResumeBreakpointLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -1426,8 +1456,8 @@ std::string execResumeBreakpoint(const std::string& argsJson) {
     }
 }
 
-// read_breakpoint_info
-std::string execReadBreakpointInfo(const std::string& argsJson) {
+// Hidden compatibility implementation for read_breakpoint_info.
+std::string execReadBreakpointInfoLegacy(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
         const uint64_t address = parseAddressJson(args.at("address"));
@@ -2272,6 +2302,62 @@ constexpr const char* kSchemaReadDisassembly = R"JSON({
   }
 })JSON";
 
+constexpr const char* kSchemaBreakpointSet = R"JSON({
+  "type": "object",
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
+      "description": "Explicit 0x-prefixed target address"
+    },
+    "access": {
+      "type": "string",
+      "enum": ["read", "write", "read_write", "execute"],
+      "description": "Hardware breakpoint access type (default write)"
+    },
+    "size": {
+      "type": "integer",
+      "enum": [1, 2, 4, 8],
+      "description": "Breakpoint width in bytes (default 4; execute requires 4)"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaBreakpointAddress = R"JSON({
+  "type": "object",
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
+      "description": "Explicit 0x-prefixed breakpoint address"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaBreakpointHits = R"JSON({
+  "type": "object",
+  "required": ["address"],
+  "properties": {
+    "address": {
+      "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
+      "description": "Explicit 0x-prefixed breakpoint address"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    }
+  }
+})JSON";
+
 constexpr const char* kSchemaSetBreakpoint = R"JSON({
   "type": "object",
   "required": ["address"],
@@ -2830,48 +2916,88 @@ void ToolExecutor::initBuiltinTools() {
         ToolTargetPolicy::Bound);
 
     registerTool(
+        "breakpoint_set",
+        "Set a target-bound hardware breakpoint with a confirmed mutation receipt.",
+        kSchemaBreakpointSet,
+        ToolSafety::Write,
+        &execBreakpointSet,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "breakpoint_remove",
+        "Remove a target-bound hardware breakpoint with a confirmed mutation receipt.",
+        kSchemaBreakpointAddress,
+        ToolSafety::Write,
+        &execBreakpointRemove,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "breakpoint_hits",
+        "Read a bounded page of hit and register data for a hardware breakpoint.",
+        kSchemaBreakpointHits,
+        ToolSafety::ReadOnly,
+        &execBreakpointHits,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "breakpoint_suspend",
+        "Suspend a target-bound hardware breakpoint with a confirmed mutation receipt.",
+        kSchemaBreakpointAddress,
+        ToolSafety::Write,
+        &execBreakpointSuspend,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "breakpoint_resume",
+        "Resume a target-bound hardware breakpoint with a confirmed mutation receipt.",
+        kSchemaBreakpointAddress,
+        ToolSafety::Write,
+        &execBreakpointResume,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "set_breakpoint",
-        "Set a hardware breakpoint at the given address. Requires user confirmation.",
+        "Compatibility alias for breakpoint_set.",
         kSchemaSetBreakpoint,
         ToolSafety::Write,
-        &execSetBreakpoint,
-        true,
+        &execSetBreakpointLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "remove_breakpoint",
-        "Remove a hardware breakpoint at the given address. Requires user confirmation.",
+        "Compatibility alias for breakpoint_remove.",
         kSchemaRemoveBreakpoint,
         ToolSafety::Write,
-        &execRemoveBreakpoint,
-        true,
+        &execRemoveBreakpointLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "read_breakpoint_info",
-        "Read hit/register information for a hardware breakpoint.",
+        "Compatibility alias for breakpoint_hits.",
         kSchemaReadBreakpointInfo,
         ToolSafety::ReadOnly,
-        &execReadBreakpointInfo,
-        true,
+        &execReadBreakpointInfoLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "suspend_breakpoint",
-        "Suspend a hardware breakpoint without removing it. Requires user confirmation.",
+        "Compatibility alias for breakpoint_suspend.",
         kSchemaReadBreakpointInfo,
         ToolSafety::Write,
-        &execSuspendBreakpoint,
-        true,
+        &execSuspendBreakpointLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "resume_breakpoint",
-        "Resume a suspended hardware breakpoint. Requires user confirmation.",
+        "Compatibility alias for breakpoint_resume.",
         kSchemaReadBreakpointInfo,
         ToolSafety::Write,
-        &execResumeBreakpoint,
-        true,
+        &execResumeBreakpointLegacy,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(

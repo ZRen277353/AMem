@@ -33,6 +33,16 @@ public:
                               const Mem::OperationContext& context);
     std::string symbolList(const std::string& argsJson,
                            const Mem::OperationContext& context);
+    std::string breakpointSet(const std::string& argsJson,
+                              const Mem::OperationContext& context);
+    std::string breakpointRemove(const std::string& argsJson,
+                                 const Mem::OperationContext& context);
+    std::string breakpointSuspend(const std::string& argsJson,
+                                  const Mem::OperationContext& context);
+    std::string breakpointResume(const std::string& argsJson,
+                                 const Mem::OperationContext& context);
+    std::string breakpointHits(const std::string& argsJson,
+                               const Mem::OperationContext& context);
     std::string scanStart(const std::string& argsJson,
                           const Mem::OperationContext& context);
     std::string scanRefine(const std::string& argsJson,

@@ -2266,6 +2266,64 @@ void testAgentAdapter() {
                symbol.at("symbol_epoch") == 3,
            "symbol_resolve adapter should expose canonical module and address data");
 
+    const json strictBreakpointAddress = json::parse(
+        tools.breakpointSet(
+            R"({"address":"7000","access":"write","size":4})",
+            targetContext));
+    expect(!strictBreakpointAddress.at("success").get<bool>() &&
+               strictBreakpointAddress.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical breakpoint_set should require a 0x-prefixed address");
+
+    const json breakpointSet = json::parse(
+        tools.breakpointSet(
+            R"({"address":"0x7000","access":"read_write","size":8})",
+            targetContext));
+    expect(breakpointSet.at("success").get<bool>() &&
+               breakpointSet.at("action") == "set" &&
+               breakpointSet.at("confirmed").get<bool>() &&
+               breakpointSet.at("access") == "read_write" &&
+               breakpointSet.at("size") == 8 &&
+               breakpointSet.at("completion") == "completed",
+           "breakpoint_set adapter should expose a confirmed canonical receipt");
+
+    const json invalidExecuteBreakpoint = json::parse(
+        tools.breakpointSet(
+            R"({"address":"0x7000","access":"execute","size":8})",
+            targetContext));
+    expect(!invalidExecuteBreakpoint.at("success").get<bool>() &&
+               invalidExecuteBreakpoint.at("error").at("code") ==
+                   "invalid_argument",
+           "breakpoint_set adapter should reject ignored execute sizes");
+
+    const json breakpointHits = json::parse(
+        tools.breakpointHits(
+            R"({"address":"0x7000","count":2})",
+            targetContext));
+    expect(breakpointHits.at("success").get<bool>() &&
+               breakpointHits.at("total") == 3 &&
+               breakpointHits.at("count") == 2 &&
+               breakpointHits.at("truncated").get<bool>() &&
+               breakpointHits.at("next_cursor") == 2 &&
+               breakpointHits.at("hits").at(0).at("hit_time") == "100" &&
+               breakpointHits.at("hits").at(0).at("registers").at(0) ==
+                   "0xA0",
+           "breakpoint_hits adapter should page precision-safe register data");
+
+    const json breakpointRemove = json::parse(
+        tools.breakpointRemove(
+            R"({"address":"0x7000"})", targetContext));
+    const json breakpointSuspend = json::parse(
+        tools.breakpointSuspend(
+            R"({"address":"0x7000"})", targetContext));
+    const json breakpointResume = json::parse(
+        tools.breakpointResume(
+            R"({"address":"0x7000"})", targetContext));
+    expect(breakpointRemove.at("action") == "remove" &&
+               breakpointSuspend.at("action") == "suspend" &&
+               breakpointResume.at("action") == "resume",
+           "breakpoint adapters should preserve canonical action receipts");
+
     const json strictScanRange = json::parse(
         tools.scanStart(
             R"({"mode":"exact","data_type":"dword","value":42,"start":"1000"})",

@@ -391,6 +391,69 @@ const char* scanKindName(Mem::ScanStartKind kind) {
     }
 }
 
+Mem::BreakpointAccess breakpointAccessArgument(const json& args) {
+    std::string access = optionalString(args, "access");
+    if (access.empty()) {
+        access = "write";
+    }
+    access = lowerAscii(access);
+    if (access == "read") return Mem::BreakpointAccess::Read;
+    if (access == "write") return Mem::BreakpointAccess::Write;
+    if (access == "read_write") return Mem::BreakpointAccess::ReadWrite;
+    if (access == "execute") return Mem::BreakpointAccess::Execute;
+    throw std::runtime_error("unsupported breakpoint access: " + access);
+}
+
+const char* breakpointAccessName(Mem::BreakpointAccess access) {
+    switch (access) {
+        case Mem::BreakpointAccess::Read:      return "read";
+        case Mem::BreakpointAccess::Write:     return "write";
+        case Mem::BreakpointAccess::ReadWrite: return "read_write";
+        case Mem::BreakpointAccess::Execute:   return "execute";
+        default:                               return "unknown";
+    }
+}
+
+const char* breakpointActionName(Mem::BreakpointAction action) {
+    switch (action) {
+        case Mem::BreakpointAction::Set:     return "set";
+        case Mem::BreakpointAction::Remove:  return "remove";
+        case Mem::BreakpointAction::Suspend: return "suspend";
+        case Mem::BreakpointAction::Resume:  return "resume";
+        default:                             return "unknown";
+    }
+}
+
+json breakpointReceiptJson(
+    const Mem::BreakpointMutationReceipt& receipt,
+    uint64_t durationMs) {
+    json output;
+    output["success"] = true;
+    output["address"] = Mem::formatAddress(receipt.address);
+    output["action"] = breakpointActionName(receipt.action);
+    output["confirmed"] = true;
+    if (receipt.access) {
+        output["access"] = breakpointAccessName(*receipt.access);
+    }
+    if (receipt.size) {
+        output["size"] = *receipt.size;
+    }
+    output["completed_after_cancel_request"] =
+        receipt.completedAfterCancelRequest;
+    output["completed_after_deadline"] =
+        receipt.completedAfterDeadline;
+    output["completion"] = receipt.completedAfterCancelRequest
+        ? "completed_after_cancel_request"
+        : (receipt.completedAfterDeadline
+               ? "completed_after_deadline"
+               : "completed");
+    output["meta"] = resultMeta(
+        durationMs,
+        receipt.target.connectionGeneration,
+        &receipt.target);
+    return output;
+}
+
 void parseCanonicalScanRange(const json& args,
                              uint64_t& start,
                              uint64_t& end) {
@@ -931,6 +994,165 @@ std::string AgentMemTools::symbolList(
         return output.dump();
     } catch (const std::exception& error) {
         return exceptionResult("symbol_list", error);
+    }
+}
+
+std::string AgentMemTools::breakpointSet(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        Mem::BreakpointSetRequest request;
+        request.address = address.value();
+        request.access = breakpointAccessArgument(args);
+        request.size = static_cast<uint32_t>(optionalSize(
+            args, "size", 4, 8));
+        const auto response = service_.setBreakpoint(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+        return breakpointReceiptJson(
+            response.value(), response.durationMs()).dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("breakpoint_set", error);
+    }
+}
+
+std::string AgentMemTools::breakpointRemove(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        const Mem::BreakpointAddressRequest request{address.value()};
+        const auto response = service_.removeBreakpoint(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+        return breakpointReceiptJson(
+            response.value(), response.durationMs()).dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("breakpoint_remove", error);
+    }
+}
+
+std::string AgentMemTools::breakpointSuspend(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        const Mem::BreakpointAddressRequest request{address.value()};
+        const auto response = service_.suspendBreakpoint(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+        return breakpointReceiptJson(
+            response.value(), response.durationMs()).dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("breakpoint_suspend", error);
+    }
+}
+
+std::string AgentMemTools::breakpointResume(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        const Mem::BreakpointAddressRequest request{address.value()};
+        const auto response = service_.resumeBreakpoint(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+        return breakpointReceiptJson(
+            response.value(), response.durationMs()).dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("breakpoint_resume", error);
+    }
+}
+
+std::string AgentMemTools::breakpointHits(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        if (!args.contains("address")) {
+            throw std::runtime_error("address is required");
+        }
+        const auto address = parseAddressArgument(args.at("address"), false);
+        if (!address.ok()) {
+            return errorResult(address.error(), address.durationMs());
+        }
+        Mem::BreakpointHitsRequest request;
+        request.address = address.value();
+        request.offset = optionalSize(
+            args, "offset", 0, Mem::kMaxBreakpointHitCount);
+        request.limit = optionalSize(
+            args, "count", 100, Mem::kMaxBreakpointHitPageSize);
+        const auto response = service_.breakpointHits(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json hits = json::array();
+        for (const auto& hit : response.value().items) {
+            json registers = json::array();
+            for (uint64_t value : hit.registers) {
+                registers.push_back(Mem::formatAddress(value));
+            }
+            hits.push_back({
+                {"hit_address", Mem::formatAddress(hit.hitAddress)},
+                {"hit_time", std::to_string(hit.hitTime)},
+                {"pc", Mem::formatAddress(hit.programCounter)},
+                {"sp", Mem::formatAddress(hit.stackPointer)},
+                {"pstate", Mem::formatAddress(hit.pstate)},
+                {"registers", std::move(registers)},
+            });
+        }
+        json output;
+        output["success"] = true;
+        output["address"] = Mem::formatAddress(response.value().address);
+        output["total"] = response.value().total;
+        output["offset"] = response.value().offset;
+        output["count"] = response.value().items.size();
+        output["hits"] = std::move(hits);
+        output["truncated"] = response.value().nextOffset.has_value();
+        output["next_cursor"] = response.value().nextOffset
+                                    ? json(*response.value().nextOffset)
+                                    : json(nullptr);
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            response.value().target.connectionGeneration,
+            &response.value().target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("breakpoint_hits", error);
     }
 }
 
