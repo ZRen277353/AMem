@@ -40,12 +40,11 @@ private:
 
     // Parse a single SSE event payload (the JSON object from `data: {...}`).
     // Emits any delta text via request.onToken and accumulates tool_call
-    // fragments into outMessage. Sets finished=true on `[DONE]` or when the
-    // server signals finish_reason.
+    // fragments into outMessage. Stream lifecycle validation is handled by
+    // StreamTerminalTracker at the callback boundary.
     void parseSSEChunk(const std::string& eventData,
                        const CompletionRequest& request,
-                       ChatMessage& outMessage,
-                       bool& finished);
+                       ChatMessage& outMessage);
 
     // Parse a non-streaming full JSON response body into a CompletionResponse.
     CompletionResponse parseFullResponse(const std::string& body);

@@ -3,6 +3,7 @@
 #include "DeepSeekProvider.h"
 
 #include "HttpClient.h"
+#include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
 #include "../../third_party/nlohmann/json.hpp"
@@ -214,11 +215,8 @@ std::string DeepSeekProvider::buildRequestBody(const CompletionRequest& request)
 
 void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
                                      const CompletionRequest& request,
-                                     ChatMessage& outMessage,
-                                     bool& finished) {
-    // [DONE] is filtered by HttpClient's SSE parser, but handle it defensively.
+                                     ChatMessage& outMessage) {
     if (eventData == "[DONE]") {
-        finished = true;
         return;
     }
 
@@ -292,9 +290,6 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
         }
     }
 
-    if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
-        finished = true;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +416,7 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
     // throughout the request's lifetime.
     struct StreamState {
         ChatMessage assembled;
-        bool finished = false;
+        StreamTerminalTracker terminal;
     };
     auto state = std::make_shared<StreamState>();
     state->assembled.role = Role::Assistant;
@@ -431,7 +426,9 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
     SSECallback onSSE;
     if (streaming) {
         onSSE = [this, state, request](const std::string& eventData) {
-            parseSSEChunk(eventData, request, state->assembled, state->finished);
+            state->terminal.observe(
+                InspectOpenAICompatibleStreamEvent(eventData, "DeepSeek"));
+            parseSSEChunk(eventData, request, state->assembled);
         };
     }
 
@@ -439,15 +436,13 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
         [this, state, request, streaming](HttpResponse http) {
             CompletionResponse resp;
             resp.message.role = Role::Assistant;
+            if (streaming) {
+                resp.message = state->assembled;
+            }
 
             if (http.cancelled) {
                 resp.error.category = ErrorCategory::Cancelled;
                 resp.error.message = "request cancelled";
-                // Preserve any partial streamed content so the caller can
-                // surface it even after cancellation.
-                if (streaming) {
-                    resp.message = state->assembled;
-                }
             } else if (http.timedOut) {
                 resp.error.category = ErrorCategory::Timeout;
                 resp.error.message = http.errorMessage.empty()
@@ -472,10 +467,9 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
                 resp.error.message = oss.str();
                 resp.error.providerErrorCode = ex.code;
             } else if (streaming) {
-                // Success + streaming: use the assembled message and validate
-                // tool_call arguments for Req 4.5.
-                resp.message = state->assembled;
-                validateToolCallArguments(resp.message, resp);
+                if (state->terminal.applyValidation("DeepSeek", resp)) {
+                    validateToolCallArguments(resp.message, resp);
+                }
             } else {
                 // Success + non-streaming: parse the full JSON body.
                 resp = parseFullResponse(http.body);

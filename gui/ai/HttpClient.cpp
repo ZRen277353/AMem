@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "HttpClient.h"
+#include "SSEParser.h"
 
 // cpp-httplib is header-only and provides HTTPS support when compiled with
 // CPPHTTPLIB_OPENSSL_SUPPORT. The CMake task gates this include behind
@@ -81,109 +82,6 @@ std::string describeHttplibError(httplib::Error err) {
     default:                                 return "unknown network error";
     }
 }
-
-// SSE 解析器：按行累积，遇到空行时把累积的 data 拼接后派发
-class SSEParser {
-public:
-    explicit SSEParser(SSECallback cb) : cb_(std::move(cb)) {}
-
-    // 追加原始字节；识别 \n 边界；\r 被忽略以兼容 \r\n
-    void feed(const char* data, size_t len) {
-        if (callbackFailed_) {
-            return;
-        }
-        for (size_t i = 0; i < len; ++i) {
-            char c = data[i];
-            if (c == '\r') {
-                continue;
-            }
-            if (c == '\n') {
-                processLine(currentLine_);
-                currentLine_.clear();
-            } else {
-                currentLine_.push_back(c);
-            }
-        }
-    }
-
-    // 流结束时，刷出剩余数据
-    void finish() {
-        if (callbackFailed_) {
-            return;
-        }
-        if (!currentLine_.empty()) {
-            processLine(currentLine_);
-            currentLine_.clear();
-        }
-        flushEvent();
-    }
-
-    bool callbackFailed() const {
-        return callbackFailed_;
-    }
-
-    const std::string& callbackError() const {
-        return callbackError_;
-    }
-
-private:
-    void processLine(const std::string& line) {
-        if (callbackFailed_) {
-            return;
-        }
-        if (line.empty()) {
-            // 空行 → 事件结束
-            flushEvent();
-            return;
-        }
-        // SSE 注释行以 ':' 开头，忽略
-        if (line[0] == ':') {
-            return;
-        }
-        // 仅处理 data: 字段
-        if (line.compare(0, 5, "data:") == 0) {
-            // 剥离 "data:" 和紧跟的一个可选空格
-            size_t start = 5;
-            if (start < line.size() && line[start] == ' ') {
-                ++start;
-            }
-            if (!eventBuffer_.empty()) {
-                eventBuffer_.push_back('\n');
-            }
-            eventBuffer_.append(line, start, std::string::npos);
-        }
-        // 其他字段（event:, id:, retry:）当前无需处理
-    }
-
-    void flushEvent() {
-        if (eventBuffer_.empty()) {
-            return;
-        }
-        // 过滤 OpenAI 风格的 [DONE] 终止事件
-        if (eventBuffer_ == "[DONE]") {
-            eventBuffer_.clear();
-            return;
-        }
-        if (cb_) {
-            try {
-                cb_(eventBuffer_);
-            } catch (const std::exception& e) {
-                callbackFailed_ = true;
-                callbackError_ = e.what();
-            } catch (...) {
-                callbackFailed_ = true;
-                callbackError_ = "unknown callback exception";
-            }
-        }
-        eventBuffer_.clear();
-    }
-
-    SSECallback cb_;
-    std::string currentLine_;
-    std::string eventBuffer_;
-    bool callbackFailed_ = false;
-    std::string callbackError_;
-};
 
 } // namespace
 

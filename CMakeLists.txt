@@ -140,6 +140,8 @@ endif()
 set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/ProviderRegistry.cpp
     gui/ai/HttpClient.cpp
+    gui/ai/SSEParser.cpp
+    gui/ai/ProviderStreamTerminal.cpp
     gui/ai/UIMessageQueue.cpp
     gui/ai/OpenAIProvider.cpp
     gui/ai/ClaudeProvider.cpp
@@ -465,6 +467,29 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeProviderStreamTerminalTests
+        tests/ProviderStreamTerminalTests.cpp
+        gui/ai/SSEParser.cpp
+        gui/ai/ProviderStreamTerminal.cpp
+    )
+    target_include_directories(NativeProviderStreamTerminalTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
+    )
+    target_compile_definitions(NativeProviderStreamTerminalTests PRIVATE HAVE_AI_CHAT)
+    if(MSVC)
+        target_compile_options(NativeProviderStreamTerminalTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeProviderStreamTerminalTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeProviderStreamTerminalTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(
+        NAME native_provider_stream_terminal
+        COMMAND NativeProviderStreamTerminalTests
+    )
+
     add_executable(NativeIpcApprovalAuditTests
         tests/IpcApprovalAuditTests.cpp
     )

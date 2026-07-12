@@ -3,6 +3,7 @@
 #include "ClaudeProvider.h"
 
 #include "HttpClient.h"
+#include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
 #include "../../third_party/nlohmann/json.hpp"
@@ -228,9 +229,9 @@ struct StreamState {
     std::string accumulatedText;       // concatenation of all text blocks
     std::vector<ToolCall> toolCalls;   // finalized on content_block_stop
 
-    bool completed = false;            // set on message_stop / errors
     bool errorSeen = false;
     ProviderError streamError;
+    StreamTerminalTracker terminal;
 
     std::string runId;
     StreamCallback onToken;
@@ -343,13 +344,11 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
     }
 
     if (type == "message_stop") {
-        state.completed = true;
         return;
     }
 
     if (type == "error") {
         state.errorSeen = true;
-        state.completed = true;
         ProviderError err;
         err.category = ErrorCategory::InvalidResponse;
         if (const json* e = objectMember(ev, "error")) {
@@ -582,6 +581,7 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
     SSECallback sseCb;
     if (streaming) {
         sseCb = [state](const std::string& evt) {
+            state->terminal.observe(InspectClaudeStreamEvent(evt));
             handleStreamEvent(evt, *state);
         };
     }
@@ -590,6 +590,10 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         [state, onComplete, streaming](HttpResponse http) {
         CompletionResponse final;
         final.message.role = Role::Assistant;
+        if (streaming) {
+            final.message.content = state->accumulatedText;
+            final.message.toolCalls = state->toolCalls;
+        }
 
         if (http.cancelled) {
             final.error = mapError(http, http.body);
@@ -607,10 +611,6 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
             final.error = mapError(http, http.body);
             // Preserve any partial streaming content so the UI can show what
             // was received before the stream broke (Req 12.7).
-            if (streaming) {
-                final.message.content   = std::move(state->accumulatedText);
-                final.message.toolCalls = std::move(state->toolCalls);
-            }
             UIMessage m;
             m.type     = UIMessageType::Error;
             m.runId    = state->runId;
@@ -624,8 +624,6 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         if (streaming) {
             if (state->errorSeen) {
                 final.error           = state->streamError;
-                final.message.content = std::move(state->accumulatedText);
-                final.message.toolCalls = std::move(state->toolCalls);
                 UIMessage m;
                 m.type     = UIMessageType::Error;
                 m.runId    = state->runId;
@@ -635,8 +633,16 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
                 if (onComplete) onComplete(std::move(final));
                 return;
             }
-            final.message.content   = std::move(state->accumulatedText);
-            final.message.toolCalls = std::move(state->toolCalls);
+            if (!state->terminal.applyValidation("Claude", final)) {
+                UIMessage m;
+                m.type     = UIMessageType::Error;
+                m.runId    = state->runId;
+                m.data     = final.error.message;
+                m.response = final;
+                UIMessageQueue::getInstance().push(std::move(m));
+                if (onComplete) onComplete(std::move(final));
+                return;
+            }
         } else {
             // Non-streaming: parse the full JSON body returned by the API.
             final = ClaudeProvider::parseFullResponse(http.body);

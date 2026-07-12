@@ -3,6 +3,7 @@
 #include "OpenAIProvider.h"
 
 #include "HttpClient.h"
+#include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
 #include <nlohmann/json.hpp>
@@ -464,18 +465,19 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
         auto content = std::make_shared<std::string>();
         auto toolCalls = std::make_shared<std::vector<ToolCall>>();
         auto mu = std::make_shared<std::mutex>();
+        auto terminal = std::make_shared<StreamTerminalTracker>();
         auto requestCopy = std::make_shared<CompletionRequest>(request);
 
-        SSECallback sseCb = [this, content, toolCalls, mu, requestCopy](
+        SSECallback sseCb = [this, content, toolCalls, mu, terminal, requestCopy](
                                 const std::string& eventData) {
+            terminal->observe(
+                InspectOpenAICompatibleStreamEvent(eventData, "OpenAI"));
+            if (eventData == "[DONE]") {
+                return;
+            }
             CompletionResponse delta = this->parseSSEChunk(eventData);
             if (delta.error) {
-                // A single malformed SSE chunk is non-fatal: skip it and keep
-                // consuming the stream (matching DeepSeekProvider). The final
-                // message is still assembled from the chunks that parsed, and a
-                // genuinely broken response is caught via the HTTP status in the
-                // completion callback. Aborting the whole turn here would discard
-                // good content already streamed for one transient bad chunk.
+                terminal->fail(std::move(delta.error));
                 return;
             }
 
@@ -507,24 +509,26 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
             }
         };
 
-        HttpCompletionCallback doneCb = [content, toolCalls, mu, requestCopy](
+        HttpCompletionCallback doneCb = [content, toolCalls, mu, terminal, requestCopy](
                                             HttpResponse httpResp) {
             CompletionResponse resp;
             resp.message.role = Role::Assistant;
+
+            {
+                std::lock_guard<std::mutex> lock(*mu);
+                resp.message.content = *content;
+                for (const auto& tc : *toolCalls) {
+                    if (!tc.name.empty() || !tc.id.empty() || !tc.arguments.empty()) {
+                        resp.message.toolCalls.push_back(tc);
+                    }
+                }
+            }
 
             ProviderError err = classifyHttpError(httpResp);
             if (err) {
                 resp.error = std::move(err);
             } else {
-                std::lock_guard<std::mutex> lock(*mu);
-                resp.message.content = *content;
-                // Drop any empty trailing slots that never received a name
-                // (defensive — OpenAI should populate name on the first chunk).
-                for (auto& tc : *toolCalls) {
-                    if (!tc.name.empty() || !tc.id.empty() || !tc.arguments.empty()) {
-                        resp.message.toolCalls.push_back(tc);
-                    }
-                }
+                terminal->applyValidation("OpenAI", resp);
             }
 
             deliverCompletion(*requestCopy, std::move(resp));
