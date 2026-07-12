@@ -35,7 +35,7 @@
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
 | A-17 | P2 | 已修复 | Python MCP/legacy HTTP 已删除；Agent 与 Native IPC 共用 24-name catalog 和 adapter |
 | A-18 | P1 | 未修复 | 三类 provider 都会把缺少终止事件的截断 SSE 当成功 |
-| A-19 | P0 | 部分修复 | I/O 失败会 poison 并拒绝复用；仍缺 fake transport 迟到响应测试 |
+| A-19 | P0 | 已修复 | partial I/O/timeout/EOF 会 poison+close；旧 endpoint 字节不能跨 reconnect generation |
 | A-20 | P0 | 部分修复 | 请求/lifecycle lease 已落地；仍缺真实 client 并发压力测试 |
 | A-21 | P2 | 未修复 | provider context 能力未参与 token 裁剪和输出预留 |
 | A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接、工具 worker 和 Native IPC；provider 与真实环境仍缺回归测试 |
@@ -264,24 +264,6 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - 公共 SSE parser 不应吞掉 provider 需要的终止语义，或应单独暴露 terminal callback。
 - 增加完整、截断、重复终止、malformed event、非 SSE 2xx body 的单测。
 
-### A-19：socket I/O 超时后复用连接可造成协议串包
-
-**证据**
-
-- `WindowsSocketClient::Send()`/`Receive()` 的任意 I/O 错误、EOF 或 partial failure 都会先 `MarkPoisoned()` 再关闭当前 client。
-- 首次 poison 推进 connection generation，`DeviceSession::AcquireRequest()` 随后拒绝新请求；旧的待处理字节清理恢复路径已删除。
-- Debug/Release 的无设备测试验证 poison 使在途 lease 过期且拒绝后续 lease。
-
-**影响**
-
-旧连接现在不会继续承载下一请求，原串包路径已被结构性阻断。剩余风险是缺少可注入 socket transport，尚未自动验证真实 partial send、迟到响应、三端口中单端口失败和重连后的协议恢复。
-
-**建议**
-
-- 增加 fake transport/loopback fixture，证明 timeout 后旧字节不能进入新 generation。
-- 明确重连后的 driver/process/scan 恢复策略；breakpoint cleanup tracker 现会随 disconnect 清空，但远端状态仍不承诺自动恢复。
-- 长期给协议增加长度、request id 或 session generation。
-
 ### A-20：连接关闭/重连与在途请求没有互斥
 
 **证据**
@@ -322,7 +304,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。audit/dispatcher 覆盖 persistent bounds/failure、schema-1 reload、无 raw data outcome、identity/context revalidation、fail-closed burning、consume/Cancel race、全部 approved adapter、Lua host 注入、selection baseline 与 deadline completion；audit/dispatcher/runtime 各 50/50，broker 100/100。native gate 固定 fail-closed broker consume、grant-bound dispatcher execution/outcome audit、共享 Lua target recheck 和 Observe-only Hello。Debug/Release 各有 16 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
+仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。新增 `native_socket_client_transport` 的 4 组 system Winsock/partial I/O/poison/reconnect 测试，并在 Debug/Release 各连续 100 次通过。Debug/Release 当前各有 17 项 CTest；fresh AI-off/AI-on 产品完整链接均通过。
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
@@ -330,7 +312,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
 - Native IPC GUI approval click 与真实设备 privileged operation。
 - 不同 Windows 用户/session 与真实 remote client 的 native transport 负向测试。
-- fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
+- 三端口 manager 的并发 connect/disconnect、单端口 poison 和真实 reconnect。
 - C++ Agent/IPC capability、结果和 feature gate 对齐。
 
 建议先建立不依赖 Android 设备的单元/契约测试，再保留少量真实设备 smoke test。否则当前文档中的安全不变量无法在后续重构中自动守住。
@@ -346,6 +328,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | A-06 legacy detached handler/partial send | legacy handler 已随 HTTP server 删除；Native IPC 使用 owned/joinable handler、overlapped exact I/O、Stop event 与 `CancelIoEx` |
 | A-14 地址进制跨前端不一致 | Agent 与 Native IPC 共用 `MemJsonTools`，所有地址字段拒绝无前缀字符串并要求显式 `0x` |
 | A-17 Agent/外部控制契约分裂 | Python MCP 和 legacy HTTP 已删除；Native IPC 与 Agent 对齐 24-name catalog、共享 adapter、target policy 与 feature gate |
+| A-19 timeout 后复用旧流导致串包 | `IWindowsSocketOps` 注入测试固定 partial send/receive、`WSAETIMEDOUT`/EOF poison+close、旧 lease 失效；迟到旧字节保留在旧 endpoint，新 generation 只读取新 endpoint |
 | Native IPC wire contract 未固定 | `IpcProtocol` 使用显式 24-byte little-endian header、精确版本与 request-id 规则、UTF-8 和 payload 硬上限；跨 polling timeout 的 partial frame 会有界保留并继续读取，partial close 仍是 protocol error；终止 Error 后做 100 ms 可取消 drain |
 | Native IPC 身份与 handler 生命周期没有基础边界 | protected DACL 只允许当前进程用户和 SYSTEM read/write；拒绝 remote client，单实例 handle 持续占有名称；accept/handler 同属一个 joinable thread，stop event + `CancelIoEx` 后 join；产品仍不启动 |
 | Native IPC 协议阶段缺少统一 runtime owner | `NativeAgentRuntime` 持有 server，串起 framed connection/Hello/Observe dispatcher/request session；Stop 取消并 join handler/worker，线程安全 snapshot 不保存请求参数或结果；server session id 跨 restart 单调且退出时精确取消绑定审批；产品默认 stopped，仅允许用户显式启用 Observe |
@@ -373,13 +356,13 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权；尚未完成跨用户/session 与真实 remote client 负向验证。
 - execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
 - `installTempFile()` 已用于 `ApiKeyStore`、`AiSettings`、`SessionManager`，但 `ChatSession` 仍有独立且较弱的替换路径。
-- `DeviceSession` 已删除待处理字节清理恢复路径并 poison 失败连接，但尚缺 fake transport 对迟到字节/partial I/O 的完整证明。
+- `DeviceSession` 已删除待处理字节清理恢复路径；注入测试证明 client-level partial I/O、timeout/EOF 与迟到字节隔离，但尚未覆盖真实三端口 manager 并发和 Android 端状态恢复。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
 ## 建议修复顺序
 
 1. 保持 Native IPC compile/runtime default-off；补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability。
-2. 为已落地的 poison/lifecycle gate 增加 fake transport 与真实设备压力证明。
+2. 为已落地的 poison/lifecycle gate 增加三端口 manager 与真实设备压力证明。
 3. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。
 4. 校验 provider 流式终止事件，并建立无需设备的 parser/config/state-machine 回归测试。
 5. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。

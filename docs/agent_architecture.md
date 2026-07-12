@@ -216,7 +216,7 @@ HTTP 2xx 不等于 provider stream 完整：
 
 Native IPC Stop 会取消并 join server handler 与 request worker。进程级 teardown 仍不是完整排空保证，因为 provider HTTP 在完成回调前减少 `inFlight_`，等待上限为 3 秒且 worker 仍是 detached。因此只可把 **Agent 工具与 Native IPC shutdown** 称为已 join；整个应用退出仍受 provider HTTP detached task 限制，不能宣称所有后台任务已排空。
 
-连接按钮、自动重连和退出现在都通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease。连接替换会等待活动请求释放，失败连接会 poison 并推进 generation。该锁序已有无设备测试，真实三端口并发和迟到字节仍需 fake transport/loopback 压力验证。
+连接按钮、自动重连和退出现在都通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease。连接替换会等待活动请求释放，失败连接会 poison 并推进 generation。可注入 `IWindowsSocketOps` 测试已固定 partial send/receive、timeout/EOF poison、旧 lease 失效和迟到字节不能跨 reconnect generation；真实三端口并发与单端口失败仍需压力验证。
 
 ## 6. Agent 状态机
 
@@ -337,7 +337,7 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 进程切换保持 connection -> process -> port 锁顺序，同线程嵌套命令复用已有 request lease。首批 `MemService` 操作在执行前后拒绝跨 generation 结果，应用退出也会在静态析构前显式断开。
 
-当前自动测试验证 lease 互斥、嵌套复用、poison 和 generation 失效；尚未用可注入 transport 证明真实 partial send、迟到响应和三端口重连，因此连接问题仍按“部分修复”跟踪。
+`WindowsSocketClient` 通过 `IWindowsSocketOps` 保留默认 `SystemWindowsSocketOps`，同时允许测试注入确定性的 partial I/O、`WSAETIMEDOUT`、EOF 和 endpoint 数据。当前自动测试还执行真实 loopback 往返，并证明旧 endpoint 的迟到字节不会进入显式重连后的新 generation。A-19 已关闭；真实三端口 manager 的并发 connect/disconnect/poison 压力仍归 A-20 跟踪。
 
 ## 9. 持久化与数据边界
 
@@ -500,17 +500,16 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。audit/dispatcher 测试覆盖 persistent bounds/failure、schema-1 reload、无 raw data 的 outcome、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、11 个 service adapter、注入 Lua host、controlled selection 和 deadline completion；audit/dispatcher/runtime 各 50/50。连同四个静态 gate，Debug/Release 当前各有 16 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。`native_socket_client_transport` 有 4 组 system Winsock/partial I/O/poison/reconnect 测试并在 Debug/Release 各连续 100 次通过。连同四个静态 gate，Debug/Release 当前各有 17 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品完整链接已分别在 `ENABLE_AI_CHAT=OFF` 与 `ON` 下通过。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
 - config/index 损坏恢复
 - AgentRunner 预算上限、auto approve 和 denial 的完整组合
 - ToolExecutor schema 和错误契约
-- Native IPC GUI approval click 与真实 Android privileged operation
 - Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
-- fake transport partial I/O、迟到响应和三端口 reconnect
+- 三端口 manager 并发 connect/disconnect、单端口 poison 与真实 reconnect
 - C++ Agent/IPC 名称、结果和 feature gate 对齐
 
 真实 Android 设备测试保留给协议兼容、驱动和硬件断点 smoke test。

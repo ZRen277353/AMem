@@ -402,7 +402,7 @@ ShutdownSystemNativeAgentRuntime()
 
 因此工具与 Native IPC shutdown 已闭环，但整个应用退出仍受 provider HTTP detached task 约束。若调试退出崩溃、静态析构异常或偶发访问，应先检查 HTTP worker/callback；设备 socket 在 Native IPC 与工具 worker join 后才断开。
 
-GUI 的 connect/disconnect/auto-reconnect 现在通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease，因此关闭会等待在途请求释放。该不变量已有无设备锁测试，但真实三端口 client 的并发压力与迟到字节仍缺 fake transport/loopback 覆盖。
+GUI 的 connect/disconnect/auto-reconnect 现在通过 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease，因此关闭会等待在途请求释放。可注入 socket 测试已覆盖 partial send/receive、timeout/EOF poison、旧 lease 失效和迟到字节的 generation 隔离；真实三端口 client 的并发 connect/disconnect 与单端口失败仍缺压力覆盖。
 
 ## 8. 会话和配置的真实数据流
 
@@ -577,12 +577,12 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。audit/dispatcher 测试覆盖 persistent bounds/failure、schema-1 reload、无 raw data 的 outcome、identity/context revalidation、fail-closed burning、审计阻塞、consume/Cancel race、全部 approved adapter、Lua host 注入、process selection 与 deadline completion；Debug/Release 当前各有 16 项 CTest，audit/dispatcher/runtime 各连续 50 次通过。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。`native_socket_client_transport` 的 4 组测试覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison 和 reconnect generation 隔离，并在 Debug/Release 各连续 100 次通过；当前共 17 项 CTest。fresh `ENABLE_NATIVE_IPC=ON` 产品链接已在 AI Chat 关闭和开启两种配置下通过。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
-4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
+4. 对三端口 manager 增加并发 connect/disconnect、单端口 poison 和真实 reconnect fixture。
 5. 用真实 GUI approval click 与 Android device 覆盖 privileged adapter/send-boundary；persistent security audit、fail-closed consume、execution outcome、session/request cancel 与 GUI status gate 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。

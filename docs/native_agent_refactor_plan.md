@@ -10,10 +10,11 @@
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成三十七个纵向切片：
+截至 2026-07-13 已完成三十八个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
+- `WindowsSocketClient` 通过 `IWindowsSocketOps` 保留默认 Winsock adapter 并提供确定性故障注入；4 组测试覆盖真实 loopback、partial send/receive、timeout/EOF poison、旧 lease 失效和迟到字节的 reconnect generation 隔离。
 - `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
 - `status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/symbol/breakpoint、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
 - raw write 保留 request-started/response-received/written-byte 状态，区分发送前取消、`completion_unknown`、部分写和 deadline/cancel 后确认完成。
@@ -55,9 +56,9 @@
 - `process_open` 在 mutex 保护下执行 controlled selection；只有 adapter 返回 snapshot、当前 service snapshot 与 grant generation/旧 baseline 全部一致时才推进 external session baseline。
 - Native IPC completion 新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，保留 deadline 后设备已确认完成的成功回执。
 - security audit schema 2 在同一有界 JSONL 中区分 `approval_transition` 与 `execution_outcome`；outcome 只含 authorized/observed target、success、completion 与 bounded error code，schema 1 继续可加载。post-effect 写盘失败进入 GUI health，但不覆盖真实设备回执。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试，共 16 项 CTest。Debug/Release 全部通过，audit/dispatcher/runtime 各连续 50 次通过；fresh AI-off/AI-on 产品完整链接均通过。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket transport 另有 4 组。共 17 项 CTest，Debug/Release 全部通过；socket transport 各连续 100 次通过，fresh AI-off/AI-on 产品完整链接均通过。
 
-尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；连接层 fake transport 迟到字节测试。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 已完成。A-01、A-06、A-14、A-17 已关闭；A-19、A-20 仍部分修复。
+尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；三端口 manager 并发 connect/disconnect、单端口 poison 与真实 reconnect 压力。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport 已完成。A-01、A-06、A-14、A-17、A-19 已关闭；A-20 仍部分修复。
 
 ## 1. 结论
 
@@ -448,7 +449,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - 保存迁移前 36/29/30 能力矩阵作为基线；迁移中的可执行/广告名称分开统计。
 - 为地址解析、typed value 编解码、scan 参数映射和 tool schema 建立无设备测试。
 - 引入 `IMemService` fake，覆盖 AgentRunner 的审批、target changed、取消和错误回喂。
-- 为现有 socket command 建立可注入的 fake transport 或最小协议 fixture。
+- [x] 为 `WindowsSocketClient` 建立可注入 `IWindowsSocketOps`，覆盖 partial I/O、timeout/EOF poison 与 reconnect generation 隔离。
 
 退出条件：测试可在 CI/CTest 独立运行；尚不改变用户可见工具行为。
 
@@ -550,7 +551,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - target：审批期间切进程、断线重连、handle 相同但 revision/generation 不同。
 - executor：排队取消、运行中取消、timeout、shutdown join、晚到结果。
 - service：scan/symbol 复合操作不被其他 caller 插入，错误不会留下半更新本地状态。
-- connection：partial send/receive、timeout poison、重连 generation、并发 disconnect。
+- connection：partial send/receive、timeout/EOF poison、重连 generation 已覆盖；三端口并发 disconnect/reconnect 仍待补。
 - provider：完整/截断/重复终止/malformed SSE。
 - persistence：损坏 JSON、字段类型错误、临时文件替换失败、旧会话迁移。
 - Native IPC：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
@@ -679,4 +680,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第三十七批彻底删除 legacy HTTP IPC。删除 `ipc/IpcServer.cpp`/`.h`、`ENABLE_LEGACY_HTTP_IPC`、`HAVE_LEGACY_HTTP_IPC`、main 的端口启停和旧 `IPC_SOURCES`；原迁移 gate 替换为 `native_agent_no_legacy_http_ipc`，静态拒绝旧 server 文件、option/macro、`IpcServer`、loopback 监听地址和 CORS marker 回归。直接连接 Android 二进制协议的 `tools/protocol_reference/amem_client.py` 保留为排障工具，不是 GUI HTTP client。Debug/Release 各 16/16 CTest 通过。隔离 `ENABLE_NATIVE_IPC=ON` full product link：AI-off `29477888` bytes / `3F6CD0307932994E9BE77852A50F19FF9BF78CFC593D4DEB5229A0B59D88B200`，AI-on `35727360` bytes / `8DD0D1DB2595A98ABBFA75DE7AE8A2E229F8E5E1634D8042B650D2F1486092CB`。
 
-三十七个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并补 fake transport 的迟到字节/partial I/O 覆盖。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
+第三十八批加入可注入 socket transport 与迟到字节回归。`WindowsSocketClient` 的 public send/receive/connect 形态保持不变，底层系统调用由默认 `SystemWindowsSocketOps` 或测试注入的 `IWindowsSocketOps` 提供。新增 `native_socket_client_transport` 的 4 组测试：真实 Winsock loopback 往返；partial send 继续剩余 offset 后 `WSAETIMEDOUT` poison；partial receive 后 EOF poison；旧 endpoint partial response + timeout 后 generation 失效，显式重连只读取新 endpoint，迟到旧字节仍留在已关闭 endpoint。Debug/Release 各 17/17 CTest，transport 各 100/100。隔离 `ENABLE_NATIVE_IPC=ON` full product link：AI-off `29478400` bytes / `F468391129BE4149209A2FE07B79A73FC2B4D865E12E9BEEC20D77625509B973`，AI-on `35727360` bytes / `B121C81942CDE51A4C2AD5FD4A0773F3B0B17B12B5061445621DF371F7CB8A85`。
+
+三十八个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并补三端口 manager 的并发 connect/disconnect、单端口 poison 与真实 reconnect 压力。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。

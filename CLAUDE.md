@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 23 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups; the total suite has sixteen CTests. Coverage includes JSONL bounds/failures/schema-1 compatibility, durable grant withholding, identity/context checks, one-shot burning, consume/Cancel races, execution-outcome summaries, all approved adapters, post-consume cancellation, controlled selection, deadline completion, and a static guard against restoring legacy HTTP IPC. Live GUI approval clicks, real Android transport, and device paths still need coverage.
+`native_agent_mem_service` contains 23 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups. A 4-group socket transport suite covers the real Winsock adapter plus scripted partial I/O, timeout/EOF poisoning, and reconnect generation isolation; the total suite has seventeen CTests. Live GUI approval clicks, three-port lifecycle stress, real Android transport, and device paths still need coverage.
 
 ## Dependencies
 
@@ -90,7 +90,7 @@ native Named Pipe ──┘
 
 ### Socket communication (`socket/`)
 
-- `client.hpp` — `WindowsSocketClient` wrapping Winsock2 send/receive.
+- `client.hpp` — `WindowsSocketClient` wraps Winsock2 through injectable `IWindowsSocketOps`; product code uses `SystemWindowsSocketOps`, and tests script partial I/O/failures without changing the public client API.
 - `client_singleton.h/cpp` — `WinSocketClientMgr` singleton managing three port connections (`PORT_MAIN`, `PORT_DEBUG`, `PORT_ERROR`), each with its own mutex. Declares the entire remote command surface.
 - **Command implementations are split by domain**: `ProcessCommands.cpp`, `MemoryCommands.cpp`, `ScanCommands.cpp`, `BreakpointCommands.cpp`, `FreezeCommands.cpp`, `SymbolCommands.cpp`.
 - `SocketCommand.h` — the modern way to issue a command: `SocketCommand::execute` / `executeNoHandle` / `executeWithResult` templates acquire a shared `DeviceSession` request lease, check the connection/handle and generation, lock the port, and run the request. Prefer these over hand-rolling the locking.
@@ -161,6 +161,7 @@ All canonical in-app and native IPC address fields use shared adapters and requi
 - **Symbol session**: every `SymbolInit` advances its epoch inside the transaction gate. Canonical resolve/list bind module lookup + init + find/page in one transaction; continuation pages require the latest epoch.
 - **Breakpoint receipts**: set/remove/suspend/resume update the remote state and cleanup tracker in one MAIN transaction. Sent-without-response is `completion_unknown`; hit data is paged with 64-bit values encoded as strings at the Agent boundary. Disconnect resets only the local tracker.
 - **Timeout poisons unframed connections**: timeout, EOF, or partial I/O poisons `DeviceSession`, closes the failed client, and advances the generation. The old pending-data drain recovery path is gone; explicitly reconnect before reuse.
+- **Transport regression boundary**: `native_socket_client_transport` verifies the default Winsock loopback path, partial send/receive loops, timeout/EOF poison, stale leases, and that old endpoint bytes cannot cross into a reconnected generation. Real three-port concurrency remains a separate smoke/stress requirement.
 - **Connection lifecycle**: commands hold a shared `DeviceSession` request lease; connect/disconnect/reconnect hold an exclusive lifecycle lease. Do not bypass this gate with direct client `Connect()`/`Close()` calls.
 - **UI thread isolation for AI**: background provider/HTTP threads communicate with ImGui exclusively through `UIMessageQueue`. ImGui calls happen only on the main thread.
 - **Process target consistency**: process-bound Agent operations carry an explicit generation/PID/handle/revision snapshot and must validate it at their actual service/send boundary; runId is not a target identifier.
