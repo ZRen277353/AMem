@@ -1,16 +1,19 @@
 #include "ipc/IpcMemServiceDispatcher.h"
+#include "ipc/IpcApprovalBroker.h"
 
 #include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <thread>
 
 namespace {
 
@@ -21,6 +24,19 @@ void expect(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+template <typename Predicate>
+bool waitUntil(Predicate predicate,
+               std::chrono::milliseconds timeout = 2s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return predicate();
 }
 
 class StubMemService final : public Mem::IMemService {
@@ -279,6 +295,81 @@ void testPrivilegedMethodsCannotBypassApproval() {
            "privileged rejection must happen before MemService");
 }
 
+void testPrivilegedSubmissionWaitsWithoutExecuting() {
+    StubMemService service;
+    NativeIpc::IpcApprovalBroker broker;
+    NativeIpc::IpcMemServiceDispatcher dispatcher(
+        service, &broker, {91, "AMem.DispatcherTests", "1.0"});
+    expect(dispatcher.canSubmitForApproval("memory_write") &&
+               !dispatcher.canSubmitForApproval("status"),
+           "only privileged catalog methods should enter approval");
+
+    auto deniedContext = context();
+    auto deniedFuture = std::async(std::launch::async, [&] {
+        return dispatcher.execute(
+            request(10, "memory_write",
+                    {{"address", "0x1000"}, {"data", "SECRET_BYTES"}}),
+            deniedContext);
+    });
+    expect(waitUntil([&] { return broker.snapshot().size() == 1; }),
+           "privileged worker should submit a bounded approval record");
+    const auto pending = broker.snapshot().front();
+    expect(pending.sessionId == 91 && pending.requestId == 10 &&
+               pending.method == "memory_write" && service.totalCalls() == 0,
+           "submission must bind server identity without executing service");
+    expect(broker
+               .decide(pending.approvalId,
+                       NativeIpc::IpcApprovalDecision::Deny,
+                       service.captureContext(true))
+               .ok,
+           "test decision should deny pending approval");
+    const auto denied = deniedFuture.get();
+    expect(denied.errorCode == "approval_denied" &&
+               denied.completion ==
+                   NativeIpc::RequestCompletion::RejectedBeforeStart &&
+               service.totalCalls() == 0,
+           "denial must return without parsing or executing privileged params");
+
+    auto approvedContext = context();
+    auto approvedFuture = std::async(std::launch::async, [&] {
+        return dispatcher.execute(request(11, "memory_write"),
+                                  approvedContext);
+    });
+    expect(waitUntil([&] { return broker.snapshot().size() == 2; }),
+           "second privileged request should submit independently");
+    const auto approvedRecord = broker.snapshot().back();
+    expect(broker
+               .decide(approvedRecord.approvalId,
+                       NativeIpc::IpcApprovalDecision::Approve,
+                       service.captureContext(true))
+               .ok,
+           "test decision should approve matching context");
+    const auto approved = approvedFuture.get();
+    expect(approved.errorCode == "approval_execution_disabled" &&
+               broker.find(approvedRecord.approvalId)->state ==
+                   NativeIpc::IpcApprovalState::Cancelled &&
+               service.totalCalls() == 0,
+           "approval must remain non-executable until consume integration");
+
+    auto cancelledContext = context();
+    auto cancelledFuture = std::async(std::launch::async, [&] {
+        return dispatcher.execute(request(12, "memory_write"),
+                                  cancelledContext);
+    });
+    expect(waitUntil([&] { return broker.snapshot().size() == 3; }),
+           "cancellable privileged request should reach broker");
+    cancelledContext.cancellation->request(
+        NativeIpc::RequestCancelReason::Client);
+    const auto cancelled = cancelledFuture.get();
+    expect(cancelled.errorCode == "cancelled" &&
+               cancelled.completion ==
+                   NativeIpc::RequestCompletion::CancelledBeforeStart &&
+               broker.snapshot().back().state ==
+                   NativeIpc::IpcApprovalState::Cancelled &&
+               service.totalCalls() == 0,
+           "request cancellation must revoke approval without execution");
+}
+
 void testConnectionAndTargetInvalidateBaseline() {
     {
         StubMemService service;
@@ -340,8 +431,10 @@ int main() {
          &testAllObserveMethodsReachCanonicalAdapter},
         {"success and error envelope mapping",
          &testSuccessAndErrorEnvelopeMapping},
-        {"privileged methods require approval",
-         &testPrivilegedMethodsCannotBypassApproval},
+      {"privileged methods require approval",
+       &testPrivilegedMethodsCannotBypassApproval},
+      {"privileged submission waits without executing",
+       &testPrivilegedSubmissionWaitsWithoutExecuting},
         {"connection and target invalidate baseline",
          &testConnectionAndTargetInvalidateBaseline},
         {"cancellation and deadline propagation",

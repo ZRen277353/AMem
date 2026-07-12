@@ -310,8 +310,15 @@ IpcRequestSession::finishIfInvalidated() {
     if (!sendError(0, validation.code.c_str(), validation.message)) {
         return finishFromIo(*fatalWrite());
     }
+    drainAfterTerminalError();
     return finish(RequestSessionStatus::Invalidated,
                   widenAscii(validation.message));
+}
+
+void IpcRequestSession::drainAfterTerminalError() {
+    connection_.readFrame(
+        std::chrono::steady_clock::now() + config_.terminalDrainTimeout,
+        IpcProtocol::kMaxRequestPayloadBytes);
 }
 
 RequestSessionResult IpcRequestSession::run() {
@@ -331,6 +338,7 @@ RequestSessionResult IpcRequestSession::run() {
     if (config_.idleTimeout.count() <= 0 ||
         config_.writeTimeout.count() <= 0 ||
         config_.validationInterval.count() <= 0 ||
+        config_.terminalDrainTimeout.count() <= 0 ||
         config_.maxRequestsPerSession == 0 ||
         config_.payload.defaultTimeout.count() <= 0 ||
         config_.payload.maxTimeout.count() <= 0 ||
@@ -429,6 +437,7 @@ RequestSessionResult IpcRequestSession::run() {
                         "request count limit reached; reconnect required")) {
                     return finishFromIo(*fatalWrite());
                 }
+                drainAfterTerminalError();
                 return finish(RequestSessionStatus::RequestLimitReached,
                               L"request count limit reached");
             }
@@ -480,7 +489,17 @@ RequestSessionResult IpcRequestSession::run() {
                 }
                 continue;
             }
+            bool approvalSubmission = false;
             if (!hasCapability(required)) {
+                try {
+                    approvalSubmission =
+                        dispatcher_.canSubmitForApproval(
+                            parsed.request.method);
+                } catch (...) {
+                    approvalSubmission = false;
+                }
+            }
+            if (!hasCapability(required) && !approvalSubmission) {
                 if (!sendError(incoming.frame.requestId, "capability_denied",
                                "required capability was not granted")) {
                     return finishFromIo(*fatalWrite());
@@ -539,6 +558,7 @@ RequestSessionResult IpcRequestSession::run() {
                        "only Request and Cancel are valid after HelloAck")) {
             return finishFromIo(*fatalWrite());
         }
+        drainAfterTerminalError();
         return finish(RequestSessionStatus::ProtocolError,
                       L"unexpected post-handshake message type");
     }

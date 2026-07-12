@@ -10,6 +10,8 @@ file(READ "${SOURCE_ROOT}/gui/NativeAgentIpcWindow.cpp" control_source)
 file(READ "${SOURCE_ROOT}/ipc/SystemNativeAgentRuntime.cpp" owner_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcHandshakeSession.cpp" handshake_source)
 file(READ "${SOURCE_ROOT}/ipc/NativeAgentRuntime.cpp" runtime_source)
+file(READ "${SOURCE_ROOT}/ipc/IpcRequestSession.cpp" request_session_source)
+file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
 
 function(require_text source label expected)
     string(FIND "${source}" "${expected}" position)
@@ -59,6 +61,14 @@ require_text("${runtime_source}" "session-scoped approval cancellation"
     "approvalBroker_->cancelSession(sessionId);")
 forbid_text("${runtime_source}" "runtime privileged submission"
     "approvalBroker_->submit")
+require_text("${request_session_source}" "server-owned approval submission gate"
+    "dispatcher_.canSubmitForApproval(")
+require_text("${dispatcher_source}" "privileged request submission"
+    "approvalBroker_->submit(submission)")
+require_text("${dispatcher_source}" "approved execution remains disabled"
+    "approval_execution_disabled")
+forbid_text("${dispatcher_source}" "privileged approval consumption"
+    "approvalBroker_->consume")
 require_text("${handshake_source}" "Observe-only grant remains fixed"
     "if (capability == IpcCapability::Observe) {\n            result.grantedCapabilities.push_back(capability);")
 

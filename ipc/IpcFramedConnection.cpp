@@ -3,8 +3,6 @@
 #include "NativePipeSecurity.h"
 
 #include <algorithm>
-#include <array>
-#include <cstring>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -53,54 +51,67 @@ FrameIoResult errorResult(FrameIoStatus status,
 FrameIoResult IpcFramedConnection::readFrame(
     PipeDeadline deadline,
     uint32_t maxPayloadBytes) {
-    std::array<uint8_t, IpcProtocol::kHeaderSize> headerBytes{};
-    FrameIoResult headerIo = transferExact(
-        false, headerBytes.data(), headerBytes.size(), deadline);
+    const auto fillTo = [&](size_t targetSize) {
+        const size_t retained = readBuffer_.size();
+        if (retained >= targetSize) {
+            FrameIoResult complete;
+            complete.status = FrameIoStatus::Complete;
+            complete.bytesTransferred = retained;
+            return complete;
+        }
+        readBuffer_.resize(targetSize);
+        FrameIoResult result = transferExact(
+            false, readBuffer_.data() + retained, targetSize - retained,
+            deadline);
+        if (result.status != FrameIoStatus::Complete) {
+            readBuffer_.resize(retained + result.bytesTransferred);
+        }
+        result.bytesTransferred = readBuffer_.size();
+        return result;
+    };
+
+    FrameIoResult headerIo = fillTo(IpcProtocol::kHeaderSize);
     if (headerIo.status != FrameIoStatus::Complete) {
         if (headerIo.status == FrameIoStatus::Closed &&
-            headerIo.bytesTransferred != 0) {
+            !readBuffer_.empty()) {
             return errorResult(FrameIoStatus::ProtocolError,
-                               headerIo.bytesTransferred,
+                               readBuffer_.size(),
                                L"connection closed during frame header");
         }
         return headerIo;
     }
 
     const auto header = IpcProtocol::DecodeHeader(
-        headerBytes.data(), headerBytes.size(), maxPayloadBytes);
+        readBuffer_.data(), IpcProtocol::kHeaderSize, maxPayloadBytes);
     if (header.status != IpcProtocol::DecodeStatus::Complete) {
         return errorResult(FrameIoStatus::ProtocolError,
-                           headerBytes.size(), widenAscii(header.error));
+                           IpcProtocol::kHeaderSize,
+                           widenAscii(header.error));
     }
 
-    std::vector<uint8_t> frameBytes(
-        IpcProtocol::kHeaderSize + header.header.payloadLength);
-    std::memcpy(frameBytes.data(), headerBytes.data(), headerBytes.size());
-    if (header.header.payloadLength != 0) {
-        FrameIoResult payloadIo = transferExact(
-            false, frameBytes.data() + IpcProtocol::kHeaderSize,
-            header.header.payloadLength, deadline);
-        payloadIo.bytesTransferred += IpcProtocol::kHeaderSize;
-        if (payloadIo.status != FrameIoStatus::Complete) {
-            if (payloadIo.status == FrameIoStatus::Closed) {
-                return errorResult(FrameIoStatus::ProtocolError,
-                                   payloadIo.bytesTransferred,
-                                   L"connection closed during frame payload");
-            }
-            return payloadIo;
+    const size_t frameSize =
+        IpcProtocol::kHeaderSize + header.header.payloadLength;
+    FrameIoResult frameIo = fillTo(frameSize);
+    if (frameIo.status != FrameIoStatus::Complete) {
+        if (frameIo.status == FrameIoStatus::Closed) {
+            return errorResult(FrameIoStatus::ProtocolError,
+                               readBuffer_.size(),
+                               L"connection closed during frame payload");
         }
+        return frameIo;
     }
 
-    auto decoded = IpcProtocol::DecodeFrame(frameBytes, maxPayloadBytes);
+    auto decoded = IpcProtocol::DecodeFrame(readBuffer_, maxPayloadBytes);
     if (decoded.status != IpcProtocol::DecodeStatus::Complete) {
-        return errorResult(FrameIoStatus::ProtocolError, frameBytes.size(),
+        return errorResult(FrameIoStatus::ProtocolError, readBuffer_.size(),
                            widenAscii(decoded.error));
     }
+    readBuffer_.clear();
 
     FrameIoResult result;
     result.status = FrameIoStatus::Complete;
     result.frame = std::move(decoded.frame);
-    result.bytesTransferred = frameBytes.size();
+    result.bytesTransferred = frameSize;
     return result;
 }
 

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace NativeIpc {
 
@@ -55,6 +56,9 @@ private:
 
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     HANDLE stopEvent_ = nullptr;
+    // One reader owns this connection. Preserve a bounded partial frame when
+    // a validation/deadline poll interrupts the overlapped read.
+    std::vector<uint8_t> readBuffer_;
 };
 
 } // namespace NativeIpc

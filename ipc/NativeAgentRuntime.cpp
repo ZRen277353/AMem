@@ -111,7 +111,10 @@ void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
       return;
     }
 
-    IpcMemServiceDispatcher dispatcher(service_);
+    IpcMemServiceDispatcher dispatcher(
+        service_, approvalBroker_,
+        {sessionId, handshakeResult.clientName,
+         handshakeResult.clientVersion});
     IpcRequestSession session(connection, dispatcher,
                               handshakeResult.grantedCapabilities,
                               requestConfig_);

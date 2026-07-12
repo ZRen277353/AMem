@@ -102,12 +102,14 @@ public:
                             const Mem::OperationContext &current);
 
   size_t invalidateStale(const Mem::OperationContext &current);
+  size_t cancelRequest(uint64_t sessionId, uint64_t requestId);
   size_t cancelSession(uint64_t sessionId);
   size_t cancelAll();
   size_t expire(std::chrono::steady_clock::time_point now =
                     std::chrono::steady_clock::now());
 
   std::vector<IpcApprovalRecord> snapshot() const;
+  std::optional<IpcApprovalRecord> find(uint64_t approvalId) const;
 
 private:
   static bool isLive(IpcApprovalState state);

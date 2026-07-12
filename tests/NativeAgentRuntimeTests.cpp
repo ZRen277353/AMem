@@ -140,10 +140,16 @@ public:
   STUB_METHOD(removeScanResults, ScanRemoveResult, ScanRemoveRequest)
   STUB_METHOD(readMemory, MemoryBlock, MemoryReadRequest)
   STUB_METHOD(readValue, ScalarValue, ValueReadRequest)
-  STUB_METHOD(writeMemory, WriteReceipt, MemoryWriteRequest)
   STUB_METHOD(writeValue, WriteReceipt, ValueWriteRequest)
 
 #undef STUB_METHOD
+
+  Mem::Result<Mem::WriteReceipt>
+  writeMemory(const Mem::OperationContext &context,
+              const Mem::MemoryWriteRequest &) override {
+    ++writeCalls_;
+    return unsupported<Mem::WriteReceipt>(context);
+  }
 
   Mem::Result<Mem::ScanSummary>
   startScan(const Mem::OperationContext &context, const Mem::ScanStartRequest &,
@@ -181,6 +187,10 @@ public:
     return statusCalls_.load(std::memory_order_acquire);
   }
 
+  int writeCalls() const {
+    return writeCalls_.load(std::memory_order_acquire);
+  }
+
 private:
   template <typename T>
   Mem::Result<T> unsupported(const Mem::OperationContext &) {
@@ -195,6 +205,7 @@ private:
   std::atomic<bool> statusStarted_{false};
   std::atomic<bool> cancellationObserved_{false};
   std::atomic<int> statusCalls_{0};
+  std::atomic<int> writeCalls_{0};
 };
 
 class RuntimeClient final {
@@ -252,12 +263,16 @@ public:
   }
 
   IpcProtocol::Frame
-  read(uint32_t maxPayload = IpcProtocol::kMaxFramePayloadBytes) {
+  read(uint32_t maxPayload = IpcProtocol::kMaxFramePayloadBytes,
+       const char *operation = "runtime response") {
     expect(connection_ != nullptr, "client connection should be open");
     const auto result = connection_->readFrame(
         std::chrono::steady_clock::now() + 5s, maxPayload);
     expect(result.status == NativeIpc::FrameIoStatus::Complete,
-           "runtime response should be readable");
+           std::string(operation) + " should be readable, status=" +
+               std::to_string(static_cast<int>(result.status)) +
+               ", error=" +
+               std::string(result.error.begin(), result.error.end()));
     return result.frame;
   }
 
@@ -594,6 +609,96 @@ void testSessionInvalidationCancelsBoundApproval() {
   runtime.stop();
 }
 
+void testPrivilegedRequestSubmitsAndRemainsNonExecutable() {
+  StubMemService service;
+  NativeIpc::IpcApprovalBroker broker;
+  NativeIpc::NativeAgentRuntime runtime(
+      service, uniquePipeName(L"approval-submit"), {}, fastSessionConfig(),
+      &broker);
+  startRuntime(runtime);
+  RuntimeClient client(runtime.snapshot().server.pipeName);
+  const json ack = client.hello(
+      "AMem.ApprovalClient",
+      json::array({"Observe", "TargetMutation"}));
+  expect(ack["granted_capabilities"] == json::array({"Observe"}) &&
+             ack["denied_capabilities"] ==
+                 json::array({"TargetMutation"}),
+         "submission path must not widen Hello grants");
+
+  client.request(80, "memory_write",
+                 {{"address", "0x1000"}, {"data", "SECRET_BYTES"}});
+  expect(waitUntil([&] {
+           const auto records = broker.snapshot();
+           return records.size() == 1 &&
+                  records.front().state ==
+                      NativeIpc::IpcApprovalState::Pending;
+         }),
+         "privileged request should submit while reader remains active");
+  const auto pending = broker.snapshot().front();
+  expect(pending.sessionId == runtime.snapshot().activeSessionId &&
+             pending.requestId == 80 &&
+             pending.clientName == "AMem.ApprovalClient" &&
+             service.writeCalls() == 0,
+         "approval record must bind server session without executing params");
+  client.send(IpcProtocol::MessageType::Cancel, 80, "{}");
+  const json cancelled =
+      responseJson(client.read(IpcProtocol::kMaxFramePayloadBytes,
+                               "cancelled approval response"),
+                   IpcProtocol::MessageType::Response, 80);
+  expect(cancelled["error"]["code"] == "cancelled" &&
+             cancelled["completion"] == "cancelled_before_start" &&
+             broker.find(pending.approvalId)->state ==
+                 NativeIpc::IpcApprovalState::Cancelled &&
+             service.writeCalls() == 0,
+         "client Cancel must revoke pending approval without a device call");
+
+  client.request(81, "memory_write",
+                 {{"address", "0x1000"}, {"data", "OTHER_SECRET"}});
+  expect(waitUntil([&] { return broker.snapshot().size() == 2; }),
+         "session should accept another request after cancellation response");
+  const auto approved = broker.snapshot().back();
+  expect(broker
+             .decide(approved.approvalId,
+                     NativeIpc::IpcApprovalDecision::Approve,
+                     service.captureContext(true))
+             .ok,
+         "GUI-equivalent decision should approve matching context");
+  const json disabled =
+      responseJson(client.read(IpcProtocol::kMaxFramePayloadBytes,
+                               "approved-disabled response"),
+                   IpcProtocol::MessageType::Response, 81);
+  expect(disabled["error"]["code"] == "approval_execution_disabled" &&
+             disabled["completion"] == "rejected_before_start" &&
+             broker.find(approved.approvalId)->state ==
+                 NativeIpc::IpcApprovalState::Cancelled &&
+             service.writeCalls() == 0,
+         "approved request must remain non-executable in submission slice");
+
+  client.request(82, "status");
+  try {
+    expect(responseJson(client.read(IpcProtocol::kMaxFramePayloadBytes,
+                                    "post-approval Observe response"),
+                        IpcProtocol::MessageType::Response, 82)["ok"] == true,
+           "Observe request should remain usable after approval decisions");
+  } catch (const std::exception &error) {
+    const auto failed = runtime.snapshot();
+    throw std::runtime_error(
+        std::string(error.what()) + ", runtime_phase=" +
+        std::to_string(static_cast<int>(failed.phase)) +
+        ", completed_sessions=" +
+        std::to_string(failed.completedSessions) + ", last_session_status=" +
+        (failed.lastSessionStatus.has_value()
+             ? std::to_string(static_cast<int>(*failed.lastSessionStatus))
+             : std::string("none")) +
+        ", last_error=" +
+        std::string(failed.lastError.begin(), failed.lastError.end()));
+  }
+  client.close();
+  expect(waitUntil([&] { return runtime.snapshot().completedSessions == 1; }),
+         "approval submission session should close cleanly");
+  runtime.stop();
+}
+
 } // namespace
 
 int main() {
@@ -613,6 +718,8 @@ int main() {
        &testSessionCloseCancelsBoundApproval},
       {"session invalidation cancels bound approval",
        &testSessionInvalidationCancelsBoundApproval},
+      {"privileged request submits without execution",
+       &testPrivilegedRequestSubmitsAndRemainsNonExecutable},
   };
 
   int failures = 0;

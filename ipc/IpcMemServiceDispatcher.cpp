@@ -1,13 +1,19 @@
 #include "IpcMemServiceDispatcher.h"
 
+#include "IpcApprovalBroker.h"
+
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <exception>
+#include <thread>
+#include <utility>
 
 namespace NativeIpc {
 namespace {
 
 using json = nlohmann::json;
+using namespace std::chrono_literals;
 
 RequestCompletion parseCompletion(const json& payload) {
     const auto completion = payload.find("completion");
@@ -46,10 +52,29 @@ IpcDispatchResult localError(const char* code,
     return result;
 }
 
+IpcDispatchResult approvalCancellation(RequestCancelReason reason) {
+    if (reason == RequestCancelReason::Deadline) {
+        return localError("approval_expired",
+                          "request deadline expired before approval",
+                          RequestCompletion::CancelledBeforeStart);
+    }
+    if (reason == RequestCancelReason::SessionInvalidated) {
+        return localError("session_invalidated",
+                          "session changed before approval completed",
+                          RequestCompletion::CancelledBeforeStart);
+    }
+    return localError("cancelled", "request cancelled before approval",
+                      RequestCompletion::CancelledBeforeStart);
+}
+
 } // namespace
 
-IpcMemServiceDispatcher::IpcMemServiceDispatcher(Mem::IMemService& service)
-    : service_(service), tools_(service), baseline_(service.captureContext(true)) {
+IpcMemServiceDispatcher::IpcMemServiceDispatcher(
+    Mem::IMemService& service,
+    IpcApprovalBroker* approvalBroker,
+    IpcExternalSession session)
+    : service_(service), tools_(service), baseline_(service.captureContext(true)),
+      approvalBroker_(approvalBroker), session_(std::move(session)) {
 }
 
 bool IpcMemServiceDispatcher::resolveCapability(
@@ -61,6 +86,15 @@ bool IpcMemServiceDispatcher::resolveCapability(
     }
     capability = descriptor->capability;
     return true;
+}
+
+bool IpcMemServiceDispatcher::canSubmitForApproval(
+    const std::string& method) const {
+    const IpcMethodDescriptor* descriptor = FindIpcMethod(method);
+    return approvalBroker_ != nullptr && session_.sessionId != 0 &&
+           !session_.clientName.empty() && descriptor != nullptr &&
+           !descriptor->executableWithoutApproval &&
+           descriptor->capability != IpcCapability::Observe;
 }
 
 IIpcRequestDispatcher::SessionValidation
@@ -101,10 +135,13 @@ IpcDispatchResult IpcMemServiceDispatcher::execute(
     }
     if (!descriptor->executableWithoutApproval ||
         descriptor->capability != IpcCapability::Observe) {
-        return localError(
-            "approval_required",
-            "privileged method requires the GUI approval broker",
-            RequestCompletion::RejectedBeforeStart);
+        if (!canSubmitForApproval(request.method)) {
+            return localError(
+                "approval_required",
+                "privileged method requires the GUI approval broker",
+                RequestCompletion::RejectedBeforeStart);
+        }
+        return submitForApproval(request, context);
     }
     if (!descriptor->memServiceBacked) {
         return localError("unsupported", "method has no MemService adapter",
@@ -137,6 +174,94 @@ IpcDispatchResult IpcMemServiceDispatcher::execute(
         return validationFailure(after, RequestCompletion::CancelRequested);
     }
     return result;
+}
+
+IpcDispatchResult IpcMemServiceDispatcher::submitForApproval(
+    const IpcRequestDto& request,
+    const IpcRequestContext& context) {
+    const SessionValidation before = validateSession();
+    if (!before.valid) {
+        return validationFailure(before,
+                                 RequestCompletion::RejectedBeforeStart);
+    }
+    if (context.cancellationRequested()) {
+        return approvalCancellation(context.cancellation->reason());
+    }
+    if (context.deadlineExceeded()) {
+        return approvalCancellation(RequestCancelReason::Deadline);
+    }
+
+    IpcApprovalSubmission submission;
+    submission.sessionId = session_.sessionId;
+    submission.requestId = request.requestId;
+    submission.clientName = session_.clientName;
+    submission.clientVersion = session_.clientVersion;
+    submission.method = request.method;
+    submission.expected = baseline_;
+    submission.deadline = context.deadline;
+    const IpcApprovalResult submitted = approvalBroker_->submit(submission);
+    if (!submitted.ok || !submitted.record.has_value()) {
+        return localError(
+            submitted.code.empty() ? "approval_submission_failed"
+                                   : submitted.code.c_str(),
+            submitted.message.empty() ? "approval request was not accepted"
+                                      : submitted.message.c_str(),
+            RequestCompletion::RejectedBeforeStart);
+    }
+
+    const uint64_t approvalId = submitted.record->approvalId;
+    while (true) {
+        if (context.cancellationRequested()) {
+            const RequestCancelReason reason = context.cancellation->reason();
+            if (reason == RequestCancelReason::Deadline) {
+                approvalBroker_->expire();
+            } else {
+                approvalBroker_->cancelRequest(session_.sessionId,
+                                               request.requestId);
+            }
+            return approvalCancellation(reason);
+        }
+        if (context.deadlineExceeded()) {
+            approvalBroker_->expire();
+            return approvalCancellation(RequestCancelReason::Deadline);
+        }
+
+        const auto record = approvalBroker_->find(approvalId);
+        if (!record.has_value()) {
+            return localError("approval_not_found",
+                              "approval record disappeared before decision",
+                              RequestCompletion::CompletionUnknown);
+        }
+        switch (record->state) {
+        case IpcApprovalState::Pending:
+            std::this_thread::sleep_for(20ms);
+            continue;
+        case IpcApprovalState::Approved:
+            approvalBroker_->cancelRequest(session_.sessionId,
+                                           request.requestId);
+            return localError(
+                "approval_execution_disabled",
+                "approval was recorded but privileged execution is disabled",
+                RequestCompletion::RejectedBeforeStart);
+        case IpcApprovalState::Denied:
+            return localError("approval_denied", "approval was denied",
+                              RequestCompletion::RejectedBeforeStart);
+        case IpcApprovalState::Invalidated:
+            return localError("approval_invalidated",
+                              "approval context is no longer current",
+                              RequestCompletion::RejectedBeforeStart);
+        case IpcApprovalState::Expired:
+            return localError("approval_expired", "approval deadline expired",
+                              RequestCompletion::CancelledBeforeStart);
+        case IpcApprovalState::Cancelled:
+            return localError("cancelled", "approval request was cancelled",
+                              RequestCompletion::CancelledBeforeStart);
+        case IpcApprovalState::Consumed:
+            return localError("approval_state_error",
+                              "approval was consumed outside the dispatcher",
+                              RequestCompletion::CompletionUnknown);
+        }
+    }
 }
 
 IpcDispatchResult IpcMemServiceDispatcher::invokeObserve(

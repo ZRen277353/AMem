@@ -10,12 +10,24 @@
 
 namespace NativeIpc {
 
+class IpcApprovalBroker;
+
+struct IpcExternalSession {
+    uint64_t sessionId = 0;
+    std::string clientName;
+    std::string clientVersion;
+};
+
 class IpcMemServiceDispatcher final : public IIpcRequestDispatcher {
 public:
-    explicit IpcMemServiceDispatcher(Mem::IMemService& service);
+    explicit IpcMemServiceDispatcher(
+        Mem::IMemService& service,
+        IpcApprovalBroker* approvalBroker = nullptr,
+        IpcExternalSession session = {});
 
     bool resolveCapability(const std::string& method,
                            IpcCapability& capability) const override;
+    bool canSubmitForApproval(const std::string& method) const override;
     SessionValidation validateSession() const override;
     IpcDispatchResult execute(const IpcRequestDto& request,
                               const IpcRequestContext& context) override;
@@ -25,6 +37,9 @@ public:
     }
 
 private:
+    IpcDispatchResult submitForApproval(
+        const IpcRequestDto& request,
+        const IpcRequestContext& context);
     IpcDispatchResult invokeObserve(
         const IpcRequestDto& request,
         const Mem::OperationContext& context);
@@ -36,6 +51,8 @@ private:
     Mem::IMemService& service_;
     Mem::MemJsonTools tools_;
     Mem::OperationContext baseline_;
+    IpcApprovalBroker* const approvalBroker_;
+    const IpcExternalSession session_;
 };
 
 } // namespace NativeIpc

@@ -229,6 +229,23 @@ IpcApprovalBroker::invalidateStale(const Mem::OperationContext &current) {
   return changed.size();
 }
 
+size_t IpcApprovalBroker::cancelRequest(uint64_t sessionId,
+                                       uint64_t requestId) {
+  std::vector<IpcApprovalRecord> changed;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &record : records_) {
+      if (record.sessionId == sessionId && record.requestId == requestId &&
+          isLive(record.state)) {
+        record.state = IpcApprovalState::Cancelled;
+        changed.push_back(record);
+      }
+    }
+  }
+  audit(changed);
+  return changed.size();
+}
+
 size_t IpcApprovalBroker::cancelSession(uint64_t sessionId) {
   std::vector<IpcApprovalRecord> changed;
   {
@@ -277,6 +294,19 @@ size_t IpcApprovalBroker::expire(std::chrono::steady_clock::time_point now) {
 std::vector<IpcApprovalRecord> IpcApprovalBroker::snapshot() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return {records_.begin(), records_.end()};
+}
+
+std::optional<IpcApprovalRecord>
+IpcApprovalBroker::find(uint64_t approvalId) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found =
+      std::find_if(records_.begin(), records_.end(), [&](const auto &record) {
+        return record.approvalId == approvalId;
+      });
+  if (found == records_.end()) {
+    return std::nullopt;
+  }
+  return *found;
 }
 
 bool IpcApprovalBroker::isLive(IpcApprovalState state) {

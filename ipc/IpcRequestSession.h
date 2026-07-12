@@ -56,6 +56,12 @@ public:
     // Capability metadata is server-owned. Unknown methods return false.
     virtual bool resolveCapability(const std::string& method,
                                    IpcCapability& capability) const = 0;
+    // A missing session capability may only reach execute() when the server
+    // dispatcher can submit this exact method for per-request approval.
+    virtual bool canSubmitForApproval(const std::string& method) const {
+        (void)method;
+        return false;
+    }
     struct SessionValidation {
         bool valid = true;
         std::string code;
@@ -74,6 +80,7 @@ struct RequestSessionConfig {
     std::chrono::milliseconds idleTimeout{5 * 60 * 1000};
     std::chrono::milliseconds writeTimeout{5000};
     std::chrono::milliseconds validationInterval{250};
+    std::chrono::milliseconds terminalDrainTimeout{100};
     RequestPayloadConfig payload;
     size_t maxRequestsPerSession = kDefaultMaxRequestsPerSession;
 };
@@ -131,6 +138,7 @@ private:
                                 const std::wstring& error);
     RequestSessionResult finishFromIo(const FrameIoResult& result);
     std::optional<RequestSessionResult> finishIfInvalidated();
+    void drainAfterTerminalError();
 
     IpcFramedConnection& connection_;
     IIpcRequestDispatcher& dispatcher_;

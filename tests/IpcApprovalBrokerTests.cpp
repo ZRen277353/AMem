@@ -299,6 +299,25 @@ void testCancelAllRevokesPendingAndApproved() {
          "cancel-all should be terminal and idempotent");
 }
 
+void testRequestCancellationAndLookup() {
+  NativeIpc::IpcApprovalBroker broker;
+  const auto first = broker.submit(submission("memory_write", 70, 1));
+  const auto second = broker.submit(submission("memory_write", 70, 2));
+  expect(first.ok && second.ok &&
+             broker.find(first.record->approvalId).has_value(),
+         "request cancellation fixture should be discoverable by id");
+  expect(broker.cancelRequest(70, 1) == 1 &&
+             broker.find(first.record->approvalId)->state ==
+                 NativeIpc::IpcApprovalState::Cancelled &&
+             broker.find(second.record->approvalId)->state ==
+                 NativeIpc::IpcApprovalState::Pending,
+         "request cancellation must only revoke the exact request");
+  expect(broker.cancelRequest(70, 1) == 0 &&
+             broker.cancelRequest(99, 2) == 0 &&
+             !broker.find(9999).has_value(),
+         "request cancellation and lookup must be bounded and idempotent");
+}
+
 void testConcurrentSubmissionAndInvalidation() {
   NativeIpc::IpcApprovalBroker broker({16, 32});
   std::vector<std::thread> threads;
@@ -335,6 +354,8 @@ int main() {
        &testAuditReceivesBoundedStateTransitions},
       {"cancel all revokes pending and approved",
        &testCancelAllRevokesPendingAndApproved},
+      {"request cancellation and lookup",
+       &testRequestCancellationAndLookup},
       {"concurrent submission and invalidation",
        &testConcurrentSubmissionAndInvalidation},
   };

@@ -179,6 +179,51 @@ void testFragmentedFrameRead() {
     ::CloseHandle(done);
 }
 
+void testPartialHeaderSurvivesReadDeadline() {
+    HANDLE firstDone = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE done = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    SharedResult firstRead;
+    SharedResult secondRead;
+    NativeIpc::NamedPipeServer server(
+        uniquePipeName(L"deadline-fragment"),
+        [&](HANDLE pipe, HANDLE stopEvent) {
+            NativeIpc::IpcFramedConnection connection(pipe, stopEvent);
+            firstRead.set(connection.readFrame(
+                std::chrono::steady_clock::now() + 30ms));
+            ::SetEvent(firstDone);
+            secondRead.set(connection.readFrame(
+                std::chrono::steady_clock::now() + 5s));
+            ::SetEvent(done);
+        });
+    std::wstring error;
+    expect(server.start(error), "deadline fragment server should start");
+    HANDLE client = connectPipe(server.snapshot().pipeName, false);
+    expect(client != INVALID_HANDLE_VALUE,
+           "deadline fragment client should connect");
+
+    const auto bytes = encode(
+        {IpcProtocol::MessageType::Request, 8, "resume-after-timeout"});
+    writeAll(client, bytes.data(), 7);
+    expect(::WaitForSingleObject(firstDone, 5000) == WAIT_OBJECT_0 &&
+               firstRead.get().status ==
+                   NativeIpc::FrameIoStatus::TimedOut &&
+               firstRead.get().bytesTransferred == 7,
+           "partial header should reach the first read deadline");
+    writeAll(client, bytes.data() + 7, bytes.size() - 7);
+    expect(::WaitForSingleObject(done, 5000) == WAIT_OBJECT_0,
+           "retained partial frame should complete on the next read");
+    const auto resumed = secondRead.get();
+    expect(resumed.status == NativeIpc::FrameIoStatus::Complete &&
+               resumed.frame.requestId == 8 &&
+               resumed.frame.payload == "resume-after-timeout",
+           "read timeout must not discard consumed frame bytes");
+
+    ::CloseHandle(client);
+    server.stop();
+    ::CloseHandle(firstDone);
+    ::CloseHandle(done);
+}
+
 void testOversizedHeaderRejectedBeforePayload() {
     HANDLE done = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     SharedResult shared;
@@ -335,6 +380,8 @@ int main() {
     const std::vector<std::pair<std::string, std::function<void()>>> tests = {
         {"large round trip and exact write", &testLargeRoundTripAndExactWrite},
         {"fragmented frame read", &testFragmentedFrameRead},
+        {"partial header survives deadline",
+         &testPartialHeaderSurvivesReadDeadline},
         {"oversized header rejection",
          &testOversizedHeaderRejectedBeforePayload},
         {"invalid UTF-8 rejection", &testInvalidUtf8RejectedAfterBoundedRead},
