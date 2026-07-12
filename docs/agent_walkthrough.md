@@ -385,7 +385,7 @@ old recv times out
 主退出顺序：
 
 ```text
-IpcServer::Stop()
+IpcServer::Stop() [only HAVE_LEGACY_HTTP_IPC]
   -> HttpClient::shutdown()
   -> AgentTaskExecutor::shutdown() and join
   -> DisconnectMultiPort()
@@ -440,9 +440,9 @@ read -> parse temporary -> validate all fields -> commit memory
                                +-- failure: preserve original and report
 ```
 
-## 9. 临时 HTTP IPC 路径
+## 9. 默认关闭的 legacy HTTP IPC 路径
 
-HTTP IPC 调用不进入内置 Agent 循环：
+默认构建不包含 `IpcServer.cpp`。显式配置 `ENABLE_LEGACY_HTTP_IPC=ON` 后，HTTP IPC 调用仍不进入内置 Agent 循环：
 
 ```text
 local HTTP client
@@ -464,11 +464,11 @@ local HTTP client
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
-Python MCP package、配置和安装入口已经删除。静态提取显示 HTTP IPC 仍有 29 个方法；内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 没有同名 IPC 方法，typed read/write、分页、错误和 feature availability 也不一致。不要把 HTTP IPC 描述为受支持的外部 Agent 面。
+Python MCP package、配置和安装入口已经删除。静态提取显示 opt-in HTTP IPC 仍有 29 个方法；内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 没有同名 IPC 方法，typed read/write、分页、错误和 feature availability 也不一致。不要把 HTTP IPC 描述为受支持的外部 Agent 面。
 
 ### 9.2 IPC 安全
 
-IPC 监听 loopback，但当前：
+默认构建不监听 28100；显式启用后的 IPC 仍然：
 
 - 无认证。
 - 允许 `Access-Control-Allow-Origin: *`。
@@ -549,7 +549,7 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_agent_catalog` 校验 canonical 名称与 catalog 依赖边界，`native_agent_no_python_mcp` 校验已删除的运行时和配置不会回归。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。`native_agent_catalog` 校验 canonical 名称与 catalog 依赖边界，`native_agent_no_python_mcp` 校验已删除的运行时和配置不会回归，`native_agent_legacy_ipc_gate` 校验 HTTP server 默认关闭且 opt-in 路径仍有明确编译边界。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

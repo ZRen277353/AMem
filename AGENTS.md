@@ -13,7 +13,7 @@ Read the relevant documents before changing `gui/ai/`, `ipc/`, `tools/protocol_r
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android server over sockets and provides memory scanning, memory read/write, hardware breakpoints, a hex viewer, value freezing, ELF symbols, and Lua scripting. Dear ImGui (docking branch) is rendered through DirectX 12.
 
-The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`; the existing loopback HTTP IPC server is temporary compatibility code awaiting replacement or deletion.
+The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`. Default builds exclude the old loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores it only for migration diagnostics while replacement or deletion is pending.
 
 Language: C++17 for the app. Platform: Windows 10/11 x64. The optional protocol probe in `tools/protocol_reference/` uses Python's standard library but is not a build or runtime dependency.
 
@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the current no-device C++ test. Its 23 groups cover address and scalar codecs, native `MemService` adapters, driver initialization receipts and card redaction, module/pointer/disassembly, native scan/symbol sessions and breakpoint receipts/hit batches, mutation-audit redaction/rotation/late delivery, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and catalog include boundary; `native_agent_no_python_mcp` prevents removed runtime/config paths and launch instructions from returning. Provider, IPC, real transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the current no-device C++ test. Its 23 groups cover address and scalar codecs, native `MemService` adapters, driver initialization receipts and card redaction, module/pointer/disassembly, native scan/symbol sessions and breakpoint receipts/hit batches, mutation-audit redaction/rotation/late delivery, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and catalog include boundary; `native_agent_no_python_mcp` prevents removed runtime/config paths and launch instructions from returning; `native_agent_legacy_ipc_gate` fixes the old HTTP server behind an explicit default-off option. Provider, opt-in IPC, real transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -52,11 +52,13 @@ CMake options:
 - `USE_DX12` (default ON)
 - `USE_DX11` (default OFF)
 - `ENABLE_AI_CHAT` (default ON)
+- `ENABLE_LEGACY_HTTP_IPC` (default OFF; unsafe migration-only endpoint)
 - `LUAJIT_STATIC` (default ON)
 
 Compile-time gates:
 
 - `HAVE_AI_CHAT`
+- `HAVE_LEGACY_HTTP_IPC`
 - `HAVE_CAPSTONE`
 - `HAVE_KEYSTONE`
 - `HAVE_LUAJIT`
@@ -70,7 +72,7 @@ The free functions declared in `socket/client_singleton.h` are the shared device
 ```text
 GUI windows --------------------+
 In-app AI ToolDefinitions ------+--> MemService -> socket/client_singleton.h
-Legacy HTTP IPC handlers -------+                  -> WinSocketClientMgr -> Android
+Opt-in legacy HTTP IPC ---------+                  -> WinSocketClientMgr -> Android
 ```
 
 When adding a device capability:
@@ -86,7 +88,7 @@ Do not implement a second version of the wire protocol in AI or IPC code.
 
 ### Entry Point and Rendering
 
-- `main.cpp` creates the Win32 window, starts IPC on port 28100, drives `Gui::mainLoop()`, and runs shutdown.
+- `main.cpp` creates the Win32 window, drives `Gui::mainLoop()`, and runs shutdown. It starts port 28100 only in an explicit `ENABLE_LEGACY_HTTP_IPC=ON` build.
 - `renderer/DX12Renderer` owns DirectX 12 device/swapchain/frame resources.
 - `renderer/StyleSetup` owns ImGui style and font setup.
 - `ExceptionHandler.h` installs crash dump handling.
@@ -239,7 +241,7 @@ The current session format also stores `systemPrompt` and `tokenLimit`, even tho
 
 ## IPC Server (`ipc/IpcServer.*`)
 
-The IPC server accepts HTTP JSON on `127.0.0.1:28100`:
+When explicitly compiled in, the IPC server accepts HTTP JSON on `127.0.0.1:28100`:
 
 ```json
 {"method": "read_memory", "params": {"address": "0x1234", "size": 16}}
@@ -247,7 +249,7 @@ The IPC server accepts HTTP JSON on `127.0.0.1:28100`:
 
 Methods call the same C++ device commands used by GUI and in-app tools.
 
-Current security/lifecycle constraints:
+Security/lifecycle constraints when the legacy option is enabled:
 
 - There is no authentication token.
 - Responses allow `Access-Control-Allow-Origin: *`.
@@ -262,7 +264,7 @@ Loopback binding is not authentication. Do not add new privileged IPC methods wi
 
 The FastMCP package, `.mcp.json`, install metadata, and IDE configurations have been removed. Do not restore a Python wrapper around the legacy HTTP IPC. The optional `tools/protocol_reference/amem_client.py` script talks directly to the Android wire protocol for manual diagnostics; it is not an Agent integration or a second protocol authority.
 
-The remaining surfaces are still not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions; without it the count is 23. Legacy HTTP IPC has 29 methods and does not use the in-app approval, target-context, result, or feature-gate contract. Keep a machine-checkable capability matrix while IPC is replaced or deleted.
+The remaining surfaces are still not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions; without it the count is 23. Opt-in legacy HTTP IPC has 29 methods and does not use the in-app approval, target-context, result, or feature-gate contract. Keep a machine-checkable capability matrix while IPC is replaced or deleted.
 
 Address parsing currently differs:
 

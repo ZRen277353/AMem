@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android device over Socket and provides memory scanning, hardware breakpoint debugging, a hex memory viewer, value freezing, ELF symbol resolution, and Lua scripting. The UI is built with Dear ImGui (docking branch) rendered via DirectX 12.
 
-On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed; the loopback HTTP IPC server remains only as temporary compatibility code awaiting replacement or deletion.
+On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed. Default builds exclude the loopback HTTP IPC server; `ENABLE_LEGACY_HTTP_IPC=ON` restores that unsafe endpoint only for migration diagnostics.
 
 The `NativeAgent` branch is migrating all front ends to one native `MemService` and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
 
@@ -30,7 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and include boundary; `native_agent_no_python_mcp` guards the removed runtime/config boundary. Provider, IPC, real transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
+`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and include boundary; `native_agent_no_python_mcp` guards the removed runtime/config boundary; `native_agent_legacy_ipc_gate` guards the default-off HTTP endpoint. Provider, opt-in IPC, real transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ## Dependencies
 
@@ -41,9 +41,9 @@ Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly i
 - **Optional**: Keystone — assembly-to-machine-code. Static `/MT`: `vcpkg install keystone:x64-windows-static` (or set `keystone_ROOT`). Linked into the exe.
 - **Static single-exe distribution**: the whole app links `/MT` (static CRT via `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` + CMP0091) plus static capstone/keystone/OpenSSL/LuaJIT. **This is a hard constraint**: the prebuilt `lua51.lib` and official `capstone.lib` are both `/MT` (LIBCMT), so the exe must be `/MT` to avoid CRT conflicts. Result: `bin/ImGuiProject.exe` (~34MB) is fully self-contained — no capstone/keystone/OpenSSL DLLs, no VC runtime DLLs, no VC++ Redistributable needed; only Windows 10/11 x64 system DLLs. Copy the exe alone to another machine and it runs.
 
-CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `LUAJIT_STATIC` (default ON).
+CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_LEGACY_HTTP_IPC` (default OFF), `LUAJIT_STATIC` (default ON).
 
-Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
+Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_LEGACY_HTTP_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
 
 ## Architecture
 
@@ -53,19 +53,19 @@ The free functions declared in `socket/client_singleton.h` (`ReadProcessMemoryBy
 
 1. **GUI windows** (`gui/`) call them directly in response to user actions.
 2. **In-app AI agent** (`gui/ai/ToolDefinitions.cpp`) wraps them as tool executors registered with `ToolExecutor`.
-3. The temporary **HTTP IPC server** (`ipc/IpcServer.cpp`) exposes legacy JSON handlers that call the same functions without in-app Agent approval.
+3. An explicit `ENABLE_LEGACY_HTTP_IPC=ON` build includes **HTTP IPC** (`ipc/IpcServer.cpp`), whose legacy JSON handlers call the same functions without in-app Agent approval.
 
 ```
 GUI windows ─────┐
 in-app AI  ──────┼──▶ MemService / socket command layer ──▶ WinSocketClientMgr ──▶ Android
-legacy HTTP IPC ─┘
+opt-in HTTP IPC ──┘
 ```
 
 **Practical consequence:** adding a new device capability usually means (a) add the socket command in `socket/*Commands.cpp` + declare it in `client_singleton.h`, then (b) expose it through `MemService` to the GUI and/or canonical AI catalog. Do not expand the legacy HTTP IPC while its replacement decision is pending.
 
 ### Entry point & rendering
 
-- `main.cpp` — creates the Win32 window, drives the render loop (`Gui::mainLoop()`), installs `ExceptionHandler.h` (crash dumps), and **starts the IPC server on port 28100**.
+- `main.cpp` — creates the Win32 window, drives the render loop (`Gui::mainLoop()`), installs `ExceptionHandler.h` (crash dumps), and starts port 28100 only behind `HAVE_LEGACY_HTTP_IPC`.
 - `renderer/DX12Renderer` — DirectX 12 device/swapchain/frame management (extracted out of `main.cpp`).
 - `renderer/StyleSetup` — ImGui style + Chinese font loading.
 
@@ -122,7 +122,7 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
 
 ### IPC server (`ipc/IpcServer.cpp`)
 
-A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:28100 only**, started from `main.cpp`. It accepts `POST /` with body `{ "method": "...", "params": {...} }` and returns `{ "success": bool, "result"/"error": ... }`. Methods are registered in `RegisterBuiltinMethods()` and call the same socket commands as the GUI.
+A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:28100 only**. It is excluded from default builds and starts from `main.cpp` only with `ENABLE_LEGACY_HTTP_IPC=ON`. It accepts `POST /` with body `{ "method": "...", "params": {...} }` and returns `{ "success": bool, "result"/"error": ... }`. Methods are registered in `RegisterBuiltinMethods()` and call the same socket commands as the GUI.
 
 Loopback is not authentication. The current server has no token, allows `Access-Control-Allow-Origin: *`, accepts browser preflight, bypasses the in-app write approval path, detaches each client handler, and sends each response with one `send()` call. Do not add privileged methods without addressing authentication/capabilities, browser access, handler drainage, and partial sends.
 

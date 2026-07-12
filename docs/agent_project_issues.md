@@ -17,12 +17,12 @@
 
 | ID | 优先级 | 状态 | 问题 |
 |----|--------|------|------|
-| A-01 | P0 | 未修复 | IPC 无鉴权且允许任意 CORS，回环监听不是完整安全边界 |
+| A-01 | P0 | 部分修复 | 默认构建不再监听；opt-in IPC 仍无鉴权且允许任意 CORS |
 | A-02 | P0 | 已修复 | 当前内置工具均在 service/host send 边界消费 run target；退役 executor 已删除 |
 | A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
 | A-04 | P0 | 未修复 | 配置/索引损坏可导致启动异常或覆盖原文件 |
 | A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
-| A-06 | P1 | 未修复 | IPC client handler 不排空，响应也未处理 partial send |
+| A-06 | P1 | 部分修复 | 默认构建不含 handler；opt-in IPC 仍不排空且未处理 partial send |
 | A-07 | P1 | 已修复 | Stop 保留真实取消语义；mutation 晚到回执在 UI callback 前进入独立审计 |
 | A-08 | P1 | 未修复 | 复合工具和进程切换不是事务，可被其他前端插入 |
 | A-09 | P1 | 未修复 | HTTP、模型内容、工具输出和会话载入缺少总量上限 |
@@ -30,10 +30,10 @@
 | A-11 | P1 | 部分修复 | driver card 已脱敏；其他敏感工具参数、结果和脚本仍明文保存 |
 | A-12 | P2 | 未修复 | 全局 prompt/token 设置会被会话文件反向覆盖 |
 | A-13 | P2 | 已修复 | `symbol_*` 按当前二元安全模型统一分类、事务语义和默认 prompt |
-| A-14 | P2 | 未修复 | 内置 Agent 与 HTTP IPC 的地址字符串进制语义不同 |
+| A-14 | P2 | 部分修复 | 默认构建只有严格 Agent；opt-in HTTP IPC 仍接受无前缀十进制地址 |
 | A-15 | P2 | 未修复 | 设置草稿不完整，且无法从 UI 删除 provider key |
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
-| A-17 | P2 | 部分修复 | Python MCP 已删除；内置 Agent 与 HTTP IPC 的能力面和结果契约仍未统一 |
+| A-17 | P2 | 部分修复 | Python MCP 已删除；内置 Agent 与 opt-in HTTP IPC 的契约仍未统一 |
 | A-18 | P1 | 未修复 | 三类 provider 都会把缺少终止事件的截断 SSE 当成功 |
 | A-19 | P0 | 部分修复 | I/O 失败会 poison 并拒绝复用；仍缺 fake transport 迟到响应测试 |
 | A-20 | P0 | 部分修复 | 请求/lifecycle lease 已落地；仍缺真实 client 并发压力测试 |
@@ -46,18 +46,19 @@
 
 **证据**
 
-- `IpcServer::Start()` 绑定 `127.0.0.1:28100`，但没有认证 token、客户端身份或方法级 capability。
+- `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；默认构建不加入 `IpcServer.cpp`，`main.cpp` 的 include/start/stop 也受 `HAVE_LEGACY_HTTP_IPC` 约束。
+- 显式启用时，`IpcServer::Start()` 绑定 `127.0.0.1:28100`，但没有认证 token、客户端身份或方法级 capability；CMake 会打印未鉴权端口警告。
 - `IpcServer::HandleClient()` 接受浏览器 `OPTIONS` 预检。
 - `IpcServer::BuildHttpResponse()` 返回 `Access-Control-Allow-Origin: *`。
 - 同一入口暴露 `write_memory`、断点、扫描、`execute_lua`、进程切换等有副作用的方法。
 
 **影响**
 
-回环地址只阻止远端主机直接连接，并不阻止本机浏览器页面或其他本地进程访问。当前 CORS 配置还主动允许网页脚本读取响应。恶意网页可尝试从浏览器调用本地 AMem；浏览器的 Private Network Access 策略在不同版本中可能额外阻拦，但不能作为服务端鉴权。
+默认发行构建不再暴露该监听面。风险只在显式迁移构建中存在，但一旦启用，回环地址仍只阻止远端主机直接连接，并不阻止本机浏览器页面或其他本地进程访问。当前 CORS 配置还主动允许网页脚本读取响应；浏览器的 Private Network Access 策略不能作为服务端鉴权。
 
 **建议**
 
-1. 先停止默认启动旧 HTTP IPC，并移除 CORS 和 `OPTIONS` 支持，缩短替换前的暴露窗口。
+1. 保持 default-off gate，不把迁移选项暴露为普通用户设置；若继续保留 opt-in，先移除 CORS 和 `OPTIONS` 支持。
 2. 若确认需要外部自动化，按设计实现带当前用户 ACL、handshake、request id 和默认 Observe capability 的 Named Pipe，而不是恢复 Python MCP。
 3. 所有 target selection/mutation 与 Lua 请求进入 GUI approval broker，并绑定 target snapshot。
 4. 若没有明确外部调用方，删除整个 IPC source 和 CMake wiring。
@@ -128,13 +129,14 @@
 
 **证据**
 
+- 默认构建不编译 `IpcServer.cpp`，以下问题只存在于 `ENABLE_LEGACY_HTTP_IPC=ON` 的迁移构建。
 - `IpcServer::ServerThread()` 为每个客户端创建捕获 `this` 的 detached 线程。
 - `IpcServer::Stop()` 只关闭 listen socket 并 join accept 线程，不等待已接受请求。
 - `HandleClient()` 的多个响应路径只调用一次 `::send()`，没有循环发送剩余字节，也没有设置 `SO_SNDTIMEO`。
 
 **影响**
 
-handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应用状态；静态析构期存在悬空访问窗口。大型 JSON 响应还可能被截断，任意客户端都会看到无效 JSON；慢客户端可能长期占住 detached handler。调用方 timeout 不会取消旧 handler，若自行重试还会放大端口排队和资源占用。
+默认发行构建不具备该退出风险。显式启用后，handler 仍可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应用状态；静态析构期存在悬空访问窗口。大型 JSON 响应还可能被截断，任意客户端都会看到无效 JSON；慢客户端可能长期占住 detached handler。调用方 timeout 不会取消旧 handler，若自行重试还会放大端口排队和资源占用。
 
 **建议**
 
@@ -168,11 +170,11 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 - canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；GUI start/refine/results/clear/remove 已迁入同一 `IMemService` session。旧 IPC 仍可能分步调用，但会推进 epoch 并使 native/GUI session 失效。
 - GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
-- GUI、内置 Agent、HTTP IPC 共用进程、扫描结果和服务端 active symbol table。
+- GUI、内置 Agent，以及显式启用时的 HTTP IPC 共用进程、扫描结果和服务端 active symbol table。
 
 **影响**
 
-另一个前端仍可在 legacy scan/symbol 或 process-selection 两步之间插入请求，导致范围、符号表或当前进程被替换。canonical scan/symbol 会检测冲突，但旧调用自身仍没有同等级的 completion/session 契约。
+默认构建已移除 HTTP caller，但 GUI/Agent 并发和 process-selection 多步流程仍不是完整事务。显式启用 IPC 后，另一个前端还可在 legacy scan/symbol 或 process-selection 两步之间插入请求。canonical scan/symbol 会检测冲突，但旧调用自身仍没有同等级的 completion/session 契约。
 
 **建议**
 
@@ -266,11 +268,11 @@ driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sess
 **证据**
 
 - 内置 Agent 的 raw/typed memory、scan ranges、disassembly、pointer offsets 和 breakpoint 地址均要求显式 `0x`；退役名称不可执行。
-- IPC `ParseAddress()` 对 `"1234"` 按十进制解析，只有 `0x1234` 才是十六进制。
+- 显式启用的 IPC `ParseAddress()` 对 `"1234"` 按十进制解析，只有 `0x1234` 才是十六进制。
 
 **影响**
 
-无前缀字符串在内置 Agent 中被拒绝，在 HTTP IPC 中却会被接受为十进制。调用方跨入口复用参数时会得到不同结果；若再自行按十六进制理解该文本，写内存和断点操作尤其危险。
+默认构建没有第二个解析入口。显式启用 HTTP IPC 后，无前缀字符串在内置 Agent 中被拒绝，在 IPC 中却会被接受为十进制；调用方跨入口复用参数时会得到不同结果，写内存和断点操作尤其危险。
 
 **建议**
 
@@ -298,19 +300,19 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 建议删除该瞬时字段，或定义明确的“最近一次决策”生命周期。
 
-### A-17：内置 Agent 与 HTTP IPC 的能力面和结果契约不统一
+### A-17：内置 Agent 与 opt-in HTTP IPC 的能力面和结果契约不统一
 
 当前静态提取结果：
 
 - 内置 Agent（LuaJIT）：24 个 canonical 名称，24 个可执行、24 个向 provider 广告、0 个 hidden alias；无 LuaJIT 时为 23/23/0。
-- IPC：29 个方法。
+- Opt-in IPC：29 个方法；默认构建为 0。
 - Python MCP package、`.mcp.json`、安装元数据和 IDE 配置已经删除，不再形成第三套可调用面。
 - 内置 Agent 独有 canonical `disassemble`、`symbol_resolve` 等；IPC 独有 `read_batch`，并继续使用 legacy method 名称。
 - 无 LuaJIT 时，内置 `lua_execute` 不注册；IPC 也不注册对应方法，但 availability/error 契约不同。
 
 内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；IPC 返回 HTTP JSON。两条路径的名称、错误字段、duration、分页、截断、审批、target binding 和 feature availability 仍不同。
 
-`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。Python MCP 和内置 legacy 工具均已删除，但 HTTP IPC 尚未迁移，因此本问题仍未关闭。
+`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。Python MCP 和内置 legacy 工具均已删除，HTTP IPC 默认关闭但 opt-in 实现尚未迁移，因此本问题仍未关闭。
 
 建议建立机器可读 capability registry，校验内置工具与后续受限 transport 的暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。不要为临时 HTTP IPC继续扩展第二套 schema。
 
@@ -392,7 +394,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_agent_catalog` 精确验证 24 个 canonical 名称及 catalog 的 include 边界；`native_agent_no_python_mcp` 固定已删除的 runtime/config 和产品文档边界。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 23 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join、晚到结果拒绝和 33 个退役工具的历史降级。`native_agent_catalog` 精确验证 24 个 canonical 名称及 catalog 的 include 边界；`native_agent_no_python_mcp` 固定已删除的 runtime/config 和产品文档边界；`native_agent_legacy_ipc_gate` 固定 HTTP server 的 default-off compile/start gate。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
@@ -411,6 +413,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | 项目 | 当前实现 |
 |------|----------|
 | Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
+| HTTP IPC 默认监听未鉴权端口 | `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；标准构建不编译 `IpcServer.cpp`，main 的 include/start/stop 也受 compile gate 约束 |
 | Agent breakpoint 直连 socket 且回执/本地 tracker 分离 | 五个规范工具经 `MemService` 绑定 target；mutation 区分未发送/拒绝/完成未知/确认完成，设备确认与 cleanup tracker 在同一 transaction 更新，hits 使用有界最新批次且不伪造 cursor |
 | Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
@@ -441,7 +444,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ## 建议修复顺序
 
-1. 关闭 IPC 的浏览器暴露并加入认证；把剩余 target mutation 工具迁入 snapshot-bound service。
+1. 在保持 HTTP IPC default-off 的前提下决定彻底删除或实现受限 Named Pipe；不要修补后再默认开启旧端口。
 2. 为已落地的 poison/lifecycle gate 增加 fake transport 与真实设备压力证明。
 3. 将 HTTP 和 IPC handler 也改为可管理、可 join 的任务生命周期（工具 worker 已完成）。
 4. 修复配置/索引的事务式加载和损坏文件保留，统一会话原子写。

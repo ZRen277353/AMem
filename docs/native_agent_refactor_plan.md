@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理与 Python MCP 删除已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除与 HTTP IPC default-off gate 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,7 +10,7 @@
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成二十个纵向切片：
+截至 2026-07-13 已完成二十一个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -34,9 +34,10 @@
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
+- `ENABLE_LEGACY_HTTP_IPC` 默认 OFF；标准构建不加入 `IpcServer.cpp`，`main.cpp` 的 include/start/stop 受 `HAVE_LEGACY_HTTP_IPC` 约束。显式 opt-in 会打印未鉴权端口警告，供迁移验证。
 - `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；catalog 与 no-Python-MCP 两项契约 CTest 分别固定 canonical 目录和运行时删除边界。
 
-尚未完成：HTTP IPC 默认启动与 transport 收敛、IPC scan/symbol/breakpoint 调用迁移，以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、Python MCP 删除、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC transport 的最终删除/替换、opt-in IPC scan/symbol/breakpoint 调用迁移，以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -412,6 +413,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] 删除 `.mcp.json`。
 - [x] 删除 `mcp/amem_mcp/`、`mcp/configs/`、`mcp/server.py`、`mcp/pyproject.toml`、`mcp/requirements.txt`、`mcp/README.md` 和 `mcp/.gitignore`。
 - [x] 将仍用于协议排障的标准库探针移动到 `tools/protocol_reference/`，并明确它不参与产品运行。
+- [x] 旧 HTTP IPC 默认不编译、不监听，仅保留带警告的显式迁移 opt-in。
 - [ ] 新 IPC 上线后删除 `ipc/IpcServer.*`；若不保留外部自动化，则整个 `ipc/` 可删除。
 - [x] 删除 README、IDE 配置和脚本中对 FastMCP、`python -m amem_mcp` 和 MCP 安装的引用；端口 28100 的风险说明保留到旧 IPC 删除。
 
@@ -460,11 +462,11 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 退出条件：除 `MemService`/协议实现外，仓库没有前端直接包含 `client_singleton.h` 的业务调用。
 
-### Phase 4：替换或删除 IPC
+### Phase 4：替换或删除 IPC（部分完成）
 
 变更：
 
-- 先关闭 HTTP server 的默认启动。
+- [x] 关闭 HTTP server 的默认编译和启动。
 - 有外部调用需求时实现 Named Pipe、ACL、framing、handshake、cancel 和 approval broker。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
@@ -605,4 +607,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第二十批删除 Python MCP 产品运行时。移除 FastMCP package、stdio 入口、pip metadata、`.mcp.json` 和六套 IDE 配置，不再维护第三套 schema、常量、retry 与 feature availability。独立的标准库 Android 协议探针迁至 `tools/protocol_reference/`，说明明确 C++ socket command 才是事实来源，脚本不具备 Agent 审批、target revision 或产品级安全边界。`native_agent_no_python_mcp` CTest 阻止旧目录、配置和产品启动说明回归。
 
-二十个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试、catalog 契约测试和 Python MCP 删除门禁。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除与 GUI breakpoint/symbol/scan 迁移已完成。下一批应关闭 HTTP IPC 默认启动，并决定删除 IPC 或实现受限 Named Pipe。
+第二十一批关闭 legacy HTTP IPC 默认入口。新增 `ENABLE_LEGACY_HTTP_IPC=OFF`，标准构建不包含 `IpcServer.cpp` 或 main start/stop 路径；显式 ON 时定义 `HAVE_LEGACY_HTTP_IPC`、编译旧实现并打印未鉴权 28100 警告。`native_agent_legacy_ipc_gate` 固定 CMake/main 边界；Debug/Release 默认构建与独立 opt-in 构建均通过。
+
+二十一个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试和三项契约门禁。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭与 GUI breakpoint/symbol/scan 迁移已完成。下一批需决定删除 IPC 或实现受限 Named Pipe。

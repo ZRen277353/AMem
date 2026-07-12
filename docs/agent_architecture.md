@@ -3,13 +3,13 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、临时 HTTP IPC 和它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、默认关闭的 legacy HTTP IPC 和它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 是待替换或删除的旧入口，不经过内置编排器。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 默认不编译，只有显式 `ENABLE_LEGACY_HTTP_IPC=ON` 才恢复该待替换或删除的旧入口。
 
 ## 1. 系统总览
 
-AMem 当前有三个设备能力入口：
+AMem 默认有 GUI 与内置 Agent 两个设备能力入口；迁移构建可显式加入第三个：
 
 ```text
 GUI windows --------------------+
@@ -17,7 +17,7 @@ GUI windows --------------------+
 In-app AI Agent                 +--> MemService -> socket/client_singleton.h
 ChatWindow -> ToolDefinitions --+                    -> WinSocketClientMgr
                                 |                    -> Android server/device
-Legacy HTTP IPC :28100 ---------+
+Opt-in HTTP IPC :28100 ---------+
 ```
 
 `socket/client_singleton.h` 及 `socket/*Commands.cpp` 是设备协议的主要真相源。GUI、内置 Agent 和 IPC handler 都不应各自重写协议。
@@ -29,7 +29,7 @@ Legacy HTTP IPC :28100 ---------+
 3. 模型返回 tool call 时，执行预算控制、写类审批、工具调用和结果回喂。
 4. 保存会话并记录 run trace。
 
-HTTP IPC 不经过 `AgentController`、`AgentRunner` 或内置审批框，handler 会直接调用设备命令。Python MCP 删除后仓库不再提供外部 AI adapter，但任意本地 HTTP 客户端仍可触发该旧入口，因此其安全问题仍未关闭。
+启用后的 HTTP IPC 不经过 `AgentController`、`AgentRunner` 或内置审批框，handler 会直接调用设备命令。默认关闭消除了标准构建的监听面，但 opt-in 入口仍未鉴权，因此其代码级安全问题尚未关闭。
 
 ## 2. 目录与职责
 
@@ -205,9 +205,9 @@ HTTP 2xx 不等于 provider stream 完整：
 
 ### 5.3 退出顺序与边界
 
-`main.cpp` 当前依次调用：
+`main.cpp` 当前按条件依次调用：
 
-1. `IpcServer::Stop()`
+1. `IpcServer::Stop()`（仅 `HAVE_LEGACY_HTTP_IPC`）
 2. `HttpClient::shutdown()`
 3. `AgentTaskExecutor::shutdown()`
 4. `DisconnectMultiPort()`
@@ -382,11 +382,11 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 因此 `tokenLimit` 只是本地近似阈值，不是“请求一定适配当前模型”的保证。自定义 endpoint/model 还需要显式的 context 配置。
 
-## 10. 临时 HTTP IPC
+## 10. 默认关闭的 legacy HTTP IPC
 
 ### 10.1 IPC 协议
 
-`IpcServer` 监听 `127.0.0.1:28100`，接受：
+默认构建不包含 `IpcServer.cpp`。只有 `ENABLE_LEGACY_HTTP_IPC=ON` 时，`IpcServer` 才监听 `127.0.0.1:28100` 并接受：
 
 ```json
 {
@@ -419,13 +419,13 @@ FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAg
 |------|------------|------|
 | 内置 Agent（LuaJIT） | 24 个广告定义 / 24 个可执行名称 | 0 个 hidden alias；退役调用仅保留为历史文本 |
 | 内置 Agent（无 LuaJIT） | 23 个广告定义 / 23 个可执行名称 | 0 个 hidden alias；`lua_execute` 不注册 |
-| HTTP IPC | 29 | 原始 C++ handler；不经过 Agent 审批、target context 或统一结果契约 |
+| Opt-in HTTP IPC | 29 | 原始 C++ handler；不经过 Agent 审批、target context 或统一结果契约 |
 
 内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 HTTP IPC 的 feature-gate 和结果行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
 ### 10.3 当前 IPC 安全边界
 
-IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS。任意可访问该端口的本地客户端都能绕过内置 Agent 的写审批。因此不要新增 IPC 能力；替换或删除它之前，必须先考虑默认启用、鉴权、浏览器访问和 capability。
+默认关闭已移除标准构建的监听面。显式启用时，IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS；任意可访问该端口的本地客户端都能绕过内置 Agent 的写审批。因此不要新增 IPC 能力；替换或删除它之前，必须先考虑鉴权、浏览器访问和 capability。
 
 外部 client timeout 只结束调用方等待，不会停止 detached C++ handler。没有 server request id/cancellation 前，不得建议自动重试；retry-safe 还必须包含“旧请求继续运行也不会破坏共享状态/资源”的判断。
 
@@ -487,7 +487,7 @@ IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origi
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、service/adapter、raw/typed write 完成语义、target/generation、连接 lease/poison、审批期间切换/重连、同批 target 推进、非目标工具、队列取消/timeout、active cancellation、shutdown join、晚到结果拒绝和退役工具历史降级。`native_agent_catalog` 精确校验 24 个 canonical 名称及 `ToolDefinitions.cpp` 的依赖边界；`native_agent_no_python_mcp` 校验旧 runtime/config 路径不存在、协议探针位于新目录且产品文档没有启动命令；`native_agent_legacy_ipc_gate` 固定 default-off option 与 main/source compile gate。以下路径仍缺测试：
 
 - provider SSE/full-response 解析和完整终止验证
 - ChatSession 通用工具配对与预算裁剪
