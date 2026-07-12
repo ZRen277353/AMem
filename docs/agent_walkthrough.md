@@ -246,6 +246,8 @@ driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、
 
 GUI 的 `BreakpointWindow` 已完成 breakpoint 域迁移：窗口构造时注入 `IMemService`，添加、删除、启用、暂停、恢复和命中刷新均捕获当前 target/generation。命中读取在 DEBUG 端口排空一次无 cursor 响应，只保留最新 50,000 条；`BreakpointHit` 保存详情页所需的 GPR、`orig_x0`、syscall、FPSR/FPCR 和全部向量寄存器。超过上限时 GUI 显示丢弃较早命中的日志。
 
+GUI symbol cache 也不再直接编排 `SymbolInit -> SymbolGetList`。`MemoryViewerWindow` 与 `BreakpointWindow` 把注入的 `IMemService` 传给 `ModuleCache`；cache miss 调用 `loadSymbolTable`，在一个 MAIN transaction 中完成 module 唯一匹配、一次 init 和全部页读取。service 限制 1,000,000 项/64 MiB 名称并在释放 transaction 后复核 target+epoch；cache 随后在自身 mutex 内再次复核 target 与 module，才安装排序结果。
+
 ### 5.3 受管工具队列
 
 批准或只读工具进入 `ChatWindow::startToolExecution()`：
@@ -549,7 +551,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 22 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 22 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

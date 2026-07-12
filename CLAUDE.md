@@ -93,7 +93,7 @@ MCP ▶ IPC ───┘        (the protocol layer)
 
 ### Shared state & cross-window events
 
-- `gui/AppContext` (`AppContext::Get()`) — singleton holding global process state (`selectedPid`, `processHandle`, `processRevision`, thread-safe selected name) and a `moduleCache` (module list + per-module ELF symbol cache, with address→module/symbol formatting). The GUI, the AI tools, and the IPC server all read/write process state through this.
+- `gui/AppContext` (`AppContext::Get()`) — singleton holding global process state (`selectedPid`, `processHandle`, `processRevision`, thread-safe selected name) and a `moduleCache` (module list + per-module ELF symbol presentation cache). GUI symbol cache misses call the injected `IMemService::loadSymbolTable()`; the service owns init/fetch transaction and target validation, while cache installation rechecks target/module under the cache mutex. The GUI, AI tools, and IPC server still share the underlying process state.
 - `gui/EventBus` (`EventBus::Get()`) — templated publish/subscribe singleton for decoupling windows. Events live in `gui/Events.h` (`ProcessSelectedEvent`, `NavigateToAddressEvent`). Handler lists are heap-allocated (never destructed) to dodge static-destruction-order issues when windows unsubscribe at shutdown.
 
 ### Socket communication (`socket/`)
@@ -116,6 +116,7 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
 - **Streaming completion**: HTTP 2xx is insufficient. Claude/DeepSeek set terminal state but never validate it, and OpenAI does not track it, so a truncated SSE stream can currently be committed as success. New provider work must require a legal terminal before tool execution.
 - **Target binding**: `AgentRunContext` captures connection generation plus `{pid, handle, processRevision}`. Approval, dequeue, and result collection validate it, and `process_open` explicitly advances a `Selection` context. Migrated `MemService` operations validate again at the service/send boundary; legacy process-bound executors still need this migration. Run ids only isolate UI messages.
 - **GUI service migration**: `BreakpointWindow` is constructed with `IMemService`; set/remove/enable/suspend/resume and hit refresh consume a fresh target-bound context. Hit batches preserve GPR/FPSIMD state and keep the newest 50,000 GUI entries. The Agent keeps the newest 100 and reports `available`/`dropped`; the wire protocol has no continuation cursor.
+- **GUI symbol cache**: `MemoryViewerWindow` and `BreakpointWindow` pass their injected service to `AppContext::ModuleCache`. A miss loads the full symbol table with one init and one transaction across all 1000-item protocol pages, bounded to 1,000,000 symbols/64 MiB names. Direct GUI `SymbolInit`/`SymbolGetList` calls are gone.
 - **Context budget**: `ProviderCapabilities::maxContextTokens` is currently unused. The byte-count heuristic omits tool schemas and output reserve; `tokenLimit` is not a guarantee that a request fits the active model.
 - **Persistence** (all relative to the process working directory; this is only next to the exe when launched from there):
   - `ai_config.json` — provider configs; **API keys are encrypted with Windows DPAPI** (`ApiKeyStore`, base64 over the encrypted blob). Keys are per-Windows-user and never bundled.

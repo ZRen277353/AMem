@@ -75,7 +75,7 @@
 
 **影响**
 
-已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint mutation、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
+已迁移工具、module/pointer/disassembly lookup、canonical scan/symbol/breakpoint、GUI breakpoint 与 symbol cache、driver 和 raw/typed memory write 已阻断该路径。scan/symbol session 绑定 target+epoch；breakpoint/driver 在 service send 边界消费 context，并保留确认/未知回执。`lua_execute` 也会在 host 执行前复核 target/generation。但隐藏 scan/symbol/breakpoint aliases 等 legacy executor 仍直接读取共享状态；Controller 的出队校验与实际 socket send 之间仍有竞态窗口。结果回收会拒绝旧 target 的“成功”，但有副作用的旧命令可能已经施加到错误目标，因此本项不能标为关闭。
 
 **建议**
 
@@ -165,7 +165,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 - 端口锁只覆盖单个 request-response。
 - 每条 `SocketCommand` 现会经过可重入 per-port transaction gate；canonical pointer、scan 与 symbol 已长期持有相应 transaction，process selection 尚未完成同等级的业务事务/revision。
 - canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；旧 GUI/IPC/隐藏 alias 仍可能分步调用，但会推进 epoch 并使 native session 失效。
-- 旧 GUI/IPC 的 symbol 流程仍会分开调用 `SymbolInit` 和 `SymbolGetList`；canonical `symbol_list` 已合并 module resolve + init + page，并用 epoch 约束续页。
+- GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC/隐藏 alias 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
 - GUI、内置 Agent、IPC/MCP 共用进程、扫描结果和服务端 active symbol table。
 
@@ -175,7 +175,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 
 **建议**
 
-- 继续把旧 GUI/IPC scan/symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
+- 继续把旧 GUI/IPC scan 和 IPC/隐藏 symbol 调用迁入 service，并为进程切换建立明确 revision；持 gate 时不得反向获取 process-state mutex。
 - 最可靠的方式是让服务端提供单命令复合操作或显式 session id。
 - 工具执行前后校验 process/scan/symbol revision；冲突时失败而不是继续使用混合状态。
 
@@ -392,7 +392,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 22 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
+仓库已有 `NativeAgentMemTests`/`native_agent_mem_service` 的 22 个测试组，覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前写盘、target/generation、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、非目标工具、排队取消/timeout、active cancellation、shutdown join 和晚到结果拒绝。以下纯逻辑/协议边界仍缺自动化：
 
 - 三类 provider 的 SSE/full-response parser 和终止语义。
 - `ChatSession::getMessagesForRequest()` 的 tool call/result 配对。
