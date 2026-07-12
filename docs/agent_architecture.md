@@ -1,24 +1,23 @@
 # AMem AI Agent 架构文档
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-12
+最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、IPC/MCP 桥接和它们共享的设备协议层。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、临时 HTTP IPC 和它们共享的设备协议层。Python MCP 代理已经删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。“外部 Agent”指通过 Python MCP server 和本地 IPC 调用 AMem 的 Claude Code、Codex、Cursor 等客户端。两者不是同一套编排器，但最终调用同一设备命令层。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。当前没有受支持的外部 Agent adapter；HTTP IPC 是待替换或删除的旧入口，不经过内置编排器。
 
 ## 1. 系统总览
 
-AMem 有三个设备能力入口：
+AMem 当前有三个设备能力入口：
 
 ```text
 GUI windows --------------------+
                                 |
-In-app AI Agent                 +--> socket/client_singleton.h
-ChatWindow -> ToolDefinitions --+       -> WinSocketClientMgr (3 ports)
-                                |       -> Android server/device
-External AI Agent               |
-MCP (Python) -> IPC :28100 -----+
+In-app AI Agent                 +--> MemService -> socket/client_singleton.h
+ChatWindow -> ToolDefinitions --+                    -> WinSocketClientMgr
+                                |                    -> Android server/device
+Legacy HTTP IPC :28100 ---------+
 ```
 
 `socket/client_singleton.h` 及 `socket/*Commands.cpp` 是设备协议的主要真相源。GUI、内置 Agent 和 IPC handler 都不应各自重写协议。
@@ -30,7 +29,7 @@ MCP (Python) -> IPC :28100 -----+
 3. 模型返回 tool call 时，执行预算控制、写类审批、工具调用和结果回喂。
 4. 保存会话并记录 run trace。
 
-外部 MCP 路径不经过 `AgentController`、`AgentRunner` 或内置审批框。Python MCP tool 直接调用 IPC，IPC handler 再调用设备命令。外部客户端是否审批写操作由客户端自身策略决定。
+HTTP IPC 不经过 `AgentController`、`AgentRunner` 或内置审批框，handler 会直接调用设备命令。Python MCP 删除后仓库不再提供外部 AI adapter，但任意本地 HTTP 客户端仍可触发该旧入口，因此其安全问题仍未关闭。
 
 ## 2. 目录与职责
 
@@ -49,7 +48,7 @@ MCP (Python) -> IPC :28100 -----+
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
 | IPC | `IpcServer` | 回环 HTTP JSON 入口，方法注册和 C++ handler |
-| MCP | `mcp/amem_mcp/` | FastMCP stdio server、参数转换、HTTP IPC client |
+| 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
 ## 3. 内置 Agent 的核心对象
@@ -202,7 +201,7 @@ HTTP 2xx 不等于 provider stream 完整：
 | runId 过滤 | 迟到结果不污染新 UI run；mutation/session-effect 结果仍进入独立 Audit 表 | 迟到操作没有设备副作用 |
 | `SocketIoTimeout` | 给当前线程的 socket I/O 设置期限；I/O 失败会 poison session | 事务取消、任务所有权、自动重连/状态恢复 |
 | `DeviceSession` poison | 推进 generation、拒绝新请求并等待显式重连 | 自动恢复 driver/process/scan/breakpoint 状态 |
-| MCP HTTP timeout | Python 停止等待，部分读方法会重试 | 旧 IPC handler/设备请求已取消 |
+| 外部 HTTP client timeout | client 停止等待 | detached IPC handler/设备请求已取消 |
 
 ### 5.3 退出顺序与边界
 
@@ -242,7 +241,7 @@ Idle
   -> FollowUp -> WaitingModel
 ```
 
-写类审批只存在于内置 Agent。MCP/IPC 请求不经过该状态机。
+写类审批只存在于内置 Agent。HTTP IPC 请求不经过该状态机。
 
 `AgentRunner` 会保持工具调用顺序：结果必须和当前 pending call 的 id/name/arguments 匹配，否则停止当前批次。runId 再在 UI 消息层隔离上一个 run 的迟到结果。
 
@@ -337,7 +336,7 @@ canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC scan
 
 ### 8.3 地址语义
 
-内置 Agent 的 raw/typed memory、scan ranges、disassembly、`pointer_resolve` offsets 和 breakpoint 地址均只接受带 `0x` 前缀的字符串；退役 alias 不可执行。IPC/MCP 对无前缀字符串仍按十进制解析，因此跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
+内置 Agent 的 raw/typed memory、scan ranges、disassembly、`pointer_resolve` offsets 和 breakpoint 地址均只接受带 `0x` 前缀的字符串；退役 alias 不可执行。HTTP IPC 对无前缀字符串仍按十进制解析，因此跨前端继续只使用明确的 `0x` 地址字符串。`memory_write_value` 的 qword 参数和 breakpoint hit/register 值应使用字符串，避免 JSON/模型链路损失 64-bit 精度。
 
 ### 8.4 timeout、连接 generation 与协议恢复
 
@@ -383,7 +382,7 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 因此 `tokenLimit` 只是本地近似阈值，不是“请求一定适配当前模型”的保证。自定义 endpoint/model 还需要显式的 context 配置。
 
-## 10. IPC 与 MCP
+## 10. 临时 HTTP IPC
 
 ### 10.1 IPC 协议
 
@@ -410,34 +409,25 @@ provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapab
 
 请求 parser 已校验 method/path/Content-Length，并设置 1 MiB 请求上限。当前响应发送只有一次 `send()`，没有 short-write 循环。
 
-### 10.2 MCP 层
+### 10.2 Python MCP 已删除
 
-`mcp/amem_mcp/` 是 Python 3.10+ FastMCP package：
+FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已经从 `NativeAgent` 删除。`tools/protocol_reference/amem_client.py` 仅是可选的 Android wire-protocol 排障脚本，不连接 GUI IPC，不参与产品构建，也不能作为新的 Agent adapter。
 
-- `server.py`/入口负责 stdio MCP。
-- `tools/` 按 status/process/memory/scan/breakpoint/lua/symbols 分域。
-- `ipc_client.py` 通过 HTTP 调用 GUI。
-- `constants.py` 镜像 C++ 扫描 flag、数据类型和内存区枚举。
-- `helpers.py` 做整数、字节和输出格式转换。
-
-GUI 必须已运行并连接设备。Python server 不直接连接 Android。
-
-三条工具面当前并不一一对应：
+当前两个可调用面仍不一一对应：
 
 | 入口 | 静态名称数 | 说明 |
 |------|------------|------|
 | 内置 Agent（LuaJIT） | 24 个广告定义 / 24 个可执行名称 | 0 个 hidden alias；退役调用仅保留为历史文本 |
 | 内置 Agent（无 LuaJIT） | 23 个广告定义 / 23 个可执行名称 | 0 个 hidden alias；`lua_execute` 不注册 |
-| IPC | 29 | 原始 C++ handler；含未被 MCP 包装的 `read_batch` |
-| MCP | 30 | Python wrapper 把 typed read/write 映射到 IPC |
+| HTTP IPC | 29 | 原始 C++ handler；不经过 Agent 审批、target context 或统一结果契约 |
 
-内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 IPC/MCP 的行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
+内置 Agent 另有 `disassemble`、`symbol_resolve`、`breakpoint_hits` 等规范名称。无 LuaJIT 时内置 Agent 不注册 `lua_execute`，而 HTTP IPC 的 feature-gate 和结果行为仍不同。新增能力时不能只验证“socket 命令存在”，需要 capability/feature-gate 契约。
 
 ### 10.3 当前 IPC 安全边界
 
-IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS。外部 MCP 路径又不经过内置 Agent 的写审批。因此新增 IPC 写能力前必须先考虑鉴权、浏览器访问和 capability，而不能只写参数校验。
+IPC 只绑定 loopback，但没有认证，并返回 `Access-Control-Allow-Origin: *`，还接受浏览器 OPTIONS。任意可访问该端口的本地客户端都能绕过内置 Agent 的写审批。因此不要新增 IPC 能力；替换或删除它之前，必须先考虑默认启用、鉴权、浏览器访问和 capability。
 
-Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试。HTTP timeout 只结束 Python 等待，不会停止 detached C++ handler；重试可让旧、新请求同时排队。没有 server request id/cancellation 前，retry-safe 还必须包含“旧请求继续运行也不会破坏共享状态/资源”的判断。
+外部 client timeout 只结束调用方等待，不会停止 detached C++ handler。没有 server request id/cancellation 前，不得建议自动重试；retry-safe 还必须包含“旧请求继续运行也不会破坏共享状态/资源”的判断。
 
 ## 11. 维护不变量与当前缺口
 
@@ -447,11 +437,10 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 2. 每个 socket request-response 使用 `SocketCommand::execute*` 或等价端口锁。
 3. provider 请求使用 `ChatSession::getMessagesForRequest()` 保持 tool use/result 配对。
 4. 会修改目标的内置工具不得误标为 ReadOnly。
-5. 扫描 flag/数据类型/内存区枚举变更时同步 `mcp/amem_mcp/constants.py`。
-6. 地址跨前端传递时使用 `0x` 前缀。
-7. 工具、IPC、provider 和持久化入口都要在分配前验证不可信长度。
-8. provider streaming 成功必须有合法终止事件，partial content 不进入工具执行。
-9. socket timeout、EOF 或 partial I/O 必须 poison 当前 `DeviceSession` generation，旧连接在显式重连前不得复用。
+5. 地址跨前端传递时使用 `0x` 前缀。
+6. 工具、IPC、provider 和持久化入口都要在分配前验证不可信长度。
+7. provider streaming 成功必须有合法终止事件，partial content 不进入工具执行。
+8. socket timeout、EOF 或 partial I/O 必须 poison 当前 `DeviceSession` generation，旧连接在显式重连前不得复用。
 
 ### 尚未满足、不能假定成立的目标
 
@@ -462,7 +451,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 5. ReadOnly 一定没有共享状态变化。
 6. 真实三端口 transport 已覆盖 timeout、partial I/O、迟到字节和 reconnect generation。
 7. provider `maxContextTokens` 会自动限制实际请求。
-8. 内置 Agent、IPC 和 MCP 暴露相同能力。
+8. 内置 Agent 与临时 IPC 暴露相同能力和结果契约。
 
 ## 12. 扩展检查单
 
@@ -472,7 +461,7 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 2. 明确它绑定哪个资源：process、scan session、symbol table、breakpoint 或全局 driver。
 3. 判断是 target mutation、stateful read 还是纯 read，并同步默认 prompt。
 4. 在 `ToolDefinitions.cpp` 添加 schema、局部长度上限和 executor。
-5. 若暴露给外部 Agent，同步 IPC handler、MCP wrapper、常量和错误语义。
+5. 不向旧 HTTP IPC 增加方法；若决定保留外部自动化，按计划通过受限 Named Pipe adapter 暴露 `MemService` 契约。
 6. 对地址统一要求 `0x`，对列表设计分页和输出上限。
 7. 若是复合操作，设计事务/revision，而不是连续调用两条各自加锁的命令。
 8. 写工具审批必须显示并校验目标 PID/revision。
@@ -507,6 +496,6 @@ Python `IpcClient` 会对部分读方法在 timeout/网络错误后默认重试�
 - ToolExecutor schema 和错误契约
 - IPC HTTP/auth/sendAll/capability
 - fake transport partial I/O、迟到响应和三端口 reconnect
-- C++/IPC/MCP 名称、常量和 feature gate 对齐
+- C++ Agent/IPC 名称、结果和 feature gate 对齐
 
 真实 Android 设备测试保留给协议兼容、驱动和硬件断点 smoke test。

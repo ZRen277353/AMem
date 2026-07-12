@@ -30,7 +30,7 @@
 - 🐛 **内核级调试** - 硬件断点、内存断点支持
 - 📡 **远程连接** - 通过 Socket 连接 Android 设备
 - 💾 **崩溃保护** - 完整的异常捕获和 dump 生成
-- 🤖 **AI 集成 (MCP)** - 内置 IPC Server + MCP 代理，支持 Claude Code 等 AI 客户端直接调用全部能力
+- 🤖 **内置 AI Agent** - 支持 Claude、OpenAI-compatible 和 DeepSeek provider，直接调用原生调试工具
 - 📜 **Lua 脚本** - LuaJIT 脚本引擎，支持自动化操作
 
 
@@ -78,12 +78,12 @@
 - ✅ 信号处理
 - ✅ 自动生成 .dmp 崩溃转储文件
 
-### 6. MCP / AI 集成
-- ✅ GUI 内嵌 HTTP IPC Server（`127.0.0.1:28100`）
-- ✅ MCP Python 代理，支持 Claude Code / Claude Desktop 等 AI 客户端
-- ✅ 通过 MCP 调用全部功能：进程管理、内存读写、扫描、断点
-- ✅ `execute_lua` tool — AI 可直接编写并执行 Lua 脚本完成复杂自动化
-- ✅ 零协议重复，所有请求复用 GUI 已有的 C++ 实现
+### 6. 内置 AI Agent
+- ✅ 原生进程、模块、内存、扫描、符号和断点工具
+- ✅ 写操作审批、目标快照校验、取消与完成状态审计
+- ✅ Claude、OpenAI-compatible 和 DeepSeek provider
+- ✅ `lua_execute` tool（仅在启用 LuaJIT 时可用）
+- ✅ 无 Python/FastMCP 运行依赖
 
 
 ## 🚀 快速开始
@@ -194,53 +194,16 @@ build/Release/ImGuiProject.exe
 5. 触发断点后，查看命中信息
 
 
-### 5. MCP (AI 集成) 使用
+### 5. 内置 AI Agent 使用
 
-AMem 内置了 IPC HTTP Server，配合 `mcp/` 目录下的 Python MCP Server，可让 Claude Code 等 AI 客户端直接操控全部调试功能。
+1. 启动 AMem 并连接 Android 服务端。
+2. 在 AI 设置中配置 provider、endpoint、model 和 API key。
+3. 打开 AI Chat，选择目标进程后发起调试任务。
+4. 涉及进程切换、写内存、扫描、断点或 Lua 的操作会按安全分类请求确认。
 
-#### 架构
-
-```
-Claude Code ──stdio──> MCP Server (Python) ──HTTP──> AMem GUI (C++ IPC Server) ──TCP──> Android
-```
-
-#### 使用步骤
-
-1. 启动 AMem GUI（IPC Server 自动监听 `127.0.0.1:28100`）
-2. 安装 Python 依赖：
-   ```bash
-   pip install mcp
-   ```
-3. 在 Claude Code 的 MCP 配置中添加：
-   ```json
-   {
-     "mcpServers": {
-       "amem": {
-         "command": "python",
-         "args": ["mcp/server.py"]
-       }
-     }
-   }
-   ```
-4. AI 即可调用 `list_processes`、`read_memory`、`scan_value`、`execute_lua` 等全部 tool
-
-#### 可用 MCP Tools
-
-| 分类 | Tools |
-|------|-------|
-| 状态 | `get_status`, `get_server_version`, `get_architecture`, `init_driver` |
-| 进程 | `list_processes`, `open_process`, `list_modules`, `get_module_base` |
-| 内存 | `read_memory`, `read_value`, `write_value`, `write_bytes` |
-| 扫描 | `scan_set_range`, `scan_value`, `scan_next`, `scan_fuzzy`, `scan_hex`, `get_scan_count`, `get_scan_results`, `clear_scan` |
-| 断点 | `set_breakpoint`, `remove_breakpoint`, `read_breakpoint_info`, `suspend_breakpoint`, `resume_breakpoint` |
-| Lua | `execute_lua` — 在 GUI 内执行任意 Lua 脚本 |
-| 辅助 | `resolve_offset_chain` |
-
-#### 直接测试 IPC
-
-```bash
-curl -X POST http://127.0.0.1:28100 -d "{\"method\":\"get_status\"}"
-```
+Python MCP 代理已经从 `NativeAgent` 分支删除。当前 HTTP IPC 仍是待替换的
+临时兼容代码，不作为新的外部 AI 集成接口；协议排障脚本位于
+`tools/protocol_reference/`，不参与产品构建或运行。
 
 
 ## ⚙️ 构建配置

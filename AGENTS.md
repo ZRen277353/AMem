@@ -7,18 +7,15 @@ This file is the repository-level guide for coding agents working on AMem. The c
 - `docs/agent_project_issues.md`
 - `docs/native_agent_refactor_plan.md`
 
-Read the relevant documents before changing `gui/ai/`, `ipc/`, `mcp/`, shared process state, or socket commands.
+Read the relevant documents before changing `gui/ai/`, `ipc/`, `tools/protocol_reference/`, shared process state, or socket commands.
 
 ## Project Overview
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android server over sockets and provides memory scanning, memory read/write, hardware breakpoints, a hex viewer, value freezing, ELF symbols, and Lua scripting. Dear ImGui (docking branch) is rendered through DirectX 12.
 
-There are two AI integration paths:
+The supported AI integration is the in-app AI Chat agent in `gui/ai/`. It supports Claude, OpenAI-compatible, and DeepSeek providers and calls native debugger tools. The Python MCP proxy and its IDE configurations have been removed from `NativeAgent`; the existing loopback HTTP IPC server is temporary compatibility code awaiting replacement or deletion.
 
-1. The in-app AI Chat agent in `gui/ai/` supports Claude, OpenAI-compatible, and DeepSeek providers and can call debugger tools.
-2. The Python MCP server in `mcp/` exposes AMem to external assistants through the GUI's local HTTP IPC server.
-
-Language: C++17 for the app, Python 3.10+ for MCP. Platform: Windows 10/11 x64.
+Language: C++17 for the app. Platform: Windows 10/11 x64. The optional protocol probe in `tools/protocol_reference/` uses Python's standard library but is not a build or runtime dependency.
 
 ## Build and Validation
 
@@ -40,17 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the current no-device C++ test. Its 22 groups cover address and scalar codecs, native `MemService` adapters, driver initialization receipts and card redaction, module/pointer/disassembly, native scan/symbol sessions and breakpoint receipts/hit batches, mutation-audit redaction/rotation/late delivery, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, and the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle. Provider, IPC, real transport, and device operations still lack complete automation. For protocol checks use `mcp/reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
-
-### MCP Server
-
-```bash
-cd mcp
-pip install -e .
-amem-mcp
-```
-
-The MCP process uses stdio for MCP and HTTP for its connection to the GUI. The GUI must be running, its IPC server must be listening, and the Android connection must already be available.
+`native_agent_mem_service` is the current no-device C++ test. Its 23 groups cover address and scalar codecs, native `MemService` adapters, driver initialization receipts and card redaction, module/pointer/disassembly, native scan/symbol sessions and breakpoint receipts/hit batches, mutation-audit redaction/rotation/late delivery, raw/typed write completion semantics, target/generation checks, `DeviceSession` locking/poisoning, approval invalidation, the `AgentTaskExecutor` queue/cancellation/shutdown lifecycle, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and catalog include boundary. Provider, IPC, real transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -78,19 +65,19 @@ Source that depends on an optional feature must remain correctly guarded.
 
 ## Unifying Command Pipeline
 
-The free functions declared in `socket/client_singleton.h` are the shared device-protocol surface. The three front ends all terminate there:
+The free functions declared in `socket/client_singleton.h` are the shared device-protocol surface. The current front ends all terminate there:
 
 ```text
 GUI windows --------------------+
-In-app AI ToolDefinitions ------+--> socket/client_singleton.h
-MCP -> IPC handlers ------------+      -> WinSocketClientMgr -> Android
+In-app AI ToolDefinitions ------+--> MemService -> socket/client_singleton.h
+Legacy HTTP IPC handlers -------+                  -> WinSocketClientMgr -> Android
 ```
 
 When adding a device capability:
 
 1. Implement the protocol command in the appropriate `socket/*Commands.cpp`.
 2. Declare it in `socket/client_singleton.h`.
-3. Surface it only where required: a GUI panel, `ToolDefinitions.cpp`, and/or an IPC method plus Python MCP wrapper.
+3. Surface it only where required: a GUI panel or `ToolDefinitions.cpp`. Do not expand the legacy HTTP IPC while its replacement decision is pending.
 4. Keep validation, error semantics, flags, and output limits aligned across all exposed front ends.
 
 Do not implement a second version of the wire protocol in AI or IPC code.
@@ -271,28 +258,20 @@ Current security/lifecycle constraints:
 
 Loopback binding is not authentication. Do not add new privileged IPC methods without addressing authentication/capability and browser access. Do not rely on browser Private Network Access behavior as the service security boundary.
 
-## MCP Server (`mcp/`)
+## Removed Python MCP Proxy
 
-The Python package is a FastMCP stdio proxy. It does not connect to Android directly:
+The FastMCP package, `.mcp.json`, install metadata, and IDE configurations have been removed. Do not restore a Python wrapper around the legacy HTTP IPC. The optional `tools/protocol_reference/amem_client.py` script talks directly to the Android wire protocol for manual diagnostics; it is not an Agent integration or a second protocol authority.
 
-```text
-External assistant -> FastMCP tool -> IpcClient -> GUI IPC -> socket command
-```
-
-Keep `mcp/amem_mcp/constants.py` synchronized with C++ scan flags, value types, and memory region enums.
-
-The exposed surfaces are intentionally overlapping, not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions with no hidden aliases; without it the count is 23. IPC has 29 methods and MCP has 30 tools. IPC `read_batch` is not wrapped by MCP; canonical in-app `disassemble`/`symbol_resolve`/`breakpoint_hits` have no same-name IPC method; Lua availability also differs by feature gate. Keep a machine-checkable capability matrix rather than claiming MCP exposes every C++ capability.
+The remaining surfaces are still not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions; without it the count is 23. Legacy HTTP IPC has 29 methods and does not use the in-app approval, target-context, result, or feature-gate contract. Keep a machine-checkable capability matrix while IPC is replaced or deleted.
 
 Address parsing currently differs:
 
 - In-app address fields, including raw/typed memory, scan ranges, disassembly, pointer offsets, and breakpoint addresses, require explicit `0x` strings. Retired aliases are not executable.
-- IPC/MCP interprets an unprefixed string as decimal; hexadecimal requires `0x`.
+- Legacy HTTP IPC interprets an unprefixed string as decimal; hexadecimal requires `0x`.
 
 Until the parsers are unified, require `0x` for every address string in schemas, prompts, examples, and tests.
 
-MCP retry lists must include only operations that are truly safe to repeat. A method that initializes or changes shared state is not automatically retry-safe merely because it does not modify target memory.
-
-Python HTTP timeout does not cancel the detached C++ handler. A retry can overlap the old request; do not add automatic retries without server request ids/cancellation and resource/idempotency analysis.
+An external HTTP client timeout does not cancel the detached C++ handler. Do not add automatic retries without server request ids/cancellation and resource/idempotency analysis; a method that initializes or changes shared state is not retry-safe merely because it does not modify target memory.
 
 ## Lua
 
@@ -314,7 +293,7 @@ The only in-app Lua name is `lua_execute`, registered only with `HAVE_LUAJIT`; r
 4. Validate `processRevision` for process-bound Agent operations.
 5. Send provider history through `getMessagesForRequest()`.
 6. Keep tool safety metadata and `DefaultSystemPrompt.h` synchronized.
-7. Require explicit `0x` address strings across Agent/MCP boundaries.
+7. Require explicit `0x` address strings across Agent and IPC boundaries.
 8. Bound network input, tool output, and persisted data before allocation.
 9. Redact secrets before tool audit/session persistence.
 10. Use reversible config loading: parse/validate, then commit.
@@ -323,7 +302,7 @@ The only in-app Lua name is `lua_execute`, registered only with `HAVE_LUAJIT`; r
 13. Require a valid provider stream terminal before committing success or executing tools.
 14. Treat socket timeout/partial I/O as connection poisoning, not something a one-shot drain proves recovered.
 15. Serialize connect/disconnect against active requests and bind state to a connection generation.
-16. Keep a generated capability matrix for in-app tools, IPC methods, MCP tools, and feature gates.
+16. Keep a generated capability matrix for in-app tools, temporary IPC methods, and feature gates.
 17. Reserve provider context for tool schemas and output; do not rely only on UTF-8 bytes/4.
 
 ## Branches

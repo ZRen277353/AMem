@@ -1,12 +1,12 @@
 # Agent 业务代码审计与问题清单
 
-审计日期：2026-07-12
+审计日期：2026-07-13
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-审计范围：`gui/ai/`、`ipc/IpcServer.*`、`mcp/amem_mcp/`、`socket/` 中被 Agent/IPC 调用的命令层、`gui/AppContext.*`、`main.cpp`。
+审计范围：`gui/ai/`、`ipc/IpcServer.*`、`socket/` 中被 Agent/IPC 调用的命令层、`gui/AppContext.*`、`main.cpp`。
 
 本文记录当前工作区中仍存在的问题，以及已经落地的修复摘要。目标架构和分阶段关闭方案见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。搜索/扫描协议自身的问题不在本文审计范围内。
 
-本次结论来自静态代码审阅和调用链核对，没有连接 Android 设备，也没有执行 provider、MCP 或退出阶段的端到端压力测试。优先级含义：
+本次结论来自静态代码审阅和调用链核对，没有连接 Android 设备，也没有执行 provider、IPC 或退出阶段的端到端压力测试。优先级含义：
 
 - **P0**：可能造成未授权调用、错误目标写入、协议串包、并发数据竞争、启动数据破坏或退出期悬空访问，应优先处理。
 - **P1**：明显影响可靠性、审计完整性、资源边界或敏感数据安全。
@@ -30,15 +30,15 @@
 | A-11 | P1 | 部分修复 | driver card 已脱敏；其他敏感工具参数、结果和脚本仍明文保存 |
 | A-12 | P2 | 未修复 | 全局 prompt/token 设置会被会话文件反向覆盖 |
 | A-13 | P2 | 已修复 | `symbol_*` 按当前二元安全模型统一分类、事务语义和默认 prompt |
-| A-14 | P2 | 未修复 | 内置 Agent 与 IPC/MCP 的地址字符串进制语义不同 |
+| A-14 | P2 | 未修复 | 内置 Agent 与 HTTP IPC 的地址字符串进制语义不同 |
 | A-15 | P2 | 未修复 | 设置草稿不完整，且无法从 UI 删除 provider key |
 | A-16 | P3 | 未修复 | `approvalDecision` 在快照中几乎不可观测 |
-| A-17 | P2 | 未修复 | 内置 Agent、IPC 与 MCP 的能力面和结果契约未统一 |
+| A-17 | P2 | 部分修复 | Python MCP 已删除；内置 Agent 与 HTTP IPC 的能力面和结果契约仍未统一 |
 | A-18 | P1 | 未修复 | 三类 provider 都会把缺少终止事件的截断 SSE 当成功 |
 | A-19 | P0 | 部分修复 | I/O 失败会 poison 并拒绝复用；仍缺 fake transport 迟到响应测试 |
 | A-20 | P0 | 部分修复 | 请求/lifecycle lease 已落地；仍缺真实 client 并发压力测试 |
 | A-21 | P2 | 未修复 | provider context 能力未参与 token 裁剪和输出预留 |
-| A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接和工具 worker；provider/IPC/MCP 等路径仍缺回归测试 |
+| A-22 | P2 | 部分修复 | 已覆盖 MemService、target、连接和工具 worker；provider/IPC 等路径仍缺回归测试 |
 
 ## 当前未解决问题
 
@@ -57,10 +57,10 @@
 
 **建议**
 
-1. MCP 不需要浏览器调用时，移除 CORS 和 `OPTIONS` 支持。
-2. 每次 GUI 启动生成高熵 bearer token，通过受控配置/环境传给 MCP 进程，并在所有请求上校验。
-3. 校验 `Origin`/`Host`，但不要把它们当作 token 的替代品。
-4. 对写内存、进程切换、断点和 Lua 增加 capability 或 GUI 审批策略。
+1. 先停止默认启动旧 HTTP IPC，并移除 CORS 和 `OPTIONS` 支持，缩短替换前的暴露窗口。
+2. 若确认需要外部自动化，按设计实现带当前用户 ACL、handshake、request id 和默认 Observe capability 的 Named Pipe，而不是恢复 Python MCP。
+3. 所有 target selection/mutation 与 Lua 请求进入 GUI approval broker，并绑定 target snapshot。
+4. 若没有明确外部调用方，删除整个 IPC source 和 CMake wiring。
 
 ### A-02：Agent 目标绑定已覆盖当前所有实际 send 边界（已修复）
 
@@ -131,11 +131,10 @@
 - `IpcServer::ServerThread()` 为每个客户端创建捕获 `this` 的 detached 线程。
 - `IpcServer::Stop()` 只关闭 listen socket 并 join accept 线程，不等待已接受请求。
 - `HandleClient()` 的多个响应路径只调用一次 `::send()`，没有循环发送剩余字节，也没有设置 `SO_SNDTIMEO`。
-- Python `IpcClient` 对部分读方法在 timeout/`URLError` 后默认重试 2 次，但客户端 timeout 不会取消旧 C++ handler。
 
 **影响**
 
-handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应用状态；静态析构期存在悬空访问窗口。大型 JSON 响应还可能被截断，MCP 端表现为无效 JSON；慢客户端可能长期占住 detached handler。一次 MCP timeout 最多还会留下旧 handler 并发起新 handler，放大端口排队和资源占用。
+handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应用状态；静态析构期存在悬空访问窗口。大型 JSON 响应还可能被截断，任意客户端都会看到无效 JSON；慢客户端可能长期占住 detached handler。调用方 timeout 不会取消旧 handler，若自行重试还会放大端口排队和资源占用。
 
 **建议**
 
@@ -169,7 +168,7 @@ handler 可在 `Stop()` 返回后继续访问 `handlers_`、socket 和共享应�
 - canonical `scan_start` 已合并 range+scan，结果/refine/clear 绑定 monotonic epoch；GUI start/refine/results/clear/remove 已迁入同一 `IMemService` session。旧 IPC 仍可能分步调用，但会推进 epoch 并使 native/GUI session 失效。
 - GUI symbol cache 已用 `loadSymbolTable` 在一个 transaction 内完成一次 init 与全表读取；旧 IPC 仍会分开调用 `SymbolInit` 和 `SymbolGetList`。canonical `symbol_list` 用 epoch 约束续页。
 - `AppContext::selectProcess()` 包含旧目标清理、open、`SetCurrentPid`、缓存失效等多步。
-- GUI、内置 Agent、IPC/MCP 共用进程、扫描结果和服务端 active symbol table。
+- GUI、内置 Agent、HTTP IPC 共用进程、扫描结果和服务端 active symbol table。
 
 **影响**
 
@@ -267,11 +266,11 @@ driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sess
 **证据**
 
 - 内置 Agent 的 raw/typed memory、scan ranges、disassembly、pointer offsets 和 breakpoint 地址均要求显式 `0x`；退役名称不可执行。
-- IPC `ParseAddress()` 和 MCP `helpers.parse_int()` 对 `"1234"` 按十进制解析，只有 `0x1234` 才是十六进制。
+- IPC `ParseAddress()` 对 `"1234"` 按十进制解析，只有 `0x1234` 才是十六进制。
 
 **影响**
 
-无前缀字符串在内置 Agent 中被拒绝，在 IPC/MCP 中却会被接受为十进制。调用方跨入口复用参数时会得到不同结果；若再自行按十六进制理解该文本，写内存和断点操作尤其危险。
+无前缀字符串在内置 Agent 中被拒绝，在 HTTP IPC 中却会被接受为十进制。调用方跨入口复用参数时会得到不同结果；若再自行按十六进制理解该文本，写内存和断点操作尤其危险。
 
 **建议**
 
@@ -299,22 +298,21 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 建议删除该瞬时字段，或定义明确的“最近一次决策”生命周期。
 
-### A-17：内置 Agent、IPC 与 MCP 的能力面和结果契约不统一
+### A-17：内置 Agent 与 HTTP IPC 的能力面和结果契约不统一
 
 当前静态提取结果：
 
 - 内置 Agent（LuaJIT）：24 个 canonical 名称，24 个可执行、24 个向 provider 广告、0 个 hidden alias；无 LuaJIT 时为 23/23/0。
 - IPC：29 个方法。
-- MCP：30 个工具，typed read/write 由 Python 映射到 IPC 的 `read_memory`/`write_memory`。
-- 内置 Agent 独有 canonical `disassemble`、`symbol_resolve` 等；IPC 独有 `read_batch`，但 MCP 未暴露。
-- 无 LuaJIT 时，内置 `lua_execute` 不注册；IPC 不注册该方法，而 MCP 仍可能对模型暴露工具。
-- IPC/MCP 之间仍存在 `get_server_version`/`get_version`、`read_breakpoint_info`/`read_bp_info` 等名称映射；这些不是内置 Agent alias。
+- Python MCP package、`.mcp.json`、安装元数据和 IDE 配置已经删除，不再形成第三套可调用面。
+- 内置 Agent 独有 canonical `disassemble`、`symbol_resolve` 等；IPC 独有 `read_batch`，并继续使用 legacy method 名称。
+- 无 LuaJIT 时，内置 `lua_execute` 不注册；IPC 也不注册对应方法，但 availability/error 契约不同。
 
-内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；MCP Python 层通常把 IPC `success=false` 转成异常。三条路径的错误字段、duration、分页、截断和 feature availability 仍不同。`mcp/README.md` 原先声称暴露“全部 C++ 能力”，与实际集合不符。
+内置 executor 返回 JSON 字符串，再由 `ToolExecutor` 解释顶层 `error`；IPC 返回 HTTP JSON。两条路径的名称、错误字段、duration、分页、截断、审批、target binding 和 feature availability 仍不同。
 
-`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。内置 legacy 工具已删除，但 IPC 与 MCP 尚未迁移，因此本问题仍未关闭。
+`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly/symbol resolution、canonical scan/breakpoint、raw/typed memory read/write 已统一经 `MemService` 返回结构化错误和 meta。scan/symbol 返回 epoch 和分页；driver/scan/breakpoint mutation 返回明确 completion。GUI scan 也使用相同 session contract：范围+start、count+page、count-confirmed remove 与 token-driven Stop 不再直接拼装 socket 命令。breakpoint hits 使用无 cursor 的最新批次，Agent 上限 100 并报告 `available/dropped`；module 匹配拒绝歧义，typed value 由 `ValueCodec` 统一范围、字节序和精度文本。`lua_execute` 具有 feature gate、host target 校验和 deadline 回执。Python MCP 和内置 legacy 工具均已删除，但 HTTP IPC 尚未迁移，因此本问题仍未关闭。
 
-建议建立机器可读 capability registry，由内置工具、IPC 和 MCP wrapper 生成或校验各自暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。
+建议建立机器可读 capability registry，校验内置工具与后续受限 transport 的暴露面；同时定义共享结果契约：`success`、`result`、`error`、`duration_ms`、`truncated`、`next_cursor`、`unavailable_reason`。不要为临时 HTTP IPC继续扩展第二套 schema。
 
 ### A-18：截断 SSE 被当作成功响应
 
@@ -402,7 +400,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - ToolExecutor 完整 schema、预算上限和 auto-approve/denial 组合。
 - IPC HTTP parser、partial send、auth 和 capability。
 - fake transport 上的 partial I/O、timeout、迟到响应和三端口重连。
-- C++/IPC/MCP capability 和常量对齐。
+- C++ Agent/IPC capability、结果和 feature gate 对齐。
 
 建议先建立不依赖 Android 设备的单元/契约测试，再保留少量真实设备 smoke test。否则当前文档中的安全不变量无法在后续重构中自动守住。
 
@@ -412,6 +410,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 | 项目 | 当前实现 |
 |------|----------|
+| Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
 | Agent breakpoint 直连 socket 且回执/本地 tracker 分离 | 五个规范工具经 `MemService` 绑定 target；mutation 区分未发送/拒绝/完成未知/确认完成，设备确认与 cleanup tracker 在同一 transaction 更新，hits 使用有界最新批次且不伪造 cursor |
 | Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |

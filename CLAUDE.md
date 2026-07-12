@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AMem is a Windows desktop application for remote Android memory debugging, similar to Cheat Engine. It connects to an Android device over Socket and provides memory scanning, hardware breakpoint debugging, a hex memory viewer, value freezing, ELF symbol resolution, and Lua scripting. The UI is built with Dear ImGui (docking branch) rendered via DirectX 12.
 
-On top of the GUI it ships two AI integration paths: an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that can drive the debugger via tool calls, and an **MCP server** (`mcp/`) that exposes the same capabilities to external AI assistants (Claude Code / Desktop, Codex, Cursor, etc.).
+On top of the GUI it ships an **in-app AI chat agent** (multi-provider: Claude / OpenAI / DeepSeek) that drives the debugger through native tool calls. The Python MCP proxy has been removed; the loopback HTTP IPC server remains only as temporary compatibility code awaiting replacement or deletion.
 
-The `NativeAgent` branch is migrating these paths to one native `MemService`, removing Python MCP, and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents continue to describe the current code until each phase lands.
+The `NativeAgent` branch is migrating all front ends to one native `MemService` and replacing or deleting HTTP IPC. Treat `docs/native_agent_refactor_plan.md` as the target design; the existing architecture documents describe the current code after each landed phase.
 
-Language: C++17 (app) + Python 3.10+ (MCP server). Platform: Windows 10/11 x64 only.
+Language: C++17. Platform: Windows 10/11 x64 only. `tools/protocol_reference/amem_client.py` is an optional standard-library diagnostic probe, not a build/runtime dependency.
 
 ## Build Commands
 
@@ -30,15 +30,7 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 22 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, and `AgentTaskExecutor` queue/cancellation/shutdown behavior. Provider, IPC, real transport, and device paths still need coverage. For end-to-end protocol checks, use the MCP reference client (`mcp/reference/amem_client.py`) or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
-
-### MCP server (Python)
-
-```bash
-cd mcp
-pip install -e .        # registers the `amem-mcp` command
-amem-mcp                # starts the stdio MCP server (talks to the GUI's IPC server)
-```
+`native_agent_mem_service` contains 23 no-device C++ groups for address/scalar codecs, native `MemService` adapters, driver receipts/card redaction, module/pointer/disassembly, native scan/symbol sessions, breakpoint receipts/rich hit batches, independent mutation-audit persistence/rotation, raw/typed write completion semantics, target/generation checks, `DeviceSession` lifecycle, `AgentTaskExecutor` queue/cancellation/shutdown behavior, and retired-tool history downgrade. `native_agent_catalog` verifies the 24 canonical names and include boundary. Provider, IPC, real transport, and device paths still need coverage. For manual wire-protocol checks, use `tools/protocol_reference/amem_client.py` or dump the live Lua API surface with `scripts/dump_api.lua` (see `scripts/README.md`).
 
 ## Dependencies
 
@@ -57,19 +49,19 @@ Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE
 
 ### The command pipeline — the unifying idea
 
-The free functions declared in `socket/client_singleton.h` (`ReadProcessMemoryBytes`, `WriteProcessMemoryBytes`, `ScanValueWithProgress`, `ScanNextValueWithProgress`, `SetKernelBreakpoint`, `ResolveModuleOffsetChain`, `SymbolFind`, …) are the **single source of truth** for the Android device protocol. Everything else is a front-end onto them. There are **three** callers:
+The free functions declared in `socket/client_singleton.h` (`ReadProcessMemoryBytes`, `WriteProcessMemoryBytes`, `ScanValueWithProgress`, `ScanNextValueWithProgress`, `SetKernelBreakpoint`, `ResolveModuleOffsetChain`, `SymbolFind`, …) are the **single source of truth** for the Android device protocol. Everything else is a front-end onto them. Current callers are:
 
 1. **GUI windows** (`gui/`) call them directly in response to user actions.
 2. **In-app AI agent** (`gui/ai/ToolDefinitions.cpp`) wraps them as tool executors registered with `ToolExecutor`.
-3. **External AI assistants** call the MCP server (`mcp/`, Python), which forwards HTTP JSON to the in-process **IPC server** (`ipc/IpcServer.cpp`), whose handlers call the same functions.
+3. The temporary **HTTP IPC server** (`ipc/IpcServer.cpp`) exposes legacy JSON handlers that call the same functions without in-app Agent approval.
 
 ```
-GUI windows ─┐
-in-app AI  ──┼──▶ socket/client_singleton.h  ──▶ WinSocketClientMgr (3 ports) ──▶ Android device
-MCP ▶ IPC ───┘        (the protocol layer)
+GUI windows ─────┐
+in-app AI  ──────┼──▶ MemService / socket command layer ──▶ WinSocketClientMgr ──▶ Android
+legacy HTTP IPC ─┘
 ```
 
-**Practical consequence:** adding a new device capability usually means (a) add the socket command in `socket/*Commands.cpp` + declare it in `client_singleton.h`, then (b) surface it in whichever front-ends need it — a GUI panel, an AI tool in `ToolDefinitions.cpp`, and/or an IPC handler in `IpcServer::RegisterBuiltinMethods()` (which the MCP server then wraps in `mcp/amem_mcp/tools/`).
+**Practical consequence:** adding a new device capability usually means (a) add the socket command in `socket/*Commands.cpp` + declare it in `client_singleton.h`, then (b) expose it through `MemService` to the GUI and/or canonical AI catalog. Do not expand the legacy HTTP IPC while its replacement decision is pending.
 
 ### Entry point & rendering
 
@@ -134,13 +126,11 @@ A minimal hand-rolled HTTP server (`IpcServer` singleton) bound to **127.0.0.1:2
 
 Loopback is not authentication. The current server has no token, allows `Access-Control-Allow-Origin: *`, accepts browser preflight, bypasses the in-app write approval path, detaches each client handler, and sends each response with one `send()` call. Do not add privileged methods without addressing authentication/capabilities, browser access, handler drainage, and partial sends.
 
-### MCP server (`mcp/`)
+### Removed Python MCP proxy
 
-A standalone Python package (`amem_mcp`, FastMCP-based) that proxies MCP tool calls over stdio to the IPC server via HTTP. It does **not** talk to the Android device directly — every tool delegates to the GUI's IPC server (so the GUI must be running and connected). Layout: `tools/` split by domain (status/process/memory/scan/breakpoint_/lua/symbols), `ipc_client.py` (HTTP client), `constants.py` (scan-flag/data-type/memory-type tables that mirror the C++ enums), `configs/` (ready-to-use snippets per IDE). See `mcp/README.md` for the full tool list and IDE setup. This repo's own `.mcp.json` wires the server for Claude Code via `python -m amem_mcp`.
+The FastMCP package, `.mcp.json`, packaging metadata, and IDE configurations have been deleted from `NativeAgent`. Do not restore a Python wrapper around the legacy HTTP IPC. `tools/protocol_reference/amem_client.py` is a manual Android wire-protocol probe only and is not an Agent integration.
 
-The MCP path does not pass through `AgentRunner` approval. All in-app address fields now require explicit `0x` strings and retired aliases are not executable, while IPC/MCP still treats unprefixed strings as decimal. Require explicit `0x` strings until every parser is unified.
-
-The surfaces overlap but are not identical: with LuaJIT the in-app registry has 24 executable and advertised canonical definitions with no hidden aliases; without it the count is 23. IPC has 29 methods, and MCP has 30 tools. Keep a generated capability/feature-gate matrix. Python timeout also does not cancel the detached C++ handler, so automatic retry may overlap the old request.
+The remaining HTTP IPC path does not pass through `AgentRunner` approval. All in-app address fields require explicit `0x` strings, while IPC still treats unprefixed strings as decimal. With LuaJIT the in-app registry has 24 canonical definitions; without it the count is 23. IPC has 29 legacy methods with different target, result, and feature-gate semantics. Keep a generated capability matrix until IPC is replaced or deleted. An HTTP client timeout does not cancel the detached C++ handler, so automatic retry can overlap an old request.
 
 ### Lua scripting (`lua/`, gated by `HAVE_LUAJIT`)
 
@@ -163,10 +153,10 @@ The surfaces overlap but are not identical: with LuaJIT the in-app registry has 
 - **Connection lifecycle**: commands hold a shared `DeviceSession` request lease; connect/disconnect/reconnect hold an exclusive lifecycle lease. Do not bypass this gate with direct client `Connect()`/`Close()` calls.
 - **UI thread isolation for AI**: background provider/HTTP threads communicate with ImGui exclusively through `UIMessageQueue`. ImGui calls happen only on the main thread.
 - **Process target consistency**: process-bound Agent operations carry an explicit generation/PID/handle/revision snapshot and must validate it at their actual service/send boundary; runId is not a target identifier.
-- **Address format**: use `0x` for address strings across AI, IPC, MCP, docs, and tests.
+- **Address format**: use `0x` for address strings across AI, IPC, docs, and tests.
 - **Resource bounds**: validate untrusted sizes before allocation and cap raw HTTP/SSE data, tool outputs, and persisted session input, not just tool arguments.
 - **Sensitive data**: DPAPI protects provider API keys only. Redact secrets before putting tool arguments/results into session history.
-- **Scan flags are bitmasks** (defined in `MemoryTypes.h`): exactly one data-type bit (`BYTE_`/`WORD_`/`DWORD_`/`QWORD_`/`FLOAT_`/`DOUBLE_`/`XOR_`) OR-ed with one scan-mode bit (`_ACCURATE_VAL`, `_LARGER_THAN_VAL`, `_LESS_THAN_VAL`, `_BETWEEN_VAL`, `_UNKNOW_VAL`, `_ADD_UNKNOW_VAL`, `_SUB_UNKNOW_VAL`, `_CHANGED_VAL`, `_UNCHANGED_VAL`, …). The IPC and AI layers validate that combinations are well-formed; keep `mcp/amem_mcp/constants.py` in sync with the C++ enums when adding values.
+- **Scan flags are bitmasks** (defined in `MemoryTypes.h`): exactly one data-type bit (`BYTE_`/`WORD_`/`DWORD_`/`QWORD_`/`FLOAT_`/`DOUBLE_`/`XOR_`) OR-ed with one scan-mode bit (`_ACCURATE_VAL`, `_LARGER_THAN_VAL`, `_LESS_THAN_VAL`, `_BETWEEN_VAL`, `_UNKNOW_VAL`, `_ADD_UNKNOW_VAL`, `_SUB_UNKNOW_VAL`, `_CHANGED_VAL`, `_UNCHANGED_VAL`, …). The native Agent and temporary IPC validate combinations independently; new work belongs in the shared service contract rather than another constants mirror.
 - **Conditional compilation**: `HAVE_AI_CHAT` / `HAVE_CAPSTONE` / `HAVE_KEYSTONE` / `HAVE_LUAJIT` gate optional features; all source that touches them is `#ifdef`-guarded so the app builds with any subset present.
 - **ImGui docking**: uses the docking branch; windows use `ImGuiWindowFlags_NoDocking` selectively.
 

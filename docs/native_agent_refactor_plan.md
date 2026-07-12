@@ -1,16 +1,16 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker 与退役 alias 清理已落地
+状态：实施中，24 个 canonical Agent 名称、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理与 Python MCP 删除已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
-最后更新：2026-07-12
+最后更新：2026-07-13
 
-本文给出从当前 AI Chat + HTTP IPC + Python MCP 结构迁移到“内置原生内存工具 Agent”的实施方案。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成十九个纵向切片：
+截至 2026-07-13 已完成二十个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -33,9 +33,10 @@
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
+- Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
 - `NativeAgentMemTests` 的 23 个测试组覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到 callback 前持久化、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和退役工具历史降级；独立 catalog CTest 精确校验 canonical 名称与依赖边界。
 
-尚未完成：IPC scan/symbol/breakpoint 调用迁移、MCP/IPC 删除，以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC 默认启动与 transport 收敛、IPC scan/symbol/breakpoint 调用迁移，以及连接层 fake transport 的 timeout/迟到字节集成测试。规范模型目录、退役历史兼容、Python MCP 删除、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -53,7 +54,7 @@ GUI windows ---------------------------+--> MemService
 核心决定如下：
 
 1. `MemService` 成为进程、模块、内存、扫描、断点和符号能力的唯一业务入口；Agent、GUI 和可选 IPC 不再直接调用 `client_singleton.h`。
-2. Python MCP 包最终删除，不把其 wrapper、常量表或重试逻辑复制到 C++。
+2. Python MCP 包已删除，其 wrapper、常量表和重试逻辑不复制到 C++。
 3. Agent 只暴露一组稳定的规范工具名；兼容别名先隐藏、再迁移、最后删除。
 4. 工具调用绑定 `{pid, processHandle, processRevision, connectionGeneration}`，审批后目标发生变化时必须拒绝执行。
 5. detached 工具线程改成一个受管、可 join 的任务队列。取消具有明确状态，不再把“UI 不接收晚到结果”描述为操作已停止。
@@ -408,11 +409,11 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 最终删除或移动：
 
-- 删除 `.mcp.json`。
-- 删除 `mcp/amem_mcp/`、`mcp/configs/`、`mcp/server.py`、`mcp/pyproject.toml`、`mcp/requirements.txt`、`mcp/README.md` 和 `mcp/.gitignore`。
-- `mcp/reference/` 不参与 Python MCP。若仍用于协议排障，移动到 `tools/protocol_reference/` 并改写说明；若没有维护者和测试用途，再单独删除。
-- 新 IPC 上线后删除 `ipc/IpcServer.*`；若不保留外部自动化，则整个 `ipc/` 可删除。
-- 删除 README、IDE 配置和脚本中对端口 28100、FastMCP、`python -m amem_mcp` 的引用。
+- [x] 删除 `.mcp.json`。
+- [x] 删除 `mcp/amem_mcp/`、`mcp/configs/`、`mcp/server.py`、`mcp/pyproject.toml`、`mcp/requirements.txt`、`mcp/README.md` 和 `mcp/.gitignore`。
+- [x] 将仍用于协议排障的标准库探针移动到 `tools/protocol_reference/`，并明确它不参与产品运行。
+- [ ] 新 IPC 上线后删除 `ipc/IpcServer.*`；若不保留外部自动化，则整个 `ipc/` 可删除。
+- [x] 删除 README、IDE 配置和脚本中对 FastMCP、`python -m amem_mcp` 和 MCP 安装的引用；端口 28100 的风险说明保留到旧 IPC 删除。
 
 ## 10. 分阶段迁移
 
@@ -469,7 +470,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
 
-### Phase 5：删除 Python MCP
+### Phase 5：删除 Python MCP（已完成）
 
 变更：
 
@@ -477,7 +478,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - 将仍有价值的协议参考工具移出 `mcp/`。
 - 更新项目总览、构建依赖和开发说明。
 
-退出条件：构建、运行、测试和文档不要求 Python/FastMCP；`rg` 不再找到过期启动命令或 MCP 配置。
+退出条件：构建、运行、测试和产品文档不要求 Python/FastMCP；`rg` 不再找到过期启动命令或 MCP 配置。`tools/protocol_reference/` 的可选标准库脚本不构成产品依赖。
 
 ### Phase 6：删除兼容别名（已完成）
 
@@ -487,7 +488,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - 对无法迁移的旧 tool call/result 作为历史文本保留，不重新执行。
 - 删除 hidden aliases 和旧 JSON adapter。
 
-退出条件：模型只看到并只能新调用第 5 节的规范集合；内置 catalog 由 `ToolDefinitions.cpp` 单一来源和 `native_agent_catalog` CTest 校验。跨 IPC/MCP 的完整能力矩阵仍随 Phase 4/5 收敛。
+退出条件：模型只看到并只能新调用第 5 节的规范集合；内置 catalog 由 `ToolDefinitions.cpp` 单一来源和 `native_agent_catalog` CTest 校验。内置 Agent 与后续受限 transport 的完整能力矩阵随 Phase 4 收敛。
 
 ### Phase 7：完成 Agent 基础设施加固
 
@@ -602,4 +603,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第十九批完成退役工具收敛。`ChatSession::getMessagesForRequest()` 识别 33 个退役名称：只要同一 assistant tool-call 组包含退役调用，就把整组转换为普通 assistant 文本，保留脱敏参数和已记录结果，不再发送 provider tool protocol，也不能重新执行。随后从 `ToolDefinitions.cpp` 删除全部 hidden alias、direct-socket executor、旧 schema/参数解析和 `client_singleton.h`/`AppContext.h` 依赖；`AgentMemTools` 同步删除 legacy mode，只接受 canonical 字段与显式 `0x` 地址。LuaJIT 目录收敛为 24/24/0，无 LuaJIT 为 23/23/0。新增 `native_agent_catalog` CTest 固定名称和 include 边界，原生测试增至 23 组。
 
-十九个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试和 catalog 契约测试。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容与 GUI breakpoint/symbol/scan 迁移已完成。下一批应推进 IPC/MCP 收敛。
+第二十批删除 Python MCP 产品运行时。移除 FastMCP package、stdio 入口、pip metadata、`.mcp.json` 和六套 IDE 配置，不再维护第三套 schema、常量、retry 与 feature availability。独立的标准库 Android 协议探针迁至 `tools/protocol_reference/`，说明明确 C++ socket command 才是事实来源，脚本不具备 Agent 审批、target revision 或产品级安全边界。
+
+二十个切片均已通过 Debug/Release 应用构建、23 组无设备 service 测试和 catalog 契约测试。模型可见规范目录、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除与 GUI breakpoint/symbol/scan 迁移已完成。下一批应关闭 HTTP IPC 默认启动，并决定删除 IPC 或实现受限 Named Pipe。

@@ -301,7 +301,7 @@ canonical breakpoint mutation 在同一个 MAIN transaction 内接收设备确�
 - `SymbolInit` -> `SymbolGetList`
 - `AppContext::selectProcess()` 的多步清理/open/set PID
 
-另一个 GUI/Agent/MCP caller 可在两条命令之间插入。
+另一个 GUI/Agent/HTTP IPC caller 可在两条命令之间插入。
 
 ### 5.5 工具结果
 
@@ -440,14 +440,12 @@ read -> parse temporary -> validate all fields -> commit memory
                                +-- failure: preserve original and report
 ```
 
-## 9. 外部 MCP/IPC 路径
+## 9. 临时 HTTP IPC 路径
 
-外部调用不进入内置 Agent 循环：
+HTTP IPC 调用不进入内置 Agent 循环：
 
 ```text
-MCP client
-  -> Python FastMCP tool
-  -> IpcClient.call()
+local HTTP client
   -> HTTP POST 127.0.0.1:28100
   -> IpcServer::DispatchRequest()
   -> registered C++ handler
@@ -456,17 +454,17 @@ MCP client
 
 ### 9.1 与内置 Agent 的差异
 
-| 维度 | 内置 Agent | MCP/IPC |
+| 维度 | 内置 Agent | HTTP IPC |
 |------|------------|---------|
 | 写审批 | `AgentRunner` + UI | AMem 内无统一审批 |
-| 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
+| 错误 | `ToolResult` JSON audit | `success/error` HTTP JSON |
 | 地址字符串 `"1234"` | 所有地址字段拒绝；退役工具不可执行 | decimal |
-| 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | LuaJIT: 24 广告 / 24 可执行 / 0 隐藏；无 LuaJIT: 23/23/0 | 独立 MCP tool 集合 |
+| 生命周期 | runId + cancellation + connection/target snapshot | detached IPC handler，无 request cancellation |
+| 工具集合 | LuaJIT: 24 广告 / 24 可执行 / 0 隐藏；无 LuaJIT: 23/23/0 | 29 个 legacy method |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
-静态提取显示 IPC 有 29 个方法、MCP 有 30 个工具。MCP typed read/write 是 wrapper；IPC 的 `read_batch` 没有 MCP 工具，内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 也没有同名 IPC 方法。无 LuaJIT 时内置 Agent 不注册任何 Lua 工具，IPC 不注册该方法，而 MCP 仍可能展示工具。不要再用“暴露全部 C++ 能力”描述 MCP。
+Python MCP package、配置和安装入口已经删除。静态提取显示 HTTP IPC 仍有 29 个方法；内置 Agent 的 `disassemble`/`symbol_resolve`/`breakpoint_hits` 没有同名 IPC 方法，typed read/write、分页、错误和 feature availability 也不一致。不要把 HTTP IPC 描述为受支持的外部 Agent 面。
 
 ### 9.2 IPC 安全
 
@@ -481,9 +479,9 @@ IPC 监听 loopback，但当前：
 
 ### 9.3 IPC 响应
 
-请求解析已有 1 MiB 上限。响应当前构造完整 JSON 后只调用一次 `send()`；Winsock 允许 short write。MCP 偶发收到截断 JSON 时，应检查服务端发送循环，而不只在 Python 端重试。
+请求解析已有 1 MiB 上限。响应当前构造完整 JSON 后只调用一次 `send()`；Winsock 允许 short write。客户端收到截断 JSON 时，应检查服务端发送循环，不能用盲目重试掩盖。
 
-`IpcClient` 对部分读方法默认重试两次。Python timeout 不会取消旧 C++ handler，因此重试可能同时留下三条请求。没有 server request id/cancellation 前，自动重试必须同时评估资源放大和共享 symbol/target 状态，而不只看“是否写目标内存”。
+client timeout 不会取消旧 C++ handler。没有 server request id/cancellation 前，自动重试可能放大资源占用并重叠修改共享 symbol/target 状态，因此当前文档不提供 retry-safe 方法清单。
 
 ## 10. 扩展时的检查步骤
 
@@ -496,7 +494,7 @@ IPC 监听 loopback，但当前：
 5. 设计输出上限/分页，避免把完整大列表塞给模型。
 6. 选择 `ToolSafety`，并同步 `DefaultSystemPrompt.h`。
 7. 在 `ToolDefinitions.cpp` 注册。
-8. 如需 MCP，同步 IPC、Python wrapper、constants 和错误契约。
+8. 不向旧 HTTP IPC 增加方法；外部自动化必须等待受限 transport 决策并复用 `MemService`。
 9. 若包含多个设备命令，增加事务锁/revision 或服务端复合命令。
 10. 测试 Stop、目标切换、超时和退出。
 11. 更新 capability matrix，验证 feature gate 下工具可见性一致。
@@ -521,10 +519,10 @@ IPC 监听 loopback，但当前：
 4. 敏感字段在序列化前 redaction。
 5. 使用经过 Windows 目标已存在场景验证的原子替换。
 
-### 10.4 修改 IPC/MCP
+### 10.4 替换或删除 IPC
 
 1. 先确认鉴权/capability。
-2. 保持 C++ 与 Python 参数、错误和上限一致。
+2. transport adapter 只映射 `MemService` 参数、错误和上限，不复制业务逻辑。
 3. 使用 `sendAll()` 和响应上限。
 4. handler 必须可停止和 join。
 5. 明确重试是否安全；有共享状态副作用的方法不应自动重试。
@@ -545,8 +543,8 @@ IPC 监听 loopback，但当前：
 | 切会话后 prompt 变了 | 会话文件中的 `systemPrompt`/`tokenLimit` |
 | API key 配置消失 | `ai_config.json` 是否损坏后被启动流程覆盖 |
 | 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
-| MCP 返回无效 JSON | IPC 单次 `send()` 是否 short write、响应是否过大 |
-| MCP 与内置地址不同 | 无前缀字符串的 hex/decimal 差异，统一改成 `0x...` |
+| IPC client 返回无效 JSON | IPC 单次 `send()` 是否 short write、响应是否过大 |
+| IPC 与内置地址不同 | 无前缀字符串的 reject/decimal 差异，统一改成 `0x...` |
 | 退出偶发崩溃 | HTTP callback 和 IPC handler 两类 detached task；工具 worker 应已 join |
 
 ## 12. 建议的自动测试起点
@@ -557,7 +555,7 @@ IPC 监听 loopback，但当前：
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 自动提取并比较内置/IPC/MCP capability、常量和 feature gate。
+5. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 
 ## 13. 一页调用链
 
