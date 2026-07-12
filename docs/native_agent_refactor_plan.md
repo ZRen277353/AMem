@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，原生 module/pointer/raw/typed memory、连接生命周期、run target 与受管工具 worker 已落地
+状态：实施中，原生 module/pointer/scan/raw/typed memory、连接生命周期、run target 与受管工具 worker 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -10,23 +10,24 @@
 
 ## 0. 当前进度
 
-截至 2026-07-12 已完成七个纵向切片：
+截至 2026-07-12 已完成八个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
 - `AppContext` 可生成一致目标快照，进程切换遵循 connection -> process -> port 锁顺序。
-- `status`、`process_list`、`process_open`、module/pointer resolution、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
+- `status`、`process_list`、`process_open`、module/pointer resolution、canonical scan session、raw/typed memory read/write 已通过薄 Agent adapter 调用 `MemService`。
 - raw write 保留 request-started/response-received/written-byte 状态，区分发送前取消、`completion_unknown`、部分写和 deadline/cancel 后确认完成。
 - `ValueCodec` 统一 byte/word/dword/qword/xor/float/double 的别名、范围、little-endian 编解码和精确文本；typed write 复用 raw write 回执。
 - module list 统一分页和大小上限；module resolve 按完整名、basename、唯一子串依次匹配并拒绝歧义。协议入口限制单名 4096 bytes 和累计 16 MiB。
 - 每端口新增可重入 transaction gate；普通 socket 命令短暂持有，pointer chain 跨 module list 和全部 8-byte read 持有。`pointer_resolve` 固定 generation/target，逐跳检查取消、deadline 和 uint64 overflow，释放事务后再复核完整 snapshot。
+- scan mutation 统一推进单调 epoch；`scan_start` 在一个事务内执行 range+scan，refine/results/clear 要求最新 epoch，results 绑定 count+page，clear 用 count=0 确认。长扫描通过 DEBUG stop 响应 cancellation，sent-without-terminal 保留 `completion_unknown`。
 - `AgentRunContext` 在首轮模型请求前捕获 connection/target，审批、出队和结果回收均按 `None`/`Bound`/`Selection` 策略复核；`process_open` 成功后显式推进 run target。
 - 审批框展示预期 connection generation、PID 和 process revision；晚到的旧目标成功结果不会回喂模型。
 - `AgentTaskExecutor` 用单个 joinable worker 串行工具队列；`ToolExecutor` 同步执行，不再创建 inner detached future。shutdown 会停止接收、取消 active/queued task 并 join。
-- 旧名称仍可执行但不再向 provider 广告。当前注册表有 44 个可执行名称，其中 14 个隐藏 alias，模型收到 30 个定义。
-- `NativeAgentMemTests` 的 16 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
+- 旧名称仍可执行但不再向 provider 广告。当前注册表有 48 个可执行名称，其中 22 个隐藏 alias，模型收到 26 个定义。
+- `NativeAgentMemTests` 的 17 个测试组覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan session/epoch/分页/取消/完成未知、generation、目标变化、raw/typed write 完成语义、连接 lease/poison、审批失效、同批 target 推进、排队取消/timeout、active cancel、shutdown join、晚到结果拒绝和隐藏 alias。
 
-尚未完成：scan/symbol/breakpoint/Lua 等规范工具的 service 迁移、Stop 后已发送操作的可见审计、GUI 迁移和 MCP/IPC 删除。未迁移工具目前只有 Controller 的出队/结果保护，尚未在实际 send 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
+尚未完成：symbol/breakpoint/Lua 等规范工具的 service 迁移、Stop 后已发送操作的独立可见审计、GUI/IPC scan 调用迁移、MCP/IPC 删除。隐藏 legacy 工具目前仍可能只有 Controller 的出队/结果保护，尚未全部在实际 send 边界消费 `OperationContext`；连接层也仍缺 fake transport 的 timeout/迟到字节集成测试。因此 A-02、A-07、A-19、A-20 仍只能视为部分修复；A-03 已由 joinable worker 和 shutdown 测试关闭。
 
 ## 1. 结论
 
@@ -567,4 +568,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第七批加入 per-port `SocketCommand::TransactionLease` 和 `MemService::resolvePointer`，注册 `pointer_resolve` 并隐藏 `resolve_offset_chain`。规范 offset 要求 `0x`，module 匹配拒绝歧义，module list 和全部 pointer read 处于同一事务；旧 GUI/Lua/IPC helper 也使用该 gate，避免跨前端插入。
 
-七个切片均已通过 Debug/Release 应用构建和无设备 CTest。下一批应先设计并迁移 `scan_start`/`scan_refine`/`scan_results`：一次请求携带完整 range/type/mode/value，并用显式 scan session/epoch 约束后续 refine/results；随后再处理 symbol、breakpoint 复合操作和 Stop 后已发送写入的独立审计。
+第八批加入 `MemService` scan domain/session 和全局 scan epoch，注册 `scan_start`/`scan_refine`/`scan_results`/`scan_clear`，并隐藏八个旧名称。规范 start 一次携带 range/type/mode/value 或 byte pattern；refine/results/clear 显式携带 epoch，任何旧前端 mutation 都使旧 session 失效。扫描取消会请求 DEBUG stop，终态和完成未知不会混淆。
+
+八个切片均已通过 Debug/Release 应用构建和无设备 CTest。下一批应迁移 `symbol_resolve`/`symbol_list`：把 module resolve + `SymbolInit` + list/find 放入同一事务，删除模型可见的 active symbol-table 前置状态，并定义 module-bound symbol epoch；随后处理 breakpoint target mutation 和 Stop 后已发送操作的独立审计。

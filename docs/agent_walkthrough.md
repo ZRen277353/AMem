@@ -18,7 +18,7 @@
 - `ProviderRegistry::initBuiltinProviders()`
 - `ToolExecutor::initBuiltinTools()`
 
-当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 44 个可执行名称，其中 14 个为隐藏兼容 alias，provider 实际收到 30 个定义。
+当前 provider 为 Claude、OpenAI-compatible、DeepSeek。工具注册表包含 48 个可执行名称，其中 22 个为隐藏兼容 alias，provider 实际收到 26 个定义。
 
 ### 1.2 加载 provider 配置
 
@@ -100,7 +100,7 @@ endpoint 校验目前只要求 `https://`。它不会验证域名归属。特别
 
 `CompletionRequest` 仍只带 run id，不直接序列化 PID/handle/revision；同一 `AgentController` 的 `AgentRunContext` 在首轮请求前捕获 connection generation 和 target snapshot。后续审批、工具出队和结果回收都使用该 context，run id 只负责异步消息隔离。
 
-provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 30 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
+provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请求构造。会话 token limit 只按消息字节数/4裁剪，也没有计入当前 26 个广告工具 schema 和输出预留，所以 UI 显示“未超限”不代表实际 provider context 一定可接受。
 
 ## 3. HTTP 和 SSE 后台路径
 
@@ -230,7 +230,7 @@ ChatWindow::processToolCalls()
 - `Bound`：要求 PID、handle、revision 和 generation 全部不变。
 - `Selection`：审批与 send 前绑定旧 selection，成功后验证并推进新 target。
 
-十个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
+十四个已迁移工具会把 run 的 `OperationContext` 直接传入 `MemService`。例如 `process_open` 的安全路径是：
 
 ```text
 模型请求切到进程 B
@@ -242,7 +242,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-module/pointer resolution 和 raw/typed memory read/write 都已在 service 边界消费 context。`module_resolve` 只接受确定的完整名、basename 或唯一子串；`pointer_resolve` 还会在一个 read transaction 中完成 module list 和全部 pointer read。旧 `resolve_offset_chain` 仅作为 hidden alias，保留原字段、整数 offset 和空链行为。scan、breakpoint、symbol 和 Lua 仍只有 Controller 出队和结果回收保护。
+module/pointer resolution、四个 canonical scan 工具和 raw/typed memory read/write 都已在 service 边界消费 context。`pointer_resolve` 在一个 read transaction 中完成 module list 和全部 pointer read。`scan_start` 一次提交 range/type/mode/value；返回的 `scan_epoch` 是 refine/results/clear 的必需参数，任何 GUI/IPC/旧 alias scan mutation 都会使旧 epoch 失效。旧 scan 名称仍可执行但不再广告，其自身仍保留 legacy 参数和较弱回执。breakpoint、symbol 和 Lua 仍只有 Controller 出队和结果回收保护。
 
 ### 5.3 受管工具队列
 
@@ -283,6 +283,8 @@ acquire shared DeviceSession request lease
 connect/disconnect/reconnect 持有 exclusive lifecycle lease；I/O 错误、EOF 或 partial failure 会 poison session、推进 generation 并拒绝新请求，已删除用待处理字节尝试恢复协议同步的旧路径。
 
 普通命令只短暂持有 transaction gate。`pointer_resolve`/旧 `ResolveModuleOffsetChain()` 会把同一个 gate 保持到模块查询和全部 pointer read 结束，因此其他 caller 不能插入；规范 service 在 gate 外做完整 target snapshot 校验，在 gate 内只做稳定 revision 和无 target-lock 的 generation/cancel 检查。
+
+canonical scan 另持有 scan domain mutex 和 MAIN transaction gate：start 覆盖 set-range+scan，results 覆盖 count+page，clear 用后续 count=0 确认。长扫描的 progress callback 观察 cancellation token，并经 DEBUG 端口请求 stop；若主命令仍返回 terminal count，结果标为 `completed_after_cancel_request`，否则 sent request 保留 `completion_unknown`。
 
 以下序列仍不是事务：
 
@@ -445,7 +447,7 @@ MCP client
 | 错误 | `ToolResult` JSON audit | IPC `success/error`，Python 常转异常 |
 | 地址字符串 `"1234"` | 规范 raw/typed memory 地址和 pointer offsets 拒绝；未迁移/隐藏旧工具仍按 hex | decimal |
 | 生命周期 | runId + cancellation + connection/target snapshot | Python HTTP timeout + detached IPC handler |
-| 工具集合 | 30 个广告定义 / 44 个可执行名称 | 独立 MCP tool 集合 |
+| 工具集合 | 26 个广告定义 / 48 个可执行名称 | 独立 MCP tool 集合 |
 
 跨前端测试必须使用同一组语义样例，特别是地址、扫描 flags、错误和分页。
 
@@ -534,7 +536,7 @@ IPC 监听 loopback，但当前：
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 16 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 17 个测试组已覆盖地址/scalar codec、进程与模块分页/解析、事务化 pointer resolution、scan session/epoch/分页/取消/完成未知、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline 和 shutdown join。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
