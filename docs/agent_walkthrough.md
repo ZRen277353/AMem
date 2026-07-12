@@ -448,7 +448,7 @@ read -> parse temporary -> validate all fields -> commit memory
 
 decoder 先用完整 header 验证版本/type/flags/id/长度，再等待或复制 payload。request 最大 1 MiB，其他帧最大 4 MiB；更大的调用方 limit 不能抬高硬上限。payload 只接受合法 UTF-8。header 或 payload 不完整时返回 `NeedMoreData`、`consumed=0`；连续帧只消费第一帧。
 
-`IpcFramedConnection::readFrame()` 先精确读取 header，调用 `DecodeHeader()` 后才按合法长度分配 payload；同一个绝对 deadline 覆盖 header 与 payload。overlapped exact transfer 会处理 fragmented read/short write，Stop event 通过 `CancelIoEx` 中断等待；partial header/payload 后断开被报告为 protocol error，而不是正常 EOF。
+`IpcFramedConnection::readFrame()` 先精确读取 header，调用 `DecodeHeader()` 后才按合法长度分配 payload；同一个绝对 deadline 覆盖 header 与 payload。overlapped exact transfer 会处理 fragmented read/short write，Stop event 通过 `CancelIoEx` 中断等待。若 validation poll 在 frame 中间超时，已读字节保留到下一次调用；partial header/payload 后断开仍报告 protocol error。request session 发送会导致关闭的 terminal Error 后做最多 100 ms 可取消 drain，避免 server 立即 disconnect 截断客户端尚未读完的 payload。
 
 `IpcHandshakeSession::perform()` 消费首帧并要求 request id 0 的 `Hello`。Hello JSON 上限为 16 KiB，校验必填的 `client_name`、可选 `client_version` 和最多四项且无重复的 `requested_capabilities`。当前状态机只授予客户端请求的 `Observe`，把请求到的 `TargetSelection`、`TargetMutation`、`HostExecution` 放入 denied list。invalid first type/JSON/schema/capability 返回 structured `Error` 并做最长 1 秒 bounded drain；unsupported frame version 或 oversized header 直接关闭。
 
@@ -459,14 +459,15 @@ handler reader -> IpcRequestSession::run()
   -> strict Request {method, params, timeout_ms?}
   -> lifetime request-id dedupe / one-active / IpcMethodCatalog capability
   -> owned dispatch worker -> IpcMemServiceDispatcher
-       -> shared MemJsonTools -> IMemService(context)
+       -> Observe: shared MemJsonTools -> IMemService(context)
+       -> privileged: bounded broker submission -> decision only
   -> validated Response {ok, completion, result|error}
 Cancel/deadline/invalidation/Stop -> same cooperative cancellation context
 ```
 
 `timeout_ms` 默认 30 秒、最大 5 分钟，接收 Request 时转换成 server `steady_clock` absolute deadline。client 不能在 payload 中声明 capability；dispatcher registry 决定 method 需要 Observe、TargetSelection、TargetMutation 或 HostExecution。当前 handshake 只 grant Observe，所以 privileged fake methods 在 worker 前被拒绝。每个连接最多接纳 1024 个 unique request id；id 终身不复用，达到上限后返回 Error 并断开要求重连。Cancel 只接受 `{}`，不单独返回成功 ack；active request 的最终 Response 给出 completion。
 
-完整 catalog 与内置 Agent 同为 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution。`MemJsonTools` 是 AI 和 IPC 共用的参数/结果 adapter；IPC 的 12 个 Observe 调用不直接读 `AppContext` 或 socket。`IpcMemServiceDispatcher` 在构造时固定 connection/target baseline，并在执行前后及 reader 每 250 ms 复核。generation、PID、handle 或 process revision 变化会发 session-level Error、取消 active service context 并关闭该 session。privileged method 在 approval broker 落地前始终返回 `approval_required`，即使直接绕过 handshake 调 dispatcher 也不能执行。
+完整 catalog 与内置 Agent 同为 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution。`MemJsonTools` 是 AI 和 IPC 共用的参数/结果 adapter；IPC 的 12 个 Observe 调用不直接读 `AppContext` 或 socket。`IpcMemServiceDispatcher` 在构造时固定 connection/target baseline，并在执行前后及 reader 每 250 ms 复核。generation、PID、handle 或 process revision 变化会发 session-level Error、取消 active context 并关闭 session。没有 broker/session binding 的 dispatcher 对 privileged method 仍返回 `approval_required`；runtime binding 后，request worker 只提交 method/client/session/target/deadline，原 params 留在 active request。reader 可继续处理 Cancel，批准当前返回 `approval_execution_disabled`，不会进入 adapter/service。
 
 直接测试 `NamedPipeServer::start()` 时的调用链是：
 
@@ -479,9 +480,9 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 会获得 server 分配的单调 session id；stop/start 清诊断计数但不复用 id。其线程安全 snapshot 另提供 idle/handshaking/serving/stopping/failed phase、established/completed count、当前/最近 session id、活动 client identity/capability、最后 handshake/session 状态和 request/response/cancel 计数；不会保存 params/result，session 结束后清活动身份。`SystemNativeAgentRuntime` 先构造 broker 再构造 runtime，并保证 runtime 先析构；`NativeAgentIpcWindow` 显示这些状态并提供“启用/停止”。编译选项和运行状态都默认关闭，`main.cpp` 不调用 `start()`，只在设备断连前 shutdown。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前 runtime 只接入 broker 的 session cancellation，因而 GUI 仍明确显示 Observe-only，调试默认应用时看不到 pipe 是预期现状。
+`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 获得 server 单调 session id；stop/start 清诊断计数但不复用 id。snapshot 提供 phase、session count/id、活动 client identity/capability、最后状态和 request/response/cancel 计数，不保存 params/result。system owner 保证 broker 晚于 runtime 析构；窗口提供显式启停。编译与运行默认关闭，`main.cpp` 只在设备断连前 shutdown。handler 与 dispatch worker 都受管并 join。runtime 已接 broker submission/cancellation，但 Hello 与 GUI 仍明确 Observe-only；批准不会执行。
 
-privileged broker 当前接到管理面和 session 生命周期，但不在请求执行链上。它从 catalog 推导 capability/target policy，以 `{sessionId, requestId}` 去重，把 connection/target/deadline 固定在不含 params/result 的 bounded record 中。system owner 延迟创建 broker；窗口 refresh 会 expire/invalidate，表格只显示 client/method/capability/target/remaining time，approve/deny 捕获最新 context。Stop/退出 cancel 全部 live record；每个 established session 的断开、target/session invalidation、异常和 Stop 退出还会用 server id 精确 `cancelSession()`。approved 不是执行证明，未来 executor 仍必须调用一次 `consume()`，在 send 前再次复核 generation/target，随后 grant 不可重用。当前没有产品 submission、持久化 sink 或 dispatcher consume adapter，Hello 仍只 grant Observe。
+privileged broker 当前接到 request submission、管理面和 session 生命周期，但仍不在执行链上。worker 用 `{sessionId, requestId}` 提交 catalog-derived metadata，并保持 active request 直到 GUI decision、Cancel、deadline 或 invalidation。client Cancel 精确 `cancelRequest()`；Stop/退出 cancel-all；session 退出 `cancelSession()`。approved 不是执行证明：本批将其取消并返回 `approval_execution_disabled`。未来 executor 仍必须调用一次 `consume()`，在 send 前再次复核 generation/target，随后 grant 不可重用。当前没有持久化 sink 或 dispatcher consume adapter，Hello 仍只 grant Observe。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -592,13 +593,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 7 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 9 组 runtime 测试。runtime 覆盖 session close/invalidation 精确取消 broker record 和 restart 不复用 server session id；gate 固定 broker 注入、session cancellation、禁止 runtime submission、bounded GUI decision、窗口无 params/results、approval-aware Stop 和 Observe-only Hello。Debug/Release 当前各有 15 项 CTest。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 8 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、6 组 MemService-dispatcher 和 10 组 runtime 测试。新增覆盖 exact request cancellation、跨 deadline partial-frame 恢复、non-executing submission/decision/Cancel 与 Observe session reuse；gate 固定 submission、禁止 consume、session cancellation 和 Observe-only Hello。Debug/Release 当前各有 15 项 CTest。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Native IPC broker submission、dispatcher、持久化审计和真实 send-boundary consume 建立集成测试；server session id/cancel、bounded GUI decision/Stop gate 与 broker core 已有无设备测试。
+5. 为 Native IPC 持久化审计和真实 dispatcher consume/send-boundary 建立集成测试；submission、server session/request cancel、bounded GUI decision/Stop gate 与 broker core 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 
