@@ -305,6 +305,7 @@ endif()
 
 if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     add_library(NativeIpcTransport STATIC
+        ipc/IpcApprovalBroker.cpp
         ipc/IpcFramedConnection.cpp
         ipc/IpcHandshakeSession.cpp
         ipc/IpcMemServiceDispatcher.cpp
@@ -475,6 +476,22 @@ if(HAVE_AI_CHAT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(NativeIpcApprovalBrokerTests
+        tests/IpcApprovalBrokerTests.cpp
+    )
+    target_link_libraries(NativeIpcApprovalBrokerTests PRIVATE
+        NativeIpcTransport
+    )
+    if(MSVC)
+        target_compile_options(NativeIpcApprovalBrokerTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeIpcApprovalBrokerTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeIpcApprovalBrokerTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_ipc_approval_broker COMMAND NativeIpcApprovalBrokerTests)
+
     add_executable(NativeIpcMemServiceDispatcherTests
         tests/IpcMemServiceDispatcherTests.cpp
         mem/Address.cpp

@@ -25,7 +25,7 @@ endfunction()
 require_text("${cmake_source}" "default-off native IPC option"
     "option(ENABLE_NATIVE_IPC \"Compile native Named Pipe transport\" OFF)")
 require_text("${cmake_source}" "native IPC framed transport sources"
-    "add_library(NativeIpcTransport STATIC\n        ipc/IpcFramedConnection.cpp\n        ipc/IpcHandshakeSession.cpp\n        ipc/IpcMemServiceDispatcher.cpp\n        ipc/IpcMethodCatalog.cpp\n        ipc/IpcProtocol.cpp\n        ipc/IpcRequestProtocol.cpp\n        ipc/IpcRequestSession.cpp\n        ipc/NamedPipeServer.cpp")
+    "add_library(NativeIpcTransport STATIC\n        ipc/IpcApprovalBroker.cpp\n        ipc/IpcFramedConnection.cpp\n        ipc/IpcHandshakeSession.cpp\n        ipc/IpcMemServiceDispatcher.cpp\n        ipc/IpcMethodCatalog.cpp\n        ipc/IpcProtocol.cpp\n        ipc/IpcRequestProtocol.cpp\n        ipc/IpcRequestSession.cpp\n        ipc/NamedPipeServer.cpp")
 require_text("${cmake_source}" "owned native Agent runtime source"
     "ipc/NativeAgentRuntime.cpp")
 require_text("${cmake_source}" "explicit native IPC GUI control target"
