@@ -2,9 +2,11 @@
 
 #include "MemService.h"
 #include "../gui/AppContext.h"
+#include "../gui/MemoryTypes.h"
 #include "../socket/client_singleton.h"
 #include "../socket/SocketCommand.h"
 
+#include <limits>
 #include <utility>
 
 namespace Mem {
@@ -71,6 +73,177 @@ public:
 
 private:
     SocketCommand::TransactionLease lease_;
+    bool valid_ = false;
+};
+
+uint32_t scanDataTypeFlag(ScanDataType type) {
+    switch (type) {
+        case ScanDataType::Byte:   return BYTE_;
+        case ScanDataType::Word:   return WORD_;
+        case ScanDataType::Dword:  return DWORD_;
+        case ScanDataType::Qword:  return QWORD_;
+        case ScanDataType::Xor:    return XOR_;
+        case ScanDataType::Float:  return FLOAT_;
+        case ScanDataType::Double: return DOUBLE_;
+        case ScanDataType::Bytes:  return 0;
+        default:                   return 0;
+    }
+}
+
+uint32_t scanModeFlag(ScanMode mode) {
+    switch (mode) {
+        case ScanMode::Exact:       return _ACCURATE_VAL;
+        case ScanMode::Greater:     return _LARGER_THAN_VAL;
+        case ScanMode::Less:        return _LESS_THAN_VAL;
+        case ScanMode::Between:     return _BETWEEN_VAL;
+        case ScanMode::Unknown:     return _UNKNOW_VAL;
+        case ScanMode::Increased:   return _ADD_UNKNOW_VAL;
+        case ScanMode::IncreasedBy: return _ADD_ACCURATE_VAL;
+        case ScanMode::Decreased:   return _SUB_UNKNOW_VAL;
+        case ScanMode::DecreasedBy: return _SUB_ACCURATE_VAL;
+        case ScanMode::Changed:     return _CHANGED_VAL;
+        case ScanMode::Unchanged:   return _UNCHANGED_VAL;
+        default:                    return 0;
+    }
+}
+
+struct ScanCancelContext {
+    CancellationToken cancellation;
+    bool stopIssued = false;
+};
+
+void requestScanStop(float, uint64_t, uint64_t, uint64_t, void* userData) {
+    auto* context = static_cast<ScanCancelContext*>(userData);
+    if (!context || context->stopIssued || !context->cancellation ||
+        !context->cancellation->load(std::memory_order_acquire)) {
+        return;
+    }
+    context->stopIssued = true;
+    (void)StopSearchScan(PORT_DEBUG);
+}
+
+ScanExecutionBackendResult toBackendScanResult(
+    const ScanExecutionIoResult& io,
+    const CancellationToken& cancellation) {
+    ScanExecutionBackendResult result;
+    result.requestStarted = io.requestStarted;
+    result.responseReceived = io.responseReceived;
+    result.resultCount = io.resultCount;
+    result.cancelRequested = cancellation &&
+        cancellation->load(std::memory_order_acquire);
+    return result;
+}
+
+class SystemScanTransaction final : public IMemScanTransaction {
+public:
+    explicit SystemScanTransaction(const OperationContext& context)
+        : lease_(PORT_MAIN), cancellation_(context.cancellation) {
+        valid_ = static_cast<bool>(lease_) && context.target &&
+                 lease_.generation() == context.connectionGeneration &&
+                 AppContext::Get().matchesStableTarget(
+                     *context.target, lease_.generation());
+    }
+
+    bool valid() const {
+        return valid_ && static_cast<bool>(lease_);
+    }
+
+    uint64_t scanEpoch() const override {
+        return GetSocketMgr().GetScanEpoch();
+    }
+
+    bool setRange(ScanMemoryRegion memoryRegion) override {
+        return valid() && ScanSetRange(
+            static_cast<int>(memoryRegion), PORT_MAIN);
+    }
+
+    ScanExecutionBackendResult startScan(
+        const ScanStartRequest& request) override {
+        if (!valid()) {
+            return {};
+        }
+        ScanCancelContext cancel{cancellation_, false};
+        std::vector<unsigned char> value = request.value;
+        ScanExecutionIoResult io;
+        if (request.kind == ScanStartKind::BytePattern) {
+            io = ScanHEXValueTracked(
+                request.start, request.end, value,
+                &requestScanStop, &cancel, PORT_MAIN);
+        } else if (request.kind == ScanStartKind::Unknown) {
+            const uint32_t flags =
+                scanModeFlag(request.mode) |
+                scanDataTypeFlag(request.dataType);
+            io = ScanFuzzyValueTracked(
+                flags, &requestScanStop, &cancel,
+                request.start, request.end, PORT_MAIN);
+        } else {
+            const uint32_t flags =
+                scanModeFlag(request.mode) |
+                scanDataTypeFlag(request.dataType);
+            io = ScanValueTracked(
+                flags, value, &requestScanStop, &cancel,
+                request.start, request.end, PORT_MAIN);
+        }
+        return toBackendScanResult(io, cancellation_);
+    }
+
+    ScanExecutionBackendResult refineScan(
+        const ScanSessionSnapshot& session,
+        const ScanRefineRequest& request) override {
+        if (!valid()) {
+            return {};
+        }
+        ScanCancelContext cancel{cancellation_, false};
+        std::vector<unsigned char> value = request.value;
+        const uint32_t flags =
+            scanModeFlag(request.mode) |
+            scanDataTypeFlag(session.dataType);
+        const ScanExecutionIoResult io = ScanNextValueTracked(
+            value, static_cast<int>(flags),
+            &requestScanStop, &cancel,
+            session.start, session.end, PORT_MAIN);
+        return toBackendScanResult(io, cancellation_);
+    }
+
+    bool scanResultCount(int& count) override {
+        if (!valid()) {
+            return false;
+        }
+        count = GetScanResultCount(PORT_MAIN);
+        return count >= 0;
+    }
+
+    bool fetchScanResults(
+        size_t offset,
+        size_t limit,
+        std::vector<ScanResultItem>& results) override {
+        if (!valid() ||
+            offset > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+            limit > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+            return false;
+        }
+        std::vector<std::pair<uint64_t, uint64_t>> raw;
+        if (!GetScanResult(static_cast<int>(offset),
+                           static_cast<int>(limit),
+                           raw,
+                           PORT_MAIN)) {
+            return false;
+        }
+        results.clear();
+        results.reserve(raw.size());
+        for (const auto& item : raw) {
+            results.push_back(ScanResultItem{item.first, item.second});
+        }
+        return true;
+    }
+
+    bool clearScan() override {
+        return valid() && ClearScanResult(PORT_MAIN);
+    }
+
+private:
+    SocketCommand::TransactionLease lease_;
+    CancellationToken cancellation_;
     bool valid_ = false;
 };
 
@@ -142,6 +315,19 @@ public:
     std::unique_ptr<IMemReadTransaction> beginReadTransaction(
         const OperationContext& context) override {
         auto transaction = std::make_unique<SystemReadTransaction>(context);
+        if (!transaction->valid()) {
+            return nullptr;
+        }
+        return transaction;
+    }
+
+    uint64_t scanEpoch() const override {
+        return GetSocketMgr().GetScanEpoch();
+    }
+
+    std::unique_ptr<IMemScanTransaction> beginScanTransaction(
+        const OperationContext& context) override {
+        auto transaction = std::make_unique<SystemScanTransaction>(context);
         if (!transaction->valid()) {
             return nullptr;
         }

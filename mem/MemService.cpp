@@ -148,6 +148,150 @@ std::optional<uint64_t> decodePointer(
     return value;
 }
 
+size_t scanDataTypeSize(ScanDataType type) {
+    switch (type) {
+        case ScanDataType::Byte:   return 1;
+        case ScanDataType::Word:   return 2;
+        case ScanDataType::Dword:
+        case ScanDataType::Xor:
+        case ScanDataType::Float:  return 4;
+        case ScanDataType::Qword:
+        case ScanDataType::Double: return 8;
+        case ScanDataType::Bytes:  return 0;
+        default:                   return 0;
+    }
+}
+
+bool isValidScanMemoryRegion(ScanMemoryRegion region) {
+    switch (region) {
+        case ScanMemoryRegion::All:
+        case ScanMemoryRegion::Anonymous:
+        case ScanMemoryRegion::CAlloc:
+        case ScanMemoryRegion::CHeap:
+        case ScanMemoryRegion::CData:
+        case ScanMemoryRegion::CBss:
+        case ScanMemoryRegion::JavaHeap:
+        case ScanMemoryRegion::Java:
+        case ScanMemoryRegion::Stack:
+        case ScanMemoryRegion::Video:
+        case ScanMemoryRegion::CodeApp:
+        case ScanMemoryRegion::CodeSystem:
+        case ScanMemoryRegion::Ashmem:
+        case ScanMemoryRegion::Bad:
+        case ScanMemoryRegion::Other:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValueStartMode(ScanMode mode) {
+    return mode == ScanMode::Exact || mode == ScanMode::Greater ||
+           mode == ScanMode::Less || mode == ScanMode::Between;
+}
+
+bool isRefineMode(ScanMode mode) {
+    return mode == ScanMode::Exact || mode == ScanMode::Greater ||
+           mode == ScanMode::Less || mode == ScanMode::Between ||
+           mode == ScanMode::Increased || mode == ScanMode::IncreasedBy ||
+           mode == ScanMode::Decreased || mode == ScanMode::DecreasedBy ||
+           mode == ScanMode::Changed || mode == ScanMode::Unchanged;
+}
+
+bool scanModeRequiresValue(ScanMode mode) {
+    return mode == ScanMode::Exact || mode == ScanMode::Greater ||
+           mode == ScanMode::Less || mode == ScanMode::Between ||
+           mode == ScanMode::IncreasedBy ||
+           mode == ScanMode::DecreasedBy;
+}
+
+std::optional<Error> validateScanValue(
+    ScanDataType dataType,
+    ScanMode mode,
+    const std::vector<unsigned char>& value,
+    bool allowEmptyForValuelessMode) {
+    const size_t scalarSize = scanDataTypeSize(dataType);
+    if (scalarSize == 0) {
+        return Error{ErrorCode::InvalidArgument,
+                     "scan data_type must be a scalar type", false};
+    }
+    if (!scanModeRequiresValue(mode)) {
+        if (!allowEmptyForValuelessMode || !value.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "scan mode does not accept a comparison value",
+                         false};
+        }
+        return std::nullopt;
+    }
+    const size_t expected =
+        mode == ScanMode::Between ? scalarSize * 2u : scalarSize;
+    if (value.size() != expected) {
+        return Error{
+            ErrorCode::InvalidArgument,
+            mode == ScanMode::Between
+                ? "between scan requires exactly two encoded scalar values"
+                : "scan value byte count does not match data_type",
+            false};
+    }
+    return std::nullopt;
+}
+
+std::optional<Error> validateScanStartRequest(
+    const ScanStartRequest& request) {
+    if (request.start > request.end) {
+        return Error{ErrorCode::InvalidArgument,
+                     "scan start must be less than or equal to end", false};
+    }
+    if (!isValidScanMemoryRegion(request.memoryRegion)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "scan memory region is unsupported", false};
+    }
+    if (request.value.size() > kMaxScanValueBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "scan value exceeds 4096 bytes", false};
+    }
+    if (request.kind == ScanStartKind::BytePattern) {
+        if (request.dataType != ScanDataType::Bytes ||
+            request.mode != ScanMode::Exact || request.value.empty()) {
+            return Error{
+                ErrorCode::InvalidArgument,
+                "byte-pattern scans require exact mode and non-empty pattern bytes",
+                false};
+        }
+        return std::nullopt;
+    }
+    if (request.kind == ScanStartKind::Unknown) {
+        if (request.dataType == ScanDataType::Bytes ||
+            request.mode != ScanMode::Unknown || !request.value.empty()) {
+            return Error{
+                ErrorCode::InvalidArgument,
+                "unknown scans require a scalar data_type and no value",
+                false};
+        }
+        return std::nullopt;
+    }
+    if (!isValueStartMode(request.mode) ||
+        request.dataType == ScanDataType::Bytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "value scan start mode or data_type is unsupported",
+                     false};
+    }
+    return validateScanValue(
+        request.dataType, request.mode, request.value, false);
+}
+
+Error noScanSessionError() {
+    return Error{ErrorCode::NoScanSession,
+                 "no active native scan session; start a scan first", false};
+}
+
+Error scanSessionChangedError() {
+    return Error{
+        ErrorCode::ScanSessionChanged,
+        "scan session changed or was replaced by another front end; start a new scan",
+        false};
+}
+
 } // namespace
 
 MemService::MemService(IMemBackend& backend) : backend_(backend) {}
@@ -701,6 +845,427 @@ Result<PointerResolution> MemService::resolvePointer(
     resolution.target = *context.target;
     return Result<PointerResolution>::success(
         std::move(resolution), elapsedMilliseconds(start));
+}
+
+Result<ScanSummary> MemService::startScan(
+    const OperationContext& context,
+    const ScanStartRequest& request) {
+    const auto start = Clock::now();
+    if (const auto error = validateScanStartRequest(request)) {
+        return failureFrom<ScanSummary>(*error, start);
+    }
+
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanSummary>(*error, start);
+    }
+
+    auto transaction = backend_.beginScanTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanSummary>(*error, start);
+        }
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the scan transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    if (!transaction->setRange(request.memoryRegion)) {
+        scanSession_.reset();
+        transaction.reset();
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanSummary>(*error, start);
+        }
+        return Result<ScanSummary>::failure(
+            ErrorCode::CompletionUnknown,
+            "scan range command may have been sent but could not be confirmed; reconnect before retrying",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    if (const auto error = validateContext(context, true, false, true)) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanSummary>(*error, start);
+    }
+
+    const ScanExecutionBackendResult backendResult =
+        transaction->startScan(request);
+    const uint64_t completedEpoch = transaction->scanEpoch();
+    transaction.reset();
+
+    if (!backendResult.responseReceived) {
+        scanSession_.reset();
+        if (backendResult.requestStarted) {
+            return Result<ScanSummary>::failure(
+                ErrorCode::CompletionUnknown,
+                "scan was sent but its terminal result could not be confirmed; reconnect before retrying",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanSummary>(*error, start);
+        }
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "scan could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (backendResult.resultCount < 0 ||
+        static_cast<size_t>(backendResult.resultCount) >
+            kMaxScanResultCount) {
+        scanSession_.reset();
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "scan returned an invalid result count",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        scanSession_.reset();
+        return failureFrom<ScanSummary>(*error, start);
+    }
+    if (backend_.scanEpoch() != completedEpoch) {
+        scanSession_.reset();
+        return failureFrom<ScanSummary>(scanSessionChangedError(), start);
+    }
+
+    ScanSessionSnapshot session;
+    session.epoch = completedEpoch;
+    session.kind = request.kind;
+    session.dataType = request.dataType;
+    session.mode = request.mode;
+    session.memoryRegion = request.memoryRegion;
+    session.start = request.start;
+    session.end = request.end;
+    session.resultCount =
+        static_cast<size_t>(backendResult.resultCount);
+    session.target = *context.target;
+    scanSession_ = session;
+
+    ScanSummary summary;
+    summary.session = std::move(session);
+    summary.completedAfterCancelRequest = backendResult.cancelRequested;
+    summary.completedAfterDeadline = Clock::now() >= context.deadline;
+    return Result<ScanSummary>::success(
+        std::move(summary), elapsedMilliseconds(start));
+}
+
+Result<ScanSummary> MemService::refineScan(
+    const OperationContext& context,
+    const ScanRefineRequest& request) {
+    const auto start = Clock::now();
+    if (!isRefineMode(request.mode)) {
+        return Result<ScanSummary>::failure(
+            ErrorCode::InvalidArgument,
+            "scan refine mode is unsupported",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.value.size() > kMaxScanValueBytes) {
+        return Result<ScanSummary>::failure(
+            ErrorCode::InvalidArgument,
+            "scan refine value exceeds 4096 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    if (!scanSession_) {
+        return failureFrom<ScanSummary>(noScanSessionError(), start);
+    }
+    if (request.expectedEpoch &&
+        *request.expectedEpoch != scanSession_->epoch) {
+        return failureFrom<ScanSummary>(scanSessionChangedError(), start);
+    }
+    if (!context.target || scanSession_->target != *context.target) {
+        scanSession_.reset();
+        return failureFrom<ScanSummary>(scanSessionChangedError(), start);
+    }
+    if (scanSession_->kind == ScanStartKind::BytePattern) {
+        return Result<ScanSummary>::failure(
+            ErrorCode::InvalidArgument,
+            "byte-pattern scan sessions cannot be refined as scalar values",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateScanValue(
+            scanSession_->dataType,
+            request.mode,
+            request.value,
+            true)) {
+        return failureFrom<ScanSummary>(*error, start);
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanSummary>(*error, start);
+    }
+
+    auto transaction = backend_.beginScanTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanSummary>(*error, start);
+        }
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the scan transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (transaction->scanEpoch() != scanSession_->epoch) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanSummary>(scanSessionChangedError(), start);
+    }
+
+    ScanRefineRequest normalized = request;
+    if (!scanModeRequiresValue(normalized.mode)) {
+        normalized.value.assign(
+            scanDataTypeSize(scanSession_->dataType), 0);
+    }
+    const ScanExecutionBackendResult backendResult =
+        transaction->refineScan(*scanSession_, normalized);
+    const uint64_t completedEpoch = transaction->scanEpoch();
+    transaction.reset();
+
+    if (!backendResult.responseReceived) {
+        scanSession_.reset();
+        if (backendResult.requestStarted) {
+            return Result<ScanSummary>::failure(
+                ErrorCode::CompletionUnknown,
+                "scan refine was sent but its terminal result could not be confirmed; reconnect before retrying",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanSummary>(*error, start);
+        }
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "scan refine could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (backendResult.resultCount < 0 ||
+        static_cast<size_t>(backendResult.resultCount) >
+            kMaxScanResultCount) {
+        scanSession_.reset();
+        return Result<ScanSummary>::failure(
+            ErrorCode::ProtocolError,
+            "scan refine returned an invalid result count",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        scanSession_.reset();
+        return failureFrom<ScanSummary>(*error, start);
+    }
+    if (backend_.scanEpoch() != completedEpoch) {
+        scanSession_.reset();
+        return failureFrom<ScanSummary>(scanSessionChangedError(), start);
+    }
+
+    scanSession_->epoch = completedEpoch;
+    scanSession_->mode = request.mode;
+    scanSession_->resultCount =
+        static_cast<size_t>(backendResult.resultCount);
+
+    ScanSummary summary;
+    summary.session = *scanSession_;
+    summary.completedAfterCancelRequest = backendResult.cancelRequested;
+    summary.completedAfterDeadline = Clock::now() >= context.deadline;
+    return Result<ScanSummary>::success(
+        std::move(summary), elapsedMilliseconds(start));
+}
+
+Result<ScanResultPage> MemService::scanResults(
+    const OperationContext& context,
+    const ScanResultsRequest& request) {
+    const auto start = Clock::now();
+    if (request.limit == 0 || request.limit > kMaxScanResultPageSize) {
+        return Result<ScanResultPage>::failure(
+            ErrorCode::InvalidArgument,
+            "scan result page limit must be between 1 and 1000",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    if (!scanSession_) {
+        return failureFrom<ScanResultPage>(noScanSessionError(), start);
+    }
+    if (request.expectedEpoch &&
+        *request.expectedEpoch != scanSession_->epoch) {
+        return failureFrom<ScanResultPage>(scanSessionChangedError(), start);
+    }
+    if (!context.target || scanSession_->target != *context.target) {
+        scanSession_.reset();
+        return failureFrom<ScanResultPage>(scanSessionChangedError(), start);
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanResultPage>(*error, start);
+    }
+
+    auto transaction = backend_.beginScanTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanResultPage>(*error, start);
+        }
+        return Result<ScanResultPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the scan transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (transaction->scanEpoch() != scanSession_->epoch) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanResultPage>(scanSessionChangedError(), start);
+    }
+
+    int count = -1;
+    if (!transaction->scanResultCount(count) || count < 0 ||
+        static_cast<size_t>(count) > kMaxScanResultCount) {
+        transaction.reset();
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanResultPage>(*error, start);
+        }
+        return Result<ScanResultPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to read a valid scan result count",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    const size_t total = static_cast<size_t>(count);
+    const size_t offset = std::min(request.offset, total);
+    std::vector<ScanResultItem> items;
+    if (offset < total &&
+        !transaction->fetchScanResults(offset, request.limit, items)) {
+        transaction.reset();
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanResultPage>(*error, start);
+        }
+        return Result<ScanResultPage>::failure(
+            ErrorCode::ProtocolError,
+            "failed to fetch the scan result page",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (transaction->scanEpoch() != scanSession_->epoch) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanResultPage>(scanSessionChangedError(), start);
+    }
+    transaction.reset();
+
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanResultPage>(*error, start);
+    }
+    if (backend_.scanEpoch() != scanSession_->epoch) {
+        scanSession_.reset();
+        return failureFrom<ScanResultPage>(scanSessionChangedError(), start);
+    }
+    if (items.size() > request.limit || items.size() > total - offset) {
+        return Result<ScanResultPage>::failure(
+            ErrorCode::ProtocolError,
+            "scan result page returned an invalid item count",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    scanSession_->resultCount = total;
+    ScanResultPage page;
+    page.items = std::move(items);
+    page.total = total;
+    page.offset = offset;
+    const size_t end = offset + page.items.size();
+    if (end < total) {
+        page.nextOffset = end;
+    }
+    page.session = *scanSession_;
+    return Result<ScanResultPage>::success(
+        std::move(page), elapsedMilliseconds(start));
+}
+
+Result<ScanClearResult> MemService::clearScan(
+    const OperationContext& context,
+    const ScanClearRequest& request) {
+    const auto start = Clock::now();
+    std::lock_guard<std::mutex> scanLock(scanMutex_);
+    if (!scanSession_) {
+        return failureFrom<ScanClearResult>(noScanSessionError(), start);
+    }
+    if (request.expectedEpoch &&
+        *request.expectedEpoch != scanSession_->epoch) {
+        return failureFrom<ScanClearResult>(scanSessionChangedError(), start);
+    }
+    if (!context.target || scanSession_->target != *context.target) {
+        scanSession_.reset();
+        return failureFrom<ScanClearResult>(scanSessionChangedError(), start);
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<ScanClearResult>(*error, start);
+    }
+
+    const uint64_t clearedEpoch = scanSession_->epoch;
+    auto transaction = backend_.beginScanTransaction(context);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<ScanClearResult>(*error, start);
+        }
+        return Result<ScanClearResult>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the scan transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (transaction->scanEpoch() != clearedEpoch) {
+        scanSession_.reset();
+        transaction.reset();
+        return failureFrom<ScanClearResult>(scanSessionChangedError(), start);
+    }
+
+    const bool clearSent = transaction->clearScan();
+    int remaining = -1;
+    const bool countConfirmed = clearSent &&
+        transaction->scanResultCount(remaining);
+    const uint64_t currentEpoch = transaction->scanEpoch();
+    scanSession_.reset();
+    transaction.reset();
+
+    if (!clearSent || !countConfirmed) {
+        return Result<ScanClearResult>::failure(
+            ErrorCode::CompletionUnknown,
+            "scan clear may have been sent but could not be confirmed; reconnect before retrying",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (remaining != 0) {
+        return Result<ScanClearResult>::failure(
+            ErrorCode::ProtocolError,
+            "scan clear was acknowledged by a non-empty result set",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return failureFrom<ScanClearResult>(*error, start);
+    }
+    if (backend_.scanEpoch() != currentEpoch) {
+        return failureFrom<ScanClearResult>(scanSessionChangedError(), start);
+    }
+
+    ScanClearResult result;
+    result.clearedEpoch = clearedEpoch;
+    result.currentEpoch = currentEpoch;
+    result.completedAfterCancelRequest = context.cancellation &&
+        context.cancellation->load(std::memory_order_acquire);
+    result.completedAfterDeadline = Clock::now() >= context.deadline;
+    result.target = *context.target;
+    return Result<ScanClearResult>::success(
+        std::move(result), elapsedMilliseconds(start));
 }
 
 Result<MemoryBlock> MemService::readMemory(

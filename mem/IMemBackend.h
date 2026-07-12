@@ -19,6 +19,25 @@ public:
                             std::vector<unsigned char>& bytes) = 0;
 };
 
+class IMemScanTransaction {
+public:
+    virtual ~IMemScanTransaction() = default;
+
+    virtual uint64_t scanEpoch() const = 0;
+    virtual bool setRange(ScanMemoryRegion memoryRegion) = 0;
+    virtual ScanExecutionBackendResult startScan(
+        const ScanStartRequest& request) = 0;
+    virtual ScanExecutionBackendResult refineScan(
+        const ScanSessionSnapshot& session,
+        const ScanRefineRequest& request) = 0;
+    virtual bool scanResultCount(int& count) = 0;
+    virtual bool fetchScanResults(
+        size_t offset,
+        size_t limit,
+        std::vector<ScanResultItem>& results) = 0;
+    virtual bool clearScan() = 0;
+};
+
 class IMemBackend {
 public:
     virtual ~IMemBackend() = default;
@@ -36,6 +55,9 @@ public:
     virtual bool openProcess(int pid, const std::string& name) = 0;
     virtual bool fetchModules(std::vector<ModuleInfo>& modules) = 0;
     virtual std::unique_ptr<IMemReadTransaction> beginReadTransaction(
+        const OperationContext& context) = 0;
+    virtual uint64_t scanEpoch() const = 0;
+    virtual std::unique_ptr<IMemScanTransaction> beginScanTransaction(
         const OperationContext& context) = 0;
     virtual bool readMemory(uint64_t address,
                             uint32_t size,

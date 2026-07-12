@@ -1,8 +1,6 @@
 #include "client_singleton.h"
 #include "SocketCommand.h"
 #include "../gui/MemoryTypes.h"
-#include <iostream>
-#include <iomanip>
 
 namespace {
 constexpr int kMaxScanResultCount = 5000000;
@@ -76,9 +74,37 @@ bool receiveScanResultCount(WindowsSocketClient* client, int& count) {
         return false;
     return isValidScanResultCount(count);
 }
+
+template <typename SendRequest>
+ScanExecutionIoResult executeTrackedScan(
+    PortType port,
+    SendRequest&& sendRequest,
+    ScanProgressCallback callback,
+    void* userData) {
+    ScanExecutionIoResult result;
+    GetSocketMgr().AdvanceScanEpoch();
+    (void)SocketCommand::execute(
+        port, [&](WindowsSocketClient* client, int handle) -> bool {
+            result.requestStarted = true;
+            if (!sendRequest(client, handle)) {
+                return false;
+            }
+            if (!SocketCommand::receiveProgressLoop(
+                    client, callback, userData)) {
+                return false;
+            }
+            if (!receiveScanResultCount(client, result.resultCount)) {
+                return false;
+            }
+            result.responseReceived = true;
+            return true;
+        });
+    return result;
+}
 } // namespace
 
 bool ScanSetRange(int type, PortType port) {
+    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_SETRANGE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -91,67 +117,16 @@ bool ScanSetRange(int type, PortType port) {
 
 int ScanValue(uint32_t flags, std::vector<unsigned char> &Value, uint64_t start,
               uint64_t end, PortType port) {
-    if (!isValidScanRange(start, end) || !isValidScanBytes(Value))
-        return -1;
-
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANVALUE;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-#pragma pack(1)
-        struct { uint64_t start; uint64_t end; int size; unsigned int flag; } scanParams;
-#pragma pack()
-        scanParams.start = start; scanParams.end = end;
-        scanParams.size = static_cast<int>(Value.size()); scanParams.flag = flags;
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
-            return false;
-        while (true) {
-            ScanProgress progress;
-            if (!client->Receive(&progress, sizeof(progress)))
-                return false;
-            if (progress.msgType == 1) {
-                std::cout << "\r进度: " << std::fixed << std::setprecision(2)
-                          << progress.percent << "%, 命中: " << progress.matchCount << std::flush;
-            } else if (progress.msgType == 2) { break; }
-            else if (progress.msgType == 3) { return false; }
-            else { return false; }
-        }
-        return receiveScanResultCount(client, len);
-    }, -1);
+    const ScanExecutionIoResult result = ScanValueTracked(
+        flags, Value, nullptr, nullptr, start, end, port);
+    return result.responseReceived ? result.resultCount : -1;
 }
 
 int ScanNextValue(std::vector<unsigned char> &Value, int flag, uint64_t start,
                   uint64_t end, PortType port) {
-    if (flag < 0 || !isValidScanRange(start, end) ||
-        !isValidScanNextBytes(Value, static_cast<uint32_t>(flag)))
-        return -1;
-
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANNEXTVALUE;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-#pragma pack(1)
-        struct { uint64_t start; uint64_t end; int size; unsigned int flag; } scanParams;
-#pragma pack()
-        scanParams.start = start; scanParams.end = end;
-        scanParams.size = static_cast<int>(Value.size()); scanParams.flag = static_cast<unsigned int>(flag);
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
-            return false;
-        while (true) {
-            ScanProgress progress;
-            if (!client->Receive(&progress, sizeof(progress)))
-                return false;
-            if (progress.msgType == 1) continue;
-            if (progress.msgType == 2) break;
-            else if (progress.msgType == 3) return false;
-            else return false;
-        }
-        return receiveScanResultCount(client, len);
-    }, -1);
+    const ScanExecutionIoResult result = ScanNextValueTracked(
+        Value, flag, nullptr, nullptr, start, end, port);
+    return result.responseReceived ? result.resultCount : -1;
 }
 
 int GetScanResultCount(PortType port) {
@@ -195,6 +170,7 @@ bool RemoveScanResult(std::vector<uint64_t> address, PortType port) {
     if (address.empty() || address.size() > kMaxScanResultRemovalCount)
         return false;
 
+    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_REMOVESCANRESULT;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -209,6 +185,7 @@ bool RemoveScanResult(std::vector<uint64_t> address, PortType port) {
 }
 
 bool ClearScanResult(PortType port) {
+    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_CLEARSCANRESULT;
         return SocketCommand::sendCommandWithHandle(client, command, handle);
@@ -218,74 +195,133 @@ bool ClearScanResult(PortType port) {
 int ScanValueWithProgress(uint32_t flags, std::vector<unsigned char> &Value,
                           ScanProgressCallback callback, void *userData,
                           uint64_t start, uint64_t end, PortType port) {
-    if (!isValidScanRange(start, end) || !isValidScanBytes(Value))
-        return -1;
+    const ScanExecutionIoResult result = ScanValueTracked(
+        flags, Value, callback, userData, start, end, port);
+    return result.responseReceived ? result.resultCount : -1;
+}
 
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANVALUE;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
+ScanExecutionIoResult ScanValueTracked(
+    uint32_t flags, std::vector<unsigned char> &value,
+    ScanProgressCallback callback, void *userData,
+    uint64_t start, uint64_t end, PortType port) {
+    if (!isValidScanRange(start, end) || !isValidScanBytes(value)) {
+        return {};
+    }
+
+    return executeTrackedScan(
+        port,
+        [&](WindowsSocketClient* client, int handle) -> bool {
+            unsigned char command = CMD_SCANVALUE;
+            if (!SocketCommand::sendCommandWithHandle(
+                    client, command, handle)) {
+                return false;
+            }
 #pragma pack(1)
-        struct { uint64_t start; uint64_t end; int size; unsigned int flag; } scanParams;
+            struct {
+                uint64_t start;
+                uint64_t end;
+                int size;
+                unsigned int flag;
+            } scanParams;
 #pragma pack()
-        scanParams.start = start; scanParams.end = end;
-        scanParams.size = static_cast<int>(Value.size()); scanParams.flag = flags;
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
-            return false;
-        if (!SocketCommand::receiveProgressLoop(client, callback, userData))
-            return false;
-        return receiveScanResultCount(client, len);
-    }, -1);
+            scanParams.start = start;
+            scanParams.end = end;
+            scanParams.size = static_cast<int>(value.size());
+            scanParams.flag = flags;
+            if (!client->Send(&scanParams, sizeof(scanParams))) {
+                return false;
+            }
+            return scanParams.size <= 0 ||
+                   client->Send(value.data(), value.size());
+        },
+        callback,
+        userData);
+}
+
+ScanExecutionIoResult ScanNextValueTracked(
+    std::vector<unsigned char> &value, int flag,
+    ScanProgressCallback callback, void *userData,
+    uint64_t start, uint64_t end, PortType port) {
+    if (flag < 0 || !isValidScanRange(start, end) ||
+        !isValidScanNextBytes(value, static_cast<uint32_t>(flag))) {
+        return {};
+    }
+
+    return executeTrackedScan(
+        port,
+        [&](WindowsSocketClient* client, int handle) -> bool {
+            unsigned char command = CMD_SCANNEXTVALUE;
+            if (!SocketCommand::sendCommandWithHandle(
+                    client, command, handle)) {
+                return false;
+            }
+#pragma pack(1)
+            struct {
+                uint64_t start;
+                uint64_t end;
+                int size;
+                unsigned int flag;
+            } scanParams;
+#pragma pack()
+            scanParams.start = start;
+            scanParams.end = end;
+            scanParams.size = static_cast<int>(value.size());
+            scanParams.flag = static_cast<unsigned int>(flag);
+            if (!client->Send(&scanParams, sizeof(scanParams))) {
+                return false;
+            }
+            return scanParams.size <= 0 ||
+                   client->Send(value.data(), value.size());
+        },
+        callback,
+        userData);
 }
 
 int ScanNextValueWithProgress(std::vector<unsigned char> &Value, int flag,
                               ScanProgressCallback callback, void *userData,
                               uint64_t start, uint64_t end, PortType port) {
-    if (flag < 0 || !isValidScanRange(start, end) ||
-        !isValidScanNextBytes(Value, static_cast<uint32_t>(flag)))
-        return -1;
+    const ScanExecutionIoResult result = ScanNextValueTracked(
+        Value, flag, callback, userData, start, end, port);
+    return result.responseReceived ? result.resultCount : -1;
+}
 
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANNEXTVALUE;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
+ScanExecutionIoResult ScanFuzzyValueTracked(
+    uint32_t flags, ScanProgressCallback callback, void *userData,
+    uint64_t start, uint64_t end, PortType port) {
+    if (!isValidScanRange(start, end)) {
+        return {};
+    }
+
+    return executeTrackedScan(
+        port,
+        [&](WindowsSocketClient* client, int handle) -> bool {
+            unsigned char command = CMD_SCANFUZZYVALUE;
+            if (!SocketCommand::sendCommandWithHandle(
+                    client, command, handle)) {
+                return false;
+            }
 #pragma pack(1)
-        struct { uint64_t start; uint64_t end; int size; unsigned int flag; } scanParams;
+            struct {
+                uint64_t start;
+                uint64_t end;
+                unsigned int flag;
+            } scanParams;
 #pragma pack()
-        scanParams.start = start; scanParams.end = end;
-        scanParams.size = static_cast<int>(Value.size()); scanParams.flag = static_cast<unsigned int>(flag);
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
-            return false;
-        if (!SocketCommand::receiveProgressLoop(client, callback, userData))
-            return false;
-        return receiveScanResultCount(client, len);
-    }, -1);
+            scanParams.start = start;
+            scanParams.end = end;
+            scanParams.flag = flags;
+            return client->Send(&scanParams, sizeof(scanParams));
+        },
+        callback,
+        userData);
 }
 
 int ScanFuzzyValueWithProgress(uint32_t flags, ScanProgressCallback callback,
                                void *userData, uint64_t start, uint64_t end,
                                PortType port) {
-    if (!isValidScanRange(start, end))
-        return -1;
-
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANFUZZYVALUE;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-#pragma pack(1)
-        struct { uint64_t start; uint64_t end; unsigned int flag; } scanParams;
-#pragma pack()
-        scanParams.start = start; scanParams.end = end; scanParams.flag = flags;
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (!SocketCommand::receiveProgressLoop(client, callback, userData))
-            return false;
-        return receiveScanResultCount(client, len);
-    }, -1);
+    const ScanExecutionIoResult result = ScanFuzzyValueTracked(
+        flags, callback, userData, start, end, port);
+    return result.responseReceived ? result.resultCount : -1;
 }
 
 int ScanGroupValueWithProgress(
@@ -295,6 +331,7 @@ int ScanGroupValueWithProgress(
     if (!isValidScanRange(start, end) || !isValidGroupScanValues(Value))
         return -1;
 
+    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& SearchCount) -> bool {
         unsigned char command = CMD_SCANGROUPVALUE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
@@ -327,25 +364,44 @@ int ScanHEXValueWithProgress(uint64_t start, uint64_t end,
                              std::vector<unsigned char> &Value,
                              ScanProgressCallback callback, void *userData,
                              PortType port) {
-    if (!isValidScanRange(start, end) || !isValidScanBytes(Value))
-        return -1;
+    const ScanExecutionIoResult result = ScanHEXValueTracked(
+        start, end, Value, callback, userData, port);
+    return result.responseReceived ? result.resultCount : -1;
+}
 
-    return SocketCommand::executeWithResult(port, [&](WindowsSocketClient* client, int handle, int& len) -> bool {
-        unsigned char command = CMD_SCANHEX;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
+ScanExecutionIoResult ScanHEXValueTracked(
+    uint64_t start, uint64_t end, std::vector<unsigned char> &value,
+    ScanProgressCallback callback, void *userData, PortType port) {
+    if (!isValidScanRange(start, end) || !isValidScanBytes(value)) {
+        return {};
+    }
+
+    return executeTrackedScan(
+        port,
+        [&](WindowsSocketClient* client, int handle) -> bool {
+            unsigned char command = CMD_SCANHEX;
+            if (!SocketCommand::sendCommandWithHandle(
+                    client, command, handle)) {
+                return false;
+            }
 #pragma pack(1)
-        struct { uint64_t start; uint64_t end; int size; } scanParams;
+            struct {
+                uint64_t start;
+                uint64_t end;
+                int size;
+            } scanParams;
 #pragma pack()
-        scanParams.start = start; scanParams.end = end; scanParams.size = static_cast<int>(Value.size());
-        if (!client->Send(&scanParams, sizeof(scanParams)))
-            return false;
-        if (scanParams.size > 0 && !client->Send(Value.data(), Value.size()))
-            return false;
-        if (!SocketCommand::receiveProgressLoop(client, callback, userData))
-            return false;
-        return receiveScanResultCount(client, len);
-    }, -1);
+            scanParams.start = start;
+            scanParams.end = end;
+            scanParams.size = static_cast<int>(value.size());
+            if (!client->Send(&scanParams, sizeof(scanParams))) {
+                return false;
+            }
+            return scanParams.size <= 0 ||
+                   client->Send(value.data(), value.size());
+        },
+        callback,
+        userData);
 }
 
 bool GetTypedScanResult(int offset, int count,
@@ -388,6 +444,7 @@ bool GetTypedScanResult(int offset, int count,
 }
 
 bool StopSearchScan(PortType port) {
+    GetSocketMgr().AdvanceScanEpoch();
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_STOPPROCESS;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))

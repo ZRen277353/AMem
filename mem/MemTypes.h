@@ -132,6 +132,127 @@ struct PointerResolution {
     TargetSnapshot target;
 };
 
+enum class ScanStartKind {
+    Value,
+    Unknown,
+    BytePattern,
+};
+
+enum class ScanDataType {
+    Byte,
+    Word,
+    Dword,
+    Qword,
+    Xor,
+    Float,
+    Double,
+    Bytes,
+};
+
+enum class ScanMode {
+    Exact,
+    Greater,
+    Less,
+    Between,
+    Unknown,
+    Increased,
+    IncreasedBy,
+    Decreased,
+    DecreasedBy,
+    Changed,
+    Unchanged,
+};
+
+enum class ScanMemoryRegion : int32_t {
+    All = -1,
+    Anonymous = 1 << 5,
+    CAlloc = 1 << 2,
+    CHeap = 1 << 0,
+    CData = 1 << 3,
+    CBss = 1 << 4,
+    JavaHeap = 1 << 1,
+    Java = 1 << 16,
+    Stack = 1 << 6,
+    Video = 1 << 20,
+    CodeApp = 1 << 14,
+    CodeSystem = 1 << 15,
+    Ashmem = 1 << 19,
+    Bad = 1 << 17,
+    Other = -2080896,
+};
+
+struct ScanStartRequest {
+    ScanStartKind kind = ScanStartKind::Value;
+    ScanDataType dataType = ScanDataType::Dword;
+    ScanMode mode = ScanMode::Exact;
+    ScanMemoryRegion memoryRegion = ScanMemoryRegion::All;
+    uint64_t start = 0;
+    uint64_t end = (std::numeric_limits<uint64_t>::max)();
+    std::vector<unsigned char> value;
+};
+
+struct ScanRefineRequest {
+    std::optional<uint64_t> expectedEpoch;
+    ScanMode mode = ScanMode::Exact;
+    std::vector<unsigned char> value;
+};
+
+struct ScanResultsRequest {
+    std::optional<uint64_t> expectedEpoch;
+    size_t offset = 0;
+    size_t limit = 100;
+};
+
+struct ScanClearRequest {
+    std::optional<uint64_t> expectedEpoch;
+};
+
+struct ScanSessionSnapshot {
+    uint64_t epoch = 0;
+    ScanStartKind kind = ScanStartKind::Value;
+    ScanDataType dataType = ScanDataType::Dword;
+    ScanMode mode = ScanMode::Exact;
+    ScanMemoryRegion memoryRegion = ScanMemoryRegion::All;
+    uint64_t start = 0;
+    uint64_t end = (std::numeric_limits<uint64_t>::max)();
+    size_t resultCount = 0;
+    TargetSnapshot target;
+};
+
+struct ScanSummary {
+    ScanSessionSnapshot session;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+};
+
+struct ScanResultItem {
+    uint64_t address = 0;
+    uint64_t value = 0;
+};
+
+struct ScanResultPage {
+    std::vector<ScanResultItem> items;
+    size_t total = 0;
+    size_t offset = 0;
+    std::optional<size_t> nextOffset;
+    ScanSessionSnapshot session;
+};
+
+struct ScanClearResult {
+    uint64_t clearedEpoch = 0;
+    uint64_t currentEpoch = 0;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+    TargetSnapshot target;
+};
+
+struct ScanExecutionBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    int resultCount = -1;
+    bool cancelRequested = false;
+};
+
 struct MemoryReadRequest {
     uint64_t address = 0;
     uint32_t size = 0;
@@ -205,6 +326,9 @@ inline constexpr size_t kMaxModulePageSize = 1000;
 inline constexpr size_t kMaxModuleResultCount = 65536;
 inline constexpr size_t kMaxModuleNameBytesTotal = 16u * 1024u * 1024u;
 inline constexpr size_t kMaxPointerOffsetCount = 1024;
+inline constexpr size_t kMaxScanValueBytes = 4096;
+inline constexpr size_t kMaxScanResultPageSize = 1000;
+inline constexpr size_t kMaxScanResultCount = 5000000;
 inline constexpr size_t kMaxTextParameterBytes = 4096;
 inline constexpr size_t kMaxScalarTypeNameBytes = 64;
 inline constexpr size_t kMaxScalarValueTextBytes = 256;

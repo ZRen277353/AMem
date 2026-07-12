@@ -39,6 +39,8 @@ private:
   std::recursive_timed_mutex m_debug_transaction_mutex;
   std::recursive_timed_mutex m_error_transaction_mutex;
 
+  std::atomic<uint64_t> m_scan_epoch{0};
+
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
   WinSocketClientMgr &operator=(const WinSocketClientMgr &) = delete;
@@ -84,6 +86,14 @@ public:
 
   bool IsConnectionPoisoned() const {
     return DeviceSession::GetInstance().IsPoisoned();
+  }
+
+  uint64_t GetScanEpoch() const {
+    return m_scan_epoch.load(std::memory_order_acquire);
+  }
+
+  uint64_t AdvanceScanEpoch() {
+    return m_scan_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
   }
 
 };
@@ -219,6 +229,31 @@ bool ClearScanResult(PortType type = PORT_MAIN);
 typedef void (*ScanProgressCallback)(float progress, uint64_t matchCount,
                                      uint64_t scannedBytes, uint64_t totalBytes,
                                      void *userData);
+
+struct ScanExecutionIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  int resultCount = -1;
+};
+
+ScanExecutionIoResult ScanValueTracked(
+    uint32_t flags, std::vector<unsigned char> &value,
+    ScanProgressCallback callback, void *userData,
+    uint64_t start = 0, uint64_t end = UINT64_MAX,
+    PortType type = PORT_MAIN);
+ScanExecutionIoResult ScanNextValueTracked(
+    std::vector<unsigned char> &value, int flag,
+    ScanProgressCallback callback, void *userData,
+    uint64_t start = 0, uint64_t end = UINT64_MAX,
+    PortType type = PORT_MAIN);
+ScanExecutionIoResult ScanFuzzyValueTracked(
+    uint32_t flags, ScanProgressCallback callback, void *userData,
+    uint64_t start = 0, uint64_t end = UINT64_MAX,
+    PortType type = PORT_MAIN);
+ScanExecutionIoResult ScanHEXValueTracked(
+    uint64_t start, uint64_t end, std::vector<unsigned char> &value,
+    ScanProgressCallback callback, void *userData,
+    PortType type = PORT_MAIN);
 int ScanValueWithProgress(uint32_t flags, std::vector<unsigned char> &Value,
                           ScanProgressCallback callback, void *userData,
                           uint64_t start = 0, uint64_t end = UINT64_MAX,

@@ -3,6 +3,7 @@
 #include "IMemBackend.h"
 #include "IMemService.h"
 
+#include <mutex>
 #include <optional>
 
 namespace Mem {
@@ -28,6 +29,18 @@ public:
     Result<PointerResolution> resolvePointer(
         const OperationContext& context,
         const PointerResolveRequest& request) override;
+    Result<ScanSummary> startScan(
+        const OperationContext& context,
+        const ScanStartRequest& request) override;
+    Result<ScanSummary> refineScan(
+        const OperationContext& context,
+        const ScanRefineRequest& request) override;
+    Result<ScanResultPage> scanResults(
+        const OperationContext& context,
+        const ScanResultsRequest& request) override;
+    Result<ScanClearResult> clearScan(
+        const OperationContext& context,
+        const ScanClearRequest& request) override;
     Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) override;
@@ -48,6 +61,8 @@ private:
                                          bool checkCancellation) const;
 
     IMemBackend& backend_;
+    std::mutex scanMutex_;
+    std::optional<ScanSessionSnapshot> scanSession_;
 };
 
 } // namespace Mem

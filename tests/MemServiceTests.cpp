@@ -98,6 +98,31 @@ public:
     std::unordered_map<uint64_t, uint64_t> pointerMemory;
     int cancelAfterTransactionReads = 0;
     Mem::CancellationToken transactionCancellation;
+    uint64_t scanEpochValue = 0;
+    std::vector<Mem::ScanResultItem> scanResultsData = {
+        {0x1000, 10},
+        {0x2000, 20},
+        {0x3000, 30},
+    };
+    bool scanSetRangeSucceeds = true;
+    bool scanRequestStarted = true;
+    bool scanResponseReceived = true;
+    bool scanCountSucceeds = true;
+    bool scanResultsSucceed = true;
+    bool scanClearSucceeds = true;
+    int scanReportedCount = -1;
+    bool changeTargetAfterScan = false;
+    bool changeGenerationAfterScan = false;
+    Mem::CancellationToken cancelDuringScan;
+    int beginScanTransactionCalls = 0;
+    int scanSetRangeCalls = 0;
+    int scanStartCalls = 0;
+    int scanRefineCalls = 0;
+    int scanCountCalls = 0;
+    int scanResultPageCalls = 0;
+    int scanClearCalls = 0;
+    std::optional<Mem::ScanStartRequest> lastScanStart;
+    std::optional<Mem::ScanRefineRequest> lastScanRefine;
     uint64_t lastReadAddress = 0;
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
@@ -241,6 +266,120 @@ public:
             return nullptr;
         }
         return std::make_unique<ReadTransaction>(*this);
+    }
+
+    class ScanTransaction final : public Mem::IMemScanTransaction {
+    public:
+        explicit ScanTransaction(FakeBackend& backend)
+            : backend_(backend), lock_(backend.transactionMutex) {
+            backend_.transactionActive = true;
+        }
+
+        ~ScanTransaction() override {
+            backend_.transactionActive = false;
+        }
+
+        uint64_t scanEpoch() const override {
+            return backend_.scanEpochValue;
+        }
+
+        bool setRange(Mem::ScanMemoryRegion) override {
+            ++backend_.scanSetRangeCalls;
+            ++backend_.scanEpochValue;
+            return backend_.scanSetRangeSucceeds;
+        }
+
+        Mem::ScanExecutionBackendResult startScan(
+            const Mem::ScanStartRequest& request) override {
+            ++backend_.scanStartCalls;
+            ++backend_.scanEpochValue;
+            backend_.lastScanStart = request;
+            return backend_.scanExecutionResult();
+        }
+
+        Mem::ScanExecutionBackendResult refineScan(
+            const Mem::ScanSessionSnapshot&,
+            const Mem::ScanRefineRequest& request) override {
+            ++backend_.scanRefineCalls;
+            ++backend_.scanEpochValue;
+            backend_.lastScanRefine = request;
+            return backend_.scanExecutionResult();
+        }
+
+        bool scanResultCount(int& count) override {
+            ++backend_.scanCountCalls;
+            if (!backend_.scanCountSucceeds) {
+                return false;
+            }
+            count = static_cast<int>(backend_.scanResultsData.size());
+            return true;
+        }
+
+        bool fetchScanResults(
+            size_t offset,
+            size_t limit,
+            std::vector<Mem::ScanResultItem>& results) override {
+            ++backend_.scanResultPageCalls;
+            if (!backend_.scanResultsSucceed) {
+                return false;
+            }
+            const size_t begin = (std::min)(
+                offset, backend_.scanResultsData.size());
+            const size_t end = begin + (std::min)(
+                limit, backend_.scanResultsData.size() - begin);
+            results.assign(backend_.scanResultsData.begin() + begin,
+                           backend_.scanResultsData.begin() + end);
+            return true;
+        }
+
+        bool clearScan() override {
+            ++backend_.scanClearCalls;
+            ++backend_.scanEpochValue;
+            if (!backend_.scanClearSucceeds) {
+                return false;
+            }
+            backend_.scanResultsData.clear();
+            return true;
+        }
+
+    private:
+        FakeBackend& backend_;
+        std::unique_lock<std::timed_mutex> lock_;
+    };
+
+    Mem::ScanExecutionBackendResult scanExecutionResult() {
+        if (cancelDuringScan) {
+            cancelDuringScan->store(true, std::memory_order_release);
+        }
+        if (changeTargetAfterScan) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterScan) {
+            ++generation;
+        }
+        Mem::ScanExecutionBackendResult result;
+        result.requestStarted = scanRequestStarted;
+        result.responseReceived = scanResponseReceived;
+        result.resultCount = scanReportedCount >= 0
+            ? scanReportedCount
+            : static_cast<int>(scanResultsData.size());
+        result.cancelRequested = cancelDuringScan &&
+            cancelDuringScan->load(std::memory_order_acquire);
+        return result;
+    }
+
+    uint64_t scanEpoch() const override {
+        return scanEpochValue;
+    }
+
+    std::unique_ptr<Mem::IMemScanTransaction> beginScanTransaction(
+        const Mem::OperationContext& context) override {
+        ++beginScanTransactionCalls;
+        if (!context.target || context.connectionGeneration != generation ||
+            targetSnapshot() != *context.target) {
+            return nullptr;
+        }
+        return std::make_unique<ScanTransaction>(*this);
     }
 
     bool readMemory(uint64_t address,
@@ -898,6 +1037,167 @@ void testPointerResolveTransaction() {
                cancelled.error().code == Mem::ErrorCode::CancelRequested &&
                cancelledBackend.transactionReadCalls == 1,
            "pointer transaction must observe cancellation between reads");
+}
+
+void testScanSessionService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    const Mem::OperationContext context = service.captureContext(true);
+
+    Mem::ScanStartRequest startRequest;
+    startRequest.kind = Mem::ScanStartKind::Value;
+    startRequest.dataType = Mem::ScanDataType::Dword;
+    startRequest.mode = Mem::ScanMode::Exact;
+    startRequest.memoryRegion = Mem::ScanMemoryRegion::CHeap;
+    startRequest.start = 0x1000;
+    startRequest.end = 0x9000;
+    startRequest.value = {42, 0, 0, 0};
+    const auto started = service.startScan(context, startRequest);
+    expect(started.ok() && started.value().session.epoch == 2 &&
+               started.value().session.resultCount == 3 &&
+               started.value().session.target == backend.targetSnapshot() &&
+               backend.scanSetRangeCalls == 1 &&
+               backend.scanStartCalls == 1 &&
+               backend.beginScanTransactionCalls == 1 &&
+               backend.lastScanStart &&
+               backend.lastScanStart->memoryRegion ==
+                   Mem::ScanMemoryRegion::CHeap,
+           "scan start should set range and execute inside one tracked session transaction");
+
+    Mem::ScanResultsRequest pageRequest;
+    pageRequest.expectedEpoch = started.value().session.epoch;
+    pageRequest.limit = 2;
+    const auto page = service.scanResults(context, pageRequest);
+    expect(page.ok() && page.value().total == 3 &&
+               page.value().items.size() == 2 &&
+               page.value().items[0].address == 0x1000 &&
+               page.value().nextOffset == 2 &&
+               page.value().session.epoch ==
+                   started.value().session.epoch,
+           "scan results should bind count and page to the expected epoch");
+
+    Mem::ScanRefineRequest staleRefine;
+    staleRefine.expectedEpoch = started.value().session.epoch - 1;
+    staleRefine.mode = Mem::ScanMode::Changed;
+    const int refineCallsBeforeStale = backend.scanRefineCalls;
+    const auto stale = service.refineScan(context, staleRefine);
+    expect(!stale.ok() &&
+               stale.error().code == Mem::ErrorCode::ScanSessionChanged &&
+               backend.scanRefineCalls == refineCallsBeforeStale,
+           "stale scan epochs must fail before backend access");
+
+    Mem::ScanRefineRequest refine;
+    refine.expectedEpoch = started.value().session.epoch;
+    refine.mode = Mem::ScanMode::Changed;
+    const auto refined = service.refineScan(context, refine);
+    expect(refined.ok() && refined.value().session.epoch == 3 &&
+               backend.lastScanRefine &&
+               backend.lastScanRefine->value ==
+                   std::vector<unsigned char>({0, 0, 0, 0}),
+           "valueless refine modes should use a typed protocol placeholder");
+
+    pageRequest.expectedEpoch = started.value().session.epoch;
+    const auto oldPage = service.scanResults(context, pageRequest);
+    expect(!oldPage.ok() &&
+               oldPage.error().code == Mem::ErrorCode::ScanSessionChanged,
+           "refine must invalidate prior scan epoch receipts");
+
+    pageRequest.expectedEpoch = refined.value().session.epoch;
+    ++backend.scanEpochValue;
+    const auto externallyChanged = service.scanResults(context, pageRequest);
+    expect(!externallyChanged.ok() &&
+               externallyChanged.error().code ==
+                   Mem::ErrorCode::ScanSessionChanged,
+           "legacy GUI or IPC scan mutations must invalidate native sessions");
+
+    const auto restarted = service.startScan(context, startRequest);
+    expect(restarted.ok(), "scan start should replace an invalidated session");
+    Mem::ScanClearRequest clearRequest;
+    clearRequest.expectedEpoch = restarted.value().session.epoch;
+    const auto cleared = service.clearScan(context, clearRequest);
+    expect(cleared.ok() &&
+               cleared.value().clearedEpoch ==
+                   restarted.value().session.epoch &&
+               backend.scanResultsData.empty() &&
+               backend.scanClearCalls == 1,
+           "scan clear should verify the remote result set is empty");
+    const auto afterClear = service.scanResults(context, pageRequest);
+    expect(!afterClear.ok() &&
+               afterClear.error().code == Mem::ErrorCode::NoScanSession,
+           "cleared sessions must not remain readable");
+
+    FakeBackend unknownBackend;
+    Mem::MemService unknownService(unknownBackend);
+    Mem::ScanStartRequest unknownRequest;
+    unknownRequest.kind = Mem::ScanStartKind::Unknown;
+    unknownRequest.dataType = Mem::ScanDataType::Qword;
+    unknownRequest.mode = Mem::ScanMode::Unknown;
+    const auto unknown = unknownService.startScan(
+        unknownService.captureContext(true), unknownRequest);
+    expect(unknown.ok() && unknownBackend.lastScanStart &&
+               unknownBackend.lastScanStart->value.empty(),
+           "unknown scan starts should not require a comparison value");
+
+    Mem::ScanStartRequest patternRequest;
+    patternRequest.kind = Mem::ScanStartKind::BytePattern;
+    patternRequest.dataType = Mem::ScanDataType::Bytes;
+    patternRequest.mode = Mem::ScanMode::Exact;
+    patternRequest.value = {0xDE, 0xAD};
+    const auto pattern = unknownService.startScan(
+        unknownService.captureContext(true), patternRequest);
+    expect(pattern.ok(), "byte-pattern scan start should be supported");
+
+    Mem::ScanStartRequest invalidBetween = startRequest;
+    invalidBetween.mode = Mem::ScanMode::Between;
+    const int beginBeforeInvalid = backend.beginScanTransactionCalls;
+    const auto invalid = service.startScan(context, invalidBetween);
+    expect(!invalid.ok() &&
+               invalid.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.beginScanTransactionCalls == beginBeforeInvalid,
+           "invalid between values must fail before acquiring a transaction");
+
+    FakeBackend unknownCompletionBackend;
+    Mem::MemService unknownCompletionService(unknownCompletionBackend);
+    unknownCompletionBackend.scanResponseReceived = false;
+    const auto completionUnknown = unknownCompletionService.startScan(
+        unknownCompletionService.captureContext(true), startRequest);
+    expect(!completionUnknown.ok() &&
+               completionUnknown.error().code ==
+                   Mem::ErrorCode::CompletionUnknown &&
+               !completionUnknown.error().retryable,
+           "sent scans without a terminal count must be completion_unknown");
+
+    FakeBackend cancelledBackend;
+    Mem::MemService cancelledService(cancelledBackend);
+    Mem::OperationContext cancelledContext =
+        cancelledService.captureContext(true);
+    cancelledContext.cancellation =
+        std::make_shared<std::atomic<bool>>(false);
+    cancelledBackend.cancelDuringScan = cancelledContext.cancellation;
+    const auto completedAfterCancel = cancelledService.startScan(
+        cancelledContext, startRequest);
+    expect(completedAfterCancel.ok() &&
+               completedAfterCancel.value().completedAfterCancelRequest,
+           "confirmed scan completion must remain visible after cancellation request");
+
+    FakeBackend targetChangedBackend;
+    Mem::MemService targetChangedService(targetChangedBackend);
+    targetChangedBackend.changeTargetAfterScan = true;
+    const auto targetChanged = targetChangedService.startScan(
+        targetChangedService.captureContext(true), startRequest);
+    expect(!targetChanged.ok() &&
+               targetChanged.error().code == Mem::ErrorCode::TargetChanged,
+           "scan completion must be rejected when the target changes");
+
+    FakeBackend generationChangedBackend;
+    Mem::MemService generationChangedService(generationChangedBackend);
+    generationChangedBackend.changeGenerationAfterScan = true;
+    const auto generationChanged = generationChangedService.startScan(
+        generationChangedService.captureContext(true), startRequest);
+    expect(!generationChanged.ok() &&
+               generationChanged.error().code ==
+                   Mem::ErrorCode::ConnectionChanged,
+           "scan completion must be rejected after reconnect");
 }
 
 void testHiddenToolRegistration() {
@@ -1749,6 +2049,7 @@ int main() {
         {"typed memory service", &testTypedMemoryService},
         {"module list and resolve", &testModuleListAndResolve},
         {"pointer resolve transaction", &testPointerResolveTransaction},
+        {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
         {"device session lifecycle", &testDeviceSessionLifecycle},

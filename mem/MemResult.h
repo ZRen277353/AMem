@@ -18,6 +18,8 @@ enum class ErrorCode {
     Timeout,
     CancelRequested,
     CompletionUnknown,
+    NoScanSession,
+    ScanSessionChanged,
     ProtocolError,
     Unsupported,
     PermissionDenied,
@@ -35,6 +37,8 @@ inline const char* errorCodeName(ErrorCode code) {
         case ErrorCode::Timeout:             return "timeout";
         case ErrorCode::CancelRequested:     return "cancel_requested";
         case ErrorCode::CompletionUnknown:   return "completion_unknown";
+        case ErrorCode::NoScanSession:      return "no_scan_session";
+        case ErrorCode::ScanSessionChanged: return "scan_session_changed";
         case ErrorCode::ProtocolError:       return "protocol_error";
         case ErrorCode::Unsupported:         return "unsupported";
         case ErrorCode::PermissionDenied:    return "permission_denied";
