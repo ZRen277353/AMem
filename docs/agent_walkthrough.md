@@ -479,9 +479,9 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。其线程安全 snapshot 另提供 idle/handshaking/serving/stopping/failed phase、established/completed count、活动 client identity/capability、最后 handshake/session 状态和 request/response/cancel 计数；不会保存 params/result，session 结束后清活动身份。`SystemNativeAgentRuntime` 只在用户打开控制窗口时延迟构造；`NativeAgentIpcWindow` 显示这些状态并提供“启用/停止”。编译选项和运行状态都默认关闭，`main.cpp` 不调用 `start()`，只在设备断连前 shutdown。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前 runtime 尚未接入 privileged broker，因而 GUI 明确显示 Observe-only，调试默认应用时看不到 pipe 是预期现状。
+`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 会获得 server 分配的单调 session id；stop/start 清诊断计数但不复用 id。其线程安全 snapshot 另提供 idle/handshaking/serving/stopping/failed phase、established/completed count、当前/最近 session id、活动 client identity/capability、最后 handshake/session 状态和 request/response/cancel 计数；不会保存 params/result，session 结束后清活动身份。`SystemNativeAgentRuntime` 先构造 broker 再构造 runtime，并保证 runtime 先析构；`NativeAgentIpcWindow` 显示这些状态并提供“启用/停止”。编译选项和运行状态都默认关闭，`main.cpp` 不调用 `start()`，只在设备断连前 shutdown。handler 与 accept 共用同一 owned thread，request session 的 dispatch worker 也由 session 拥有并在退出时 join。当前 runtime 只接入 broker 的 session cancellation，因而 GUI 仍明确显示 Observe-only，调试默认应用时看不到 pipe 是预期现状。
 
-privileged broker 当前只接到管理面，不在请求执行链上。它从 catalog 推导 capability/target policy，以 `{sessionId, requestId}` 去重，把 connection/target/deadline 固定在不含 params/result 的 bounded record 中。system owner 延迟创建 broker；窗口 refresh 会 expire/invalidate，表格只显示 client/method/capability/target/remaining time，approve/deny 捕获最新 context。Stop/退出 cancel 全部 live record。approved 不是执行证明，未来 executor 仍必须调用一次 `consume()`，在 send 前再次复核 generation/target，随后 grant 不可重用。当前没有产品 submission、持久化 sink、session cancel wiring 或 dispatcher adapter，Hello 仍只 grant Observe。
+privileged broker 当前接到管理面和 session 生命周期，但不在请求执行链上。它从 catalog 推导 capability/target policy，以 `{sessionId, requestId}` 去重，把 connection/target/deadline 固定在不含 params/result 的 bounded record 中。system owner 延迟创建 broker；窗口 refresh 会 expire/invalidate，表格只显示 client/method/capability/target/remaining time，approve/deny 捕获最新 context。Stop/退出 cancel 全部 live record；每个 established session 的断开、target/session invalidation、异常和 Stop 退出还会用 server id 精确 `cancelSession()`。approved 不是执行证明，未来 executor 仍必须调用一次 `consume()`，在 send 前再次复核 generation/target，随后 grant 不可重用。当前没有产品 submission、持久化 sink 或 dispatcher consume adapter，Hello 仍只 grant Observe。
 
 ### 9.2 默认关闭的 legacy HTTP 路径
 
@@ -592,13 +592,13 @@ client timeout 不会取消旧 C++ handler。没有 server request id/cancellati
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 7 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 7 组 runtime 测试。broker 新增 cancel-all；gate 固定 bounded GUI decision、窗口无 params/results、approval-aware Stop 和 Observe-only Hello。Debug/Release 当前各有 15 项 CTest。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组已覆盖地址/scalar codec、driver receipt/card redaction、进程与模块分页/解析、事务化 pointer resolution、disassembly、scan/symbol session/full-table transaction、breakpoint receipt/rich hit batch、scan 取消/完成未知、mutation audit 脱敏/轮转/晚到持久化、原生 service/adapter、raw/typed write 完成语义、target/generation、连接 lifecycle、工具排队/active cancellation、deadline、shutdown join 和退役工具历史降级。Native IPC 另有 7 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 9 组 runtime 测试。runtime 覆盖 session close/invalidation 精确取消 broker record 和 restart 不复用 server session id；gate 固定 broker 注入、session cancellation、禁止 runtime submission、bounded GUI decision、窗口无 params/results、approval-aware Stop 和 Observe-only Hello。Debug/Release 当前各有 15 项 CTest。其余测试优先从无设备依赖的边界开始：
 
 1. 用固定 SSE corpus 覆盖完整/截断/重复 terminal/malformed/non-SSE 2xx。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
 3. 用损坏/错误类型 JSON 覆盖三个配置管理器和会话索引。
 4. 用 fake socket 构造 timeout 后迟到响应、partial send/recv 和 reconnect generation。
-5. 为 Native IPC broker submission、session cancel、dispatcher、持久化审计和真实 send-boundary consume 建立集成测试；bounded GUI decision/Stop gate 与 broker core 已有无设备测试。
+5. 为 Native IPC broker submission、dispatcher、持久化审计和真实 send-boundary consume 建立集成测试；server session id/cancel、bounded GUI decision/Stop gate 与 broker core 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
 7. 自动提取并比较内置 Agent/IPC capability、结果契约和 feature gate。
 

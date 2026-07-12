@@ -1,16 +1,16 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/Hello/request session/catalog/Observe adapter/安全 transport/owned runtime/显式 GUI control/privileged broker management surface 已落地
+状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 删除、HTTP IPC default-off gate、native IPC framing/Hello/request session/catalog/Observe adapter/安全 transport/owned runtime/显式 GUI control/privileged broker management surface/server session binding 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
 最后更新：2026-07-13
 
-本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；Named Pipe 的 framing、有界 I/O、Observe-only Hello、严格 request session、安全 transport、owned runtime composition、显式 GUI control 和 privileged broker management surface 已落地。编译和运行均默认关闭，用户只能显式启用 Observe；broker 尚无产品 submission/consume 链。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
+本文给出从原 AI Chat + HTTP IPC + Python MCP 基线迁移到“内置原生内存工具 Agent”的实施方案。Python MCP 已删除，HTTP IPC 仍待替换或删除；Named Pipe 的 framing、有界 I/O、Observe-only Hello、严格 request session、安全 transport、owned runtime composition、显式 GUI control、privileged broker management surface 和 server session binding 已落地。编译和运行均默认关闭，用户只能显式启用 Observe；broker 尚无产品 submission/consume 链。当前实现和真实调用链见 [`agent_architecture.md`](./agent_architecture.md) 与 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认问题见 [`agent_project_issues.md`](./agent_project_issues.md)。
 
 ## 0. 当前进度
 
-截至 2026-07-13 已完成三十个纵向切片：
+截至 2026-07-13 已完成三十一个纵向切片：
 
 - 新增 `MemResult`、`TargetSnapshot`、`OperationContext`、`IMemBackend`、`IMemService` 和可注入的 `MemService`。
 - `DeviceSession` 统一维护 shared request lease、exclusive lifecycle gate、单调 `connectionGeneration` 和 poison 状态；timeout、EOF 或 partial I/O 失败后旧连接不再复用。
@@ -48,9 +48,10 @@
 - `SystemNativeAgentRuntime` 延迟构造产品 owner；`NativeAgentIpcWindow` 显示 server/phase/client/session/request 状态并提供显式启停。应用启动仍不监听；main 只在 device disconnect 前 shutdown。GUI 与 gate 明确显示 Observe-only/privileged disabled。
 - `IpcApprovalBroker` 固定 pending/approved/denied/invalidated/expired/cancelled/consumed 单向状态；catalog 决定 capability/target policy，记录不含 params/results，live/history 有界。approved 在一次性 consume 前仍会因 generation/target/deadline/session 失效，audit callback 在 broker 锁外执行。
 - system owner 延迟持有 broker；GUI refresh/decision 只消费 bounded record，Stop/shutdown cancel-all。静态 gate 禁止窗口引用 params/results 并固定 Hello Observe-only；当前无 product submission/consume。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 7 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 7 组 runtime 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 15 项 CTest。
+- 每次成功 Hello 分配 server-owned 单调 session id，stop/start 不复用 id；runtime 持有同一个 system broker 的非 owning 引用，每个 established session 的关闭、target/session invalidation、异常和 Stop 退出都精确 `cancelSession()`。snapshot 与 GUI 只显示当前/最近 id，不保存请求内容；runtime 仍禁止 submission。
+- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 7 组 approval-broker、5 组 protocol、5 组 transport、7 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、5 组 MemService-dispatcher 和 9 组 runtime 测试，catalog、no-Python-MCP、legacy/native IPC gate 固定其余边界，共 15 项 CTest。
 
-尚未完成：HTTP IPC transport 的最终删除；Native IPC broker 的 submission/session/dispatcher/persistent-audit 接入与 GUI click smoke；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、共享 JSON adapter、24-name catalog、12 Observe service adapter、session target/generation invalidation、owned runtime composition、显式 Observe GUI control、privileged broker management surface、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/session/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
+尚未完成：HTTP IPC transport 的最终删除；Native IPC broker 的 request submission/dispatcher consume/persistent-audit 接入与 GUI click smoke；不同用户/remote 负向集成测试；以及连接层 fake transport 的 timeout/迟到字节测试。规范模型目录、共享 JSON adapter、24-name catalog、12 Observe service adapter、session target/generation invalidation、owned runtime composition、server session binding/cancellation、显式 Observe GUI control、privileged broker management surface、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭、native framing/session/安全 transport、所有当前内置工具的 service/host target 边界、Stop 后 mutation 独立审计和 GUI breakpoint/symbol/scan 迁移已经完成。因此 A-02、A-03 与 A-07 已关闭；A-01、A-06、A-19、A-20 仍只能视为部分修复。
 
 ## 1. 结论
 
@@ -492,7 +493,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - [x] 实现 compile-time opt-in、runtime default-stopped 的 GUI enable/status，延迟构造 system owner，并在 device disconnect 前 shutdown。
 - [x] 固定不含 params/results 的 approval DTO、有界状态/历史、one-shot consume grant、target/generation/session/deadline invalidation 与 audit sink 接口。
 - [x] system owner/GUI 接入 bounded pending snapshot、approve/deny、refresh invalidation 与 Stop/shutdown cancel-all；gate 保证 UI 无 params/results 且 Hello 仍 Observe-only。
-- 有 privileged 外部调用需求时继续接入 request submission、session lifecycle、dispatcher send boundary 与持久化审计；完成前不 grant privileged capability。
+- [x] runtime 为成功 Hello 分配跨 restart 单调 session id，并在 session close/invalidation/Stop 时精确取消绑定审批；gate 禁止 runtime 提交审批。
+- 有 privileged 外部调用需求时继续接入 request submission、dispatcher consume/send boundary 与持久化审计；完成前不 grant privileged capability。
 - 没有需求时直接移除 IPC source 和 CMake wiring。
 
 退出条件：端口 28100 不再监听；不存在无审批的外部 target mutation 路径。
@@ -652,4 +654,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第三十批接入 privileged broker management surface。system owner 延迟持有 broker，窗口 refresh 先 expire 并按最新 `SystemMemService` context invalidate，再从 record 副本显示 pending client/method/capability/target/remaining deadline；approve/deny 只调用 facade decision，不执行工具。Stop button 与 main shutdown 在停 pipe 前 `cancelAll()` pending/approved。新增第 7 组 broker 测试固定 cancel-all 单向/idempotent；native gate 读取 window/owner/handshake source，要求 decision/approval-aware Stop，禁止 `params`/`resultJson`，并固定 Hello grant 仍只接受 Observe。Debug/Release 完整 15/15，broker 压力 100/100，fresh opt-in GUI control 静态编译通过；尚未执行真实 GUI click smoke。
 
-三十个切片已落地。模型可见规范目录、共享 JSON adapter、完整 IPC catalog、12 Observe service dispatch、session generation invalidation、owned runtime composition、显式 Observe GUI control、privileged broker management surface、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭与 native transport/session 基础均已完成。下一批应先设计 privileged Request 如何在不阻塞 reader/Cancel 的前提下提交 broker，并把 session close/invalidation 精确映射到 broker session id；仍不修改 Hello grant。随后再接 persistent audit 和 dispatcher consume/send boundary。整条链完成前 `TargetSelection`、`TargetMutation` 与 `HostExecution` 仍永久 denied。legacy HTTP IPC 仍待最终删除。
+第三十一批把 broker 绑定到 server session 生命周期。每次成功 Hello 由 runtime 分配单调 `uint64_t` session id；restart 清空本轮诊断，但 id 继续递增，避免旧审批与新连接重合。system owner 保证 broker 先构造、后析构，并把同一实例注入 runtime；每个 established session 的正常关闭、target/session invalidation、handler 异常和 Stop 退出都在清 runtime 状态前按 id `cancelSession()`。snapshot/GUI 增加当前与最近 session id。新增 2 组 runtime 测试，合计 9 组，覆盖 close/invalidation cancellation 与 restart 不复用；native gate 固定 broker 注入和 cancellation，并禁止 runtime 调用 `submit()`。Debug/Release 完整 15/15，runtime 压力 50/50，fresh `ENABLE_NATIVE_IPC=ON` GUI control 编译通过。Hello 仍只 grant Observe，runtime 没有 submission/consume。
+
+三十一个切片已落地。模型可见规范目录、共享 JSON adapter、完整 IPC catalog、12 Observe service dispatch、session generation invalidation、owned runtime composition、server session binding/cancellation、显式 Observe GUI control、privileged broker management surface、当前所有内置工具的 target/send 边界、Stop 后 mutation 审计、退役历史兼容、Python MCP 删除、HTTP IPC 默认关闭与 native transport/session 基础均已完成。下一批应设计 privileged Request 如何在不阻塞 reader/Cancel 的前提下提交 broker；仍不修改 Hello grant。随后再接 persistent audit 和 dispatcher consume/send boundary。整条链完成前 `TargetSelection`、`TargetMutation` 与 `HostExecution` 仍永久 denied。legacy HTTP IPC 仍待最终删除。
