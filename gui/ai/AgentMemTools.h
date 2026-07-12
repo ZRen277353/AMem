@@ -29,6 +29,14 @@ public:
     std::string pointerResolve(const std::string& argsJson,
                                bool allowLegacyArguments,
                                const Mem::OperationContext& context);
+    std::string scanStart(const std::string& argsJson,
+                          const Mem::OperationContext& context);
+    std::string scanRefine(const std::string& argsJson,
+                           const Mem::OperationContext& context);
+    std::string scanResults(const std::string& argsJson,
+                            const Mem::OperationContext& context);
+    std::string scanClear(const std::string& argsJson,
+                          const Mem::OperationContext& context);
     std::string memoryRead(const std::string& argsJson,
                            bool allowLegacyAddress,
                            const Mem::OperationContext& context);

@@ -1738,6 +1738,83 @@ void testAgentAdapter() {
                legacyEmptyPointer.at("dereference_count") == 0,
            "hidden resolve_offset_chain should retain empty-chain behavior");
 
+    const json strictScanRange = json::parse(
+        tools.scanStart(
+            R"({"mode":"exact","data_type":"dword","value":42,"start":"1000"})",
+            targetContext));
+    expect(!strictScanRange.at("success").get<bool>() &&
+               strictScanRange.at("error").at("code") ==
+                   "invalid_argument",
+           "canonical scan_start should require 0x-prefixed ranges");
+
+    const json ambiguousUnknownScan = json::parse(
+        tools.scanStart(
+            R"({"mode":"unknown","data_type":"dword","value":42})",
+            targetContext));
+    expect(!ambiguousUnknownScan.at("success").get<bool>() &&
+               ambiguousUnknownScan.at("error").at("code") ==
+                   "invalid_argument",
+           "scan_start should reject ignored values in unknown mode");
+
+    const json scanStart = json::parse(
+        tools.scanStart(
+            R"({"mode":"exact","data_type":"dword","value":42,"memory_type":"c_heap","start":"0x1000","end":"0x9000"})",
+            targetContext));
+    const uint64_t scanEpoch = scanStart.at("scan_epoch").get<uint64_t>();
+    expect(scanStart.at("success").get<bool>() && scanEpoch == 2 &&
+               scanStart.at("result_count") == 3 &&
+               scanStart.at("completion") == "completed" &&
+               backend.lastScanStart &&
+               backend.lastScanStart->value ==
+                   std::vector<unsigned char>({42, 0, 0, 0}),
+           "scan_start adapter should normalize one complete scan request");
+
+    const json scanPage = json::parse(
+        tools.scanResults(
+            std::string("{\"scan_epoch\":") +
+                std::to_string(scanEpoch) + ",\"count\":2}",
+            targetContext));
+    expect(scanPage.at("success").get<bool>() &&
+               scanPage.at("total") == 3 && scanPage.at("count") == 2 &&
+               scanPage.at("next_cursor") == 2 &&
+               scanPage.at("items").at(0).at("address") == "0x1000" &&
+               scanPage.at("items").at(0).at("value_text") == "10",
+           "scan_results adapter should expose bounded structured pages");
+
+    const json staleScanRefine = json::parse(
+        tools.scanRefine(
+            std::string("{\"scan_epoch\":") +
+                std::to_string(scanEpoch - 1) +
+                ",\"mode\":\"changed\",\"data_type\":\"dword\"}",
+            targetContext));
+    expect(!staleScanRefine.at("success").get<bool>() &&
+               staleScanRefine.at("error").at("code") ==
+                   "scan_session_changed",
+           "scan_refine adapter should reject stale epochs");
+
+    const json scanRefine = json::parse(
+        tools.scanRefine(
+            std::string("{\"scan_epoch\":") +
+                std::to_string(scanEpoch) +
+                ",\"mode\":\"changed\",\"data_type\":\"dword\"}",
+            targetContext));
+    const uint64_t refinedEpoch =
+        scanRefine.at("scan_epoch").get<uint64_t>();
+    expect(scanRefine.at("success").get<bool>() &&
+               refinedEpoch == scanEpoch + 1 &&
+               scanRefine.at("mode") == "changed",
+           "scan_refine adapter should return the replacement epoch");
+
+    const json scanClear = json::parse(
+        tools.scanClear(
+            std::string("{\"scan_epoch\":") +
+                std::to_string(refinedEpoch) + "}",
+            targetContext));
+    expect(scanClear.at("success").get<bool>() &&
+               scanClear.at("cleared").get<bool>() &&
+               scanClear.at("cleared_epoch") == refinedEpoch,
+           "scan_clear adapter should confirm the expected session was cleared");
+
     backend.connected = false;
     const json disconnected = json::parse(
         tools.processList("{}", connectionContext));

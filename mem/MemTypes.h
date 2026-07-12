@@ -193,6 +193,7 @@ struct ScanStartRequest {
 
 struct ScanRefineRequest {
     std::optional<uint64_t> expectedEpoch;
+    std::optional<ScanDataType> dataType;
     ScanMode mode = ScanMode::Exact;
     std::vector<unsigned char> value;
 };

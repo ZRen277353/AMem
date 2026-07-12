@@ -5,6 +5,7 @@
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -195,6 +196,213 @@ std::string pointerModuleNameArgument(const json& args,
                 : "module_name must be a non-empty string");
     }
     return name;
+}
+
+std::string lowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    return value;
+}
+
+uint64_t scanEpochArgument(const json& args) {
+    if (!args.contains("scan_epoch")) {
+        throw std::runtime_error("scan_epoch is required");
+    }
+    const json& value = args.at("scan_epoch");
+    if (value.is_number_unsigned()) {
+        return value.get<uint64_t>();
+    }
+    if (value.is_number_integer()) {
+        const long long epoch = value.get<long long>();
+        if (epoch >= 0) {
+            return static_cast<uint64_t>(epoch);
+        }
+    }
+    throw std::runtime_error("scan_epoch must be a non-negative integer");
+}
+
+Mem::ScanMode scanModeArgument(const json& args,
+                               const char* fallback = "exact") {
+    std::string mode = optionalString(args, "mode");
+    if (mode.empty()) {
+        mode = fallback;
+    }
+    mode = lowerAscii(mode);
+    if (mode == "exact") return Mem::ScanMode::Exact;
+    if (mode == "greater") return Mem::ScanMode::Greater;
+    if (mode == "less") return Mem::ScanMode::Less;
+    if (mode == "between") return Mem::ScanMode::Between;
+    if (mode == "unknown") return Mem::ScanMode::Unknown;
+    if (mode == "increased") return Mem::ScanMode::Increased;
+    if (mode == "increased_by") return Mem::ScanMode::IncreasedBy;
+    if (mode == "decreased") return Mem::ScanMode::Decreased;
+    if (mode == "decreased_by") return Mem::ScanMode::DecreasedBy;
+    if (mode == "changed") return Mem::ScanMode::Changed;
+    if (mode == "unchanged") return Mem::ScanMode::Unchanged;
+    throw std::runtime_error("unsupported scan mode: " + mode);
+}
+
+const char* scanModeName(Mem::ScanMode mode) {
+    switch (mode) {
+        case Mem::ScanMode::Exact:       return "exact";
+        case Mem::ScanMode::Greater:     return "greater";
+        case Mem::ScanMode::Less:        return "less";
+        case Mem::ScanMode::Between:     return "between";
+        case Mem::ScanMode::Unknown:     return "unknown";
+        case Mem::ScanMode::Increased:   return "increased";
+        case Mem::ScanMode::IncreasedBy: return "increased_by";
+        case Mem::ScanMode::Decreased:   return "decreased";
+        case Mem::ScanMode::DecreasedBy: return "decreased_by";
+        case Mem::ScanMode::Changed:     return "changed";
+        case Mem::ScanMode::Unchanged:   return "unchanged";
+        default:                         return "unknown";
+    }
+}
+
+Mem::ScanDataType scanDataTypeFromScalar(Mem::ScalarType type) {
+    switch (type) {
+        case Mem::ScalarType::Byte:   return Mem::ScanDataType::Byte;
+        case Mem::ScalarType::Word:   return Mem::ScanDataType::Word;
+        case Mem::ScalarType::Dword:  return Mem::ScanDataType::Dword;
+        case Mem::ScalarType::Qword:  return Mem::ScanDataType::Qword;
+        case Mem::ScalarType::Xor:    return Mem::ScanDataType::Xor;
+        case Mem::ScalarType::Float:  return Mem::ScanDataType::Float;
+        case Mem::ScalarType::Double: return Mem::ScanDataType::Double;
+        default:                      return Mem::ScanDataType::Dword;
+    }
+}
+
+Mem::Result<Mem::ScalarType> scanScalarTypeArgument(const json& args) {
+    std::string type = optionalString(args, "data_type");
+    if (type.empty()) {
+        type = "dword";
+    }
+    return Mem::parseScalarType(type);
+}
+
+std::string scanScalarText(const json& args, const char* key) {
+    if (!args.contains(key)) {
+        throw std::runtime_error(std::string(key) + " is required");
+    }
+    const json& value = args.at(key);
+    std::string text;
+    if (value.is_string()) {
+        text = value.get<std::string>();
+    } else if (value.is_number_unsigned()) {
+        text = std::to_string(value.get<unsigned long long>());
+    } else if (value.is_number_integer()) {
+        text = std::to_string(value.get<long long>());
+    } else if (value.is_number_float()) {
+        text = value.dump();
+    } else {
+        throw std::runtime_error(std::string(key) +
+                                 " must be a string or number");
+    }
+    if (text.size() > Mem::kMaxScalarValueTextBytes) {
+        throw std::runtime_error(std::string(key) + " exceeds 256 bytes");
+    }
+    return text;
+}
+
+Mem::ScanMemoryRegion scanMemoryRegionArgument(const json& args) {
+    std::string region = optionalString(args, "memory_type");
+    if (region.empty()) region = "all";
+    region = lowerAscii(region);
+    if (region == "all") return Mem::ScanMemoryRegion::All;
+    if (region == "anonymous") return Mem::ScanMemoryRegion::Anonymous;
+    if (region == "c_alloc") return Mem::ScanMemoryRegion::CAlloc;
+    if (region == "c_heap") return Mem::ScanMemoryRegion::CHeap;
+    if (region == "c_data") return Mem::ScanMemoryRegion::CData;
+    if (region == "c_bss") return Mem::ScanMemoryRegion::CBss;
+    if (region == "java_heap") return Mem::ScanMemoryRegion::JavaHeap;
+    if (region == "java") return Mem::ScanMemoryRegion::Java;
+    if (region == "stack") return Mem::ScanMemoryRegion::Stack;
+    if (region == "video") return Mem::ScanMemoryRegion::Video;
+    if (region == "code_app") return Mem::ScanMemoryRegion::CodeApp;
+    if (region == "code_system") return Mem::ScanMemoryRegion::CodeSystem;
+    if (region == "ashmem") return Mem::ScanMemoryRegion::Ashmem;
+    if (region == "bad") return Mem::ScanMemoryRegion::Bad;
+    if (region == "other") return Mem::ScanMemoryRegion::Other;
+    throw std::runtime_error("unsupported memory_type: " + region);
+}
+
+const char* scanMemoryRegionName(Mem::ScanMemoryRegion region) {
+    switch (region) {
+        case Mem::ScanMemoryRegion::All:        return "all";
+        case Mem::ScanMemoryRegion::Anonymous:  return "anonymous";
+        case Mem::ScanMemoryRegion::CAlloc:     return "c_alloc";
+        case Mem::ScanMemoryRegion::CHeap:      return "c_heap";
+        case Mem::ScanMemoryRegion::CData:      return "c_data";
+        case Mem::ScanMemoryRegion::CBss:       return "c_bss";
+        case Mem::ScanMemoryRegion::JavaHeap:   return "java_heap";
+        case Mem::ScanMemoryRegion::Java:       return "java";
+        case Mem::ScanMemoryRegion::Stack:      return "stack";
+        case Mem::ScanMemoryRegion::Video:      return "video";
+        case Mem::ScanMemoryRegion::CodeApp:    return "code_app";
+        case Mem::ScanMemoryRegion::CodeSystem: return "code_system";
+        case Mem::ScanMemoryRegion::Ashmem:     return "ashmem";
+        case Mem::ScanMemoryRegion::Bad:        return "bad";
+        case Mem::ScanMemoryRegion::Other:      return "other";
+        default:                                return "unknown";
+    }
+}
+
+const char* scanDataTypeName(Mem::ScanDataType type) {
+    switch (type) {
+        case Mem::ScanDataType::Byte:   return "byte";
+        case Mem::ScanDataType::Word:   return "word";
+        case Mem::ScanDataType::Dword:  return "dword";
+        case Mem::ScanDataType::Qword:  return "qword";
+        case Mem::ScanDataType::Xor:    return "xor";
+        case Mem::ScanDataType::Float:  return "float";
+        case Mem::ScanDataType::Double: return "double";
+        case Mem::ScanDataType::Bytes:  return "bytes";
+        default:                        return "unknown";
+    }
+}
+
+const char* scanKindName(Mem::ScanStartKind kind) {
+    switch (kind) {
+        case Mem::ScanStartKind::Value:       return "value";
+        case Mem::ScanStartKind::Unknown:     return "unknown";
+        case Mem::ScanStartKind::BytePattern: return "byte_pattern";
+        default:                              return "unknown";
+    }
+}
+
+void parseCanonicalScanRange(const json& args,
+                             uint64_t& start,
+                             uint64_t& end) {
+    start = 0;
+    end = (std::numeric_limits<uint64_t>::max)();
+    if (args.contains("start") && !args.at("start").is_null()) {
+        const auto parsed = parseAddressArgument(args.at("start"), false);
+        if (!parsed.ok()) throw std::runtime_error(parsed.error().message);
+        start = parsed.value();
+    }
+    if (args.contains("end") && !args.at("end").is_null()) {
+        const auto parsed = parseAddressArgument(args.at("end"), false);
+        if (!parsed.ok()) throw std::runtime_error(parsed.error().message);
+        end = parsed.value();
+    }
+    if (start > end) {
+        throw std::runtime_error("scan start must be <= end");
+    }
+}
+
+json scanSessionJson(const Mem::ScanSessionSnapshot& session) {
+    return {
+        {"scan_epoch", session.epoch},
+        {"kind", scanKindName(session.kind)},
+        {"data_type", scanDataTypeName(session.dataType)},
+        {"mode", scanModeName(session.mode)},
+        {"memory_type", scanMemoryRegionName(session.memoryRegion)},
+        {"start", Mem::formatAddress(session.start)},
+        {"end", Mem::formatAddress(session.end)},
+        {"result_count", session.resultCount},
+    };
 }
 
 std::string writeHexArgument(const json& args, bool allowLegacyArguments) {
@@ -616,6 +824,260 @@ std::string AgentMemTools::pointerResolve(
         return exceptionResult(
             allowLegacyArguments ? "resolve_offset_chain" : "pointer_resolve",
             error);
+    }
+}
+
+std::string AgentMemTools::scanStart(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ScanStartRequest request;
+        request.memoryRegion = scanMemoryRegionArgument(args);
+        parseCanonicalScanRange(args, request.start, request.end);
+
+        if (args.contains("pattern_hex") &&
+            !args.at("pattern_hex").is_null()) {
+            if (args.contains("value") || args.contains("upper_value") ||
+                args.contains("data_type")) {
+                throw std::runtime_error(
+                    "pattern_hex cannot be combined with scalar scan fields");
+            }
+            if (!args.at("pattern_hex").is_string()) {
+                throw std::runtime_error("pattern_hex must be a string");
+            }
+            const std::string pattern =
+                args.at("pattern_hex").get<std::string>();
+            if (pattern.size() > 16u * 1024u) {
+                throw std::runtime_error("pattern_hex exceeds 16384 bytes");
+            }
+            request.kind = Mem::ScanStartKind::BytePattern;
+            request.dataType = Mem::ScanDataType::Bytes;
+            request.mode = scanModeArgument(args, "exact");
+            request.value = parseHexBytes(pattern);
+        } else {
+            const auto scalarType = scanScalarTypeArgument(args);
+            if (!scalarType.ok()) {
+                return errorResult(scalarType.error(),
+                                   scalarType.durationMs());
+            }
+            request.dataType = scanDataTypeFromScalar(scalarType.value());
+            request.mode = scanModeArgument(args, "exact");
+            if (request.mode == Mem::ScanMode::Unknown) {
+                if (args.contains("value") ||
+                    args.contains("upper_value")) {
+                    throw std::runtime_error(
+                        "unknown scan mode does not accept comparison values");
+                }
+                request.kind = Mem::ScanStartKind::Unknown;
+            } else {
+                if (request.mode != Mem::ScanMode::Between &&
+                    args.contains("upper_value")) {
+                    throw std::runtime_error(
+                        "upper_value is only valid for between mode");
+                }
+                request.kind = Mem::ScanStartKind::Value;
+                const auto encoded = Mem::encodeScalarValue(
+                    scalarType.value(), scanScalarText(args, "value"));
+                if (!encoded.ok()) {
+                    return errorResult(encoded.error(),
+                                       encoded.durationMs());
+                }
+                request.value = encoded.value();
+                if (request.mode == Mem::ScanMode::Between) {
+                    const auto upper = Mem::encodeScalarValue(
+                        scalarType.value(),
+                        scanScalarText(args, "upper_value"));
+                    if (!upper.ok()) {
+                        return errorResult(upper.error(),
+                                           upper.durationMs());
+                    }
+                    request.value.insert(request.value.end(),
+                                         upper.value().begin(),
+                                         upper.value().end());
+                }
+            }
+        }
+
+        const auto response = service_.startScan(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::ScanSummary& summary = response.value();
+        json output = scanSessionJson(summary.session);
+        output["success"] = true;
+        output["scan_session"] = scanSessionJson(summary.session);
+        if (summary.completedAfterCancelRequest) {
+            output["completion"] = "completed_after_cancel_request";
+        } else if (summary.completedAfterDeadline) {
+            output["completion"] = "completed_after_deadline";
+        } else {
+            output["completion"] = "completed";
+        }
+        output["meta"] = resultMeta(response.durationMs(),
+                                    summary.session.target.connectionGeneration,
+                                    &summary.session.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("scan_start", error);
+    }
+}
+
+std::string AgentMemTools::scanRefine(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ScanRefineRequest request;
+        request.expectedEpoch = scanEpochArgument(args);
+        request.mode = scanModeArgument(args, "exact");
+
+        const auto scalarType = scanScalarTypeArgument(args);
+        if (!scalarType.ok()) {
+            return errorResult(scalarType.error(), scalarType.durationMs());
+        }
+        request.dataType = scanDataTypeFromScalar(scalarType.value());
+        const bool needsValue =
+            request.mode == Mem::ScanMode::Exact ||
+            request.mode == Mem::ScanMode::Greater ||
+            request.mode == Mem::ScanMode::Less ||
+            request.mode == Mem::ScanMode::Between ||
+            request.mode == Mem::ScanMode::IncreasedBy ||
+            request.mode == Mem::ScanMode::DecreasedBy;
+        if (needsValue) {
+            if (request.mode != Mem::ScanMode::Between &&
+                args.contains("upper_value")) {
+                throw std::runtime_error(
+                    "upper_value is only valid for between mode");
+            }
+            const auto encoded = Mem::encodeScalarValue(
+                scalarType.value(), scanScalarText(args, "value"));
+            if (!encoded.ok()) {
+                return errorResult(encoded.error(), encoded.durationMs());
+            }
+            request.value = encoded.value();
+            if (request.mode == Mem::ScanMode::Between) {
+                const auto upper = Mem::encodeScalarValue(
+                    scalarType.value(),
+                    scanScalarText(args, "upper_value"));
+                if (!upper.ok()) {
+                    return errorResult(upper.error(), upper.durationMs());
+                }
+                request.value.insert(request.value.end(),
+                                     upper.value().begin(),
+                                     upper.value().end());
+            }
+        } else if (args.contains("value") ||
+                   args.contains("upper_value")) {
+            throw std::runtime_error(
+                "this scan refine mode does not accept comparison values");
+        }
+
+        const auto response = service_.refineScan(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        const Mem::ScanSummary& summary = response.value();
+        json output = scanSessionJson(summary.session);
+        output["success"] = true;
+        output["scan_session"] = scanSessionJson(summary.session);
+        if (summary.completedAfterCancelRequest) {
+            output["completion"] = "completed_after_cancel_request";
+        } else if (summary.completedAfterDeadline) {
+            output["completion"] = "completed_after_deadline";
+        } else {
+            output["completion"] = "completed";
+        }
+        output["meta"] = resultMeta(response.durationMs(),
+                                    summary.session.target.connectionGeneration,
+                                    &summary.session.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("scan_refine", error);
+    }
+}
+
+std::string AgentMemTools::scanResults(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ScanResultsRequest request;
+        request.expectedEpoch = scanEpochArgument(args);
+        request.offset = optionalSize(
+            args, "offset", 0, Mem::kMaxScanResultCount);
+        request.limit = optionalSize(
+            args, "count", 100, Mem::kMaxScanResultPageSize);
+
+        const auto response = service_.scanResults(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json items = json::array();
+        for (const auto& item : response.value().items) {
+            items.push_back({
+                {"address", Mem::formatAddress(item.address)},
+                {"value_text", std::to_string(item.value)},
+                {"value_hex", Mem::formatAddress(item.value)},
+            });
+        }
+        json output;
+        output["success"] = true;
+        output["scan_epoch"] = response.value().session.epoch;
+        output["total"] = response.value().total;
+        output["offset"] = response.value().offset;
+        output["count"] = response.value().items.size();
+        output["items"] = std::move(items);
+        output["truncated"] = response.value().nextOffset.has_value();
+        output["next_cursor"] = response.value().nextOffset
+                                    ? json(*response.value().nextOffset)
+                                    : json(nullptr);
+        output["scan_session"] =
+            scanSessionJson(response.value().session);
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            response.value().session.target.connectionGeneration,
+            &response.value().session.target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("scan_results", error);
+    }
+}
+
+std::string AgentMemTools::scanClear(
+    const std::string& argsJson,
+    const Mem::OperationContext& context) {
+    try {
+        const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        Mem::ScanClearRequest request;
+        request.expectedEpoch = scanEpochArgument(args);
+        const auto response = service_.clearScan(context, request);
+        if (!response.ok()) {
+            return errorResult(response.error(), response.durationMs());
+        }
+
+        json output;
+        output["success"] = true;
+        output["cleared"] = true;
+        output["cleared_epoch"] = response.value().clearedEpoch;
+        output["current_epoch"] = response.value().currentEpoch;
+        if (response.value().completedAfterCancelRequest) {
+            output["completion"] = "completed_after_cancel_request";
+        } else if (response.value().completedAfterDeadline) {
+            output["completion"] = "completed_after_deadline";
+        } else {
+            output["completion"] = "completed";
+        }
+        output["meta"] = resultMeta(
+            response.durationMs(),
+            response.value().target.connectionGeneration,
+            &response.value().target);
+        return output.dump();
+    } catch (const std::exception& error) {
+        return exceptionResult("scan_clear", error);
     }
 }
 

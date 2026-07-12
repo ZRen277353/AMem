@@ -992,6 +992,14 @@ Result<ScanSummary> MemService::refineScan(
             false,
             elapsedMilliseconds(start));
     }
+    if (request.dataType &&
+        *request.dataType != scanSession_->dataType) {
+        return Result<ScanSummary>::failure(
+            ErrorCode::InvalidArgument,
+            "scan refine data_type must match the active scan session",
+            false,
+            elapsedMilliseconds(start));
+    }
     if (const auto error = validateScanValue(
             scanSession_->dataType,
             request.mode,

@@ -973,6 +973,27 @@ std::string execWriteValue(const std::string& argsJson,
 }
 
 // scan_value
+std::string execScanStart(const std::string& argsJson,
+                          const Mem::OperationContext& context) {
+    return getAgentMemTools().scanStart(argsJson, context);
+}
+
+std::string execScanRefine(const std::string& argsJson,
+                           const Mem::OperationContext& context) {
+    return getAgentMemTools().scanRefine(argsJson, context);
+}
+
+std::string execScanResults(const std::string& argsJson,
+                            const Mem::OperationContext& context) {
+    return getAgentMemTools().scanResults(argsJson, context);
+}
+
+std::string execScanClear(const std::string& argsJson,
+                          const Mem::OperationContext& context) {
+    return getAgentMemTools().scanClear(argsJson, context);
+}
+
+// hidden scan_value compatibility alias
 std::string execScanValue(const std::string& argsJson) {
     try {
         const json args = json::parse(argsJson.empty() ? std::string("{}") : argsJson);
@@ -1657,6 +1678,102 @@ constexpr const char* kSchemaWriteBytes = R"JSON({
       "description": "Alias for hex_string",
       "minLength": 2,
       "maxLength": 16384
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaScanStart = R"JSON({
+  "type": "object",
+  "required": ["mode"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "description": "exact, greater, less, between, or unknown"
+    },
+    "data_type": {
+      "type": "string",
+      "description": "byte, word, dword, qword, xor, float, or double"
+    },
+    "value": {
+      "description": "Comparison value; required except for unknown or pattern scans"
+    },
+    "upper_value": {
+      "description": "Upper comparison value required for between mode"
+    },
+    "pattern_hex": {
+      "type": "string",
+      "description": "Byte pattern alternative to scalar data_type/value",
+      "minLength": 2,
+      "maxLength": 16384
+    },
+    "memory_type": {
+      "type": "string",
+      "description": "all, anonymous, c_alloc, c_heap, c_data, c_bss, java_heap, java, stack, code_app, code_system, video, ashmem, bad, or other"
+    },
+    "start": {
+      "type": "string",
+      "description": "Optional explicit 0x-prefixed start address"
+    },
+    "end": {
+      "type": "string",
+      "description": "Optional explicit 0x-prefixed end address"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaScanRefine = R"JSON({
+  "type": "object",
+  "required": ["scan_epoch", "mode", "data_type"],
+  "properties": {
+    "scan_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mode": {
+      "type": "string",
+      "description": "exact, greater, less, between, increased, increased_by, decreased, decreased_by, changed, or unchanged"
+    },
+    "data_type": {
+      "type": "string",
+      "description": "Must match the active scan session"
+    },
+    "value": {
+      "description": "Comparison value for value-bearing modes"
+    },
+    "upper_value": {
+      "description": "Upper comparison value required for between mode"
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaScanResults = R"JSON({
+  "type": "object",
+  "required": ["scan_epoch"],
+  "properties": {
+    "scan_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000000
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    }
+  }
+})JSON";
+
+constexpr const char* kSchemaScanClear = R"JSON({
+  "type": "object",
+  "required": ["scan_epoch"],
+  "properties": {
+    "scan_epoch": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 })JSON";
@@ -2493,75 +2610,107 @@ void ToolExecutor::initBuiltinTools() {
         false);
 
     registerTool(
+        "scan_start",
+        "Start a complete target-bound scan session. Requires user confirmation.",
+        kSchemaScanStart,
+        ToolSafety::Write,
+        &execScanStart,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "scan_refine",
+        "Refine the expected scan session. Requires user confirmation.",
+        kSchemaScanRefine,
+        ToolSafety::Write,
+        &execScanRefine,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "scan_results",
+        "Retrieve a page from the expected scan session.",
+        kSchemaScanResults,
+        ToolSafety::ReadOnly,
+        &execScanResults,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
+        "scan_clear",
+        "Clear the expected scan session. Requires user confirmation.",
+        kSchemaScanClear,
+        ToolSafety::Write,
+        &execScanClear,
+        ToolTargetPolicy::Bound);
+
+    registerTool(
         "scan_set_range",
-        "Set the memory range used by subsequent scans. Requires user confirmation.",
+        "Compatibility alias retained for saved sessions.",
         kSchemaScanSetRange,
         ToolSafety::Write,
         &execScanSetRange,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_value",
-        "Start a scan and replace the current scan result set. Requires user confirmation.",
+        "Compatibility alias for scan_start.",
         kSchemaScanValue,
         ToolSafety::Write,
         &execScanValue,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_next",
-        "Filter the current scan result set. Requires user confirmation.",
+        "Compatibility alias for scan_refine.",
         kSchemaScanNext,
         ToolSafety::Write,
         &execScanNext,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_fuzzy",
-        "Run a fuzzy scan and replace the current scan result set. Requires user confirmation.",
+        "Compatibility alias for scan_start unknown mode.",
         kSchemaScanFuzzy,
         ToolSafety::Write,
         &execScanFuzzy,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "scan_hex",
-        "Scan memory for a hex byte pattern and replace the current scan result set. Requires user confirmation.",
+        "Compatibility alias for scan_start pattern_hex.",
         kSchemaScanHex,
         ToolSafety::Write,
         &execScanHex,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "get_scan_count",
-        "Get the current scan result count.",
+        "Compatibility alias for scan_results.",
         kSchemaEmptyObject,
         ToolSafety::ReadOnly,
         &execGetScanCount,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "get_scan_results",
-        "Retrieve a page of results from the most recent scan.",
+        "Compatibility alias for scan_results.",
         kSchemaGetScanResults,
         ToolSafety::ReadOnly,
         &execGetScanResults,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
         "clear_scan",
-        "Clear all scan results. Requires user confirmation.",
+        "Compatibility alias for scan_clear.",
         kSchemaEmptyObject,
         ToolSafety::Write,
         &execClearScan,
-        true,
+        false,
         ToolTargetPolicy::Bound);
 
     registerTool(
