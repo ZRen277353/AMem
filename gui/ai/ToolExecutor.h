@@ -5,6 +5,7 @@
 #include "AgentRunContext.h"
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,6 +13,8 @@
 #include <vector>
 
 namespace AI {
+
+struct CompiledToolSchema;
 
 enum class ToolCompletionState {
     Completed,
@@ -54,6 +57,7 @@ inline const char* toolCompletionStateName(ToolCompletionState state) {
 // classification, and the native executor that performs the work.
 struct ToolRegistration {
     ToolDefinition definition;
+    std::shared_ptr<const CompiledToolSchema> compiledSchema;
     ToolSafety safety = ToolSafety::ReadOnly;
     ToolTargetPolicy targetPolicy = ToolTargetPolicy::None;
     std::function<std::string(const std::string& argsJson,
@@ -125,9 +129,9 @@ public:
     // remain executable for saved sessions but are not sent to providers.
     std::vector<ToolDefinition> getToolDefinitions() const;
 
-    // Safety classification for a given tool name. Returns ToolSafety::ReadOnly
-    // as a safe default when the tool is not registered so that callers
-    // never accidentally treat an unknown tool as write-classified.
+    // Safety classification for a given tool name. Unknown names cannot
+    // execute; ReadOnly avoids presenting a misleading write confirmation
+    // before execute() returns the unrecognized-tool error.
     ToolSafety getToolSafety(const std::string& name) const;
     ToolTargetPolicy getToolTargetPolicy(const std::string& name) const;
 

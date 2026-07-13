@@ -16,3 +16,8 @@
 
 脚本没有产品级鉴权、审批、target revision、连接 generation 或完整输入上限，
 不得作为 Agent/IPC adapter，也不得用于不受控的目标写入。
+
+`get_architecture()` 保留标准协议的 `CMD_GETARCHITECTURE=21`；
+`get_mem_type()` 对应当前 AMem C++ `GetMemType()`/`CMD_GETMEMTYPE=100`，返回的是
+内存后端类型而不是 Android CPU architecture。连接保留调用者提供的 socket
+timeout，协议不匹配或服务端无响应时会有界失败。

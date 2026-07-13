@@ -7,6 +7,7 @@
 #include "AgentTrace.h"
 
 #include <atomic>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ public:
         std::string modelOverride;
         std::string failureDetail;
         std::vector<ChatMessage> messages;
+        int userTokenLimit = 0;
         bool stream = true;
     };
 
@@ -40,6 +42,10 @@ public:
         std::string providerName;
         std::string model;
         std::string error;
+        int contextWindowTokens = 0;
+        int estimatedInputTokens = 0;
+        int outputTokenReserve = 0;
+        size_t droppedMessages = 0;
         AgentTraceEvent traceEvent;
     };
 

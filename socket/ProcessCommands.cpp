@@ -144,22 +144,7 @@ bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
 
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type) {
     return SocketCommand::executeNoHandle(type, [&](WindowsSocketClient* client) -> bool {
-        unsigned char command = CMD_GETVERSION;
-        if (!client->Send(&command, sizeof(command)))
-            return false;
-        CeVersion version{};
-        if (!client->Receive(&version, sizeof(version)))
-            return false;
-        ServerVersionInfo info{};
-        info.version = version.version;
-        if (version.stringsize > 0) {
-            std::vector<char> versionString(version.stringsize);
-            if (!client->Receive(versionString.data(), versionString.size()))
-                return false;
-            info.versionString.assign(versionString.data(), versionString.size());
-        }
-        outInfo = std::move(info);
-        return true;
+        return client && AmemServerHandshake::ReadVersion(*client, outInfo);
     });
 }
 

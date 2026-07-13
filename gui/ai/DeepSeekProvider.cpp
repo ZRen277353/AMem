@@ -87,8 +87,9 @@ struct ExtractedError {
 
 ExtractedError extractProviderError(const std::string& body) {
     ExtractedError out;
-    try {
-        json j = json::parse(body);
+    json j;
+    std::string parseError;
+    if (parseProviderResponseJson(body, j, parseError)) {
         if (j.contains("error") && j["error"].is_object()) {
             const auto& e = j["error"];
             if (e.contains("message") && e["message"].is_string()) {
@@ -102,8 +103,6 @@ ExtractedError extractProviderError(const std::string& body) {
                 }
             }
         }
-    } catch (const std::exception&) {
-        // Leave output empty; caller falls back to raw body.
     }
     return out;
 }
@@ -136,6 +135,7 @@ std::string DeepSeekProvider::buildRequestBody(const CompletionRequest& request)
     json body;
     body["model"] = request.model.empty() ? config_.model : request.model;
     body["stream"] = request.stream;
+    body["max_tokens"] = request.maxOutputTokens;
 
     // messages
     json messages = json::array();
@@ -225,9 +225,8 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
     }
 
     json chunk;
-    try {
-        chunk = json::parse(eventData);
-    } catch (const std::exception&) {
+    std::string parseError;
+    if (!parseProviderEventJson(eventData, chunk, parseError)) {
         // Ignore malformed chunks; the overall request will still produce a
         // final response, and invalid full payloads are caught elsewhere.
         return;
@@ -334,12 +333,11 @@ CompletionResponse DeepSeekProvider::parseFullResponse(const std::string& body) 
     }
 
     json j;
-    try {
-        j = json::parse(body);
-    } catch (const std::exception& ex) {
+    std::string parseError;
+    if (!parseProviderResponseJson(body, j, parseError)) {
         response.error.category = ErrorCategory::InvalidResponse;
         response.error.message =
-            std::string("DeepSeek returned invalid JSON: ") + ex.what();
+            "DeepSeek returned invalid JSON: " + parseError;
         return response;
     }
 
@@ -446,12 +444,12 @@ bool DeepSeekProvider::validateToolCallArguments(const ChatMessage& message,
         // in that case we skip parsing.
         if (tc.arguments.empty()) continue;
 
-        try {
-            (void)json::parse(tc.arguments);
-        } catch (const std::exception& ex) {
+        json arguments;
+        std::string parseError;
+        if (!parseToolArgumentJson(tc.arguments, arguments, parseError)) {
             std::ostringstream oss;
             oss << "DeepSeek returned invalid JSON in tool_call arguments: "
-                << tc.name << " (parse error: " << ex.what() << ")";
+                << tc.name << " (parse error: " << parseError << ")";
             response.error.category = ErrorCategory::InvalidResponse;
             response.error.message = oss.str();
             return false;

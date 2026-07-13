@@ -2,6 +2,7 @@
 
 #include "ToolCallSecurity.h"
 
+#include "ProviderResponseLimits.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 namespace AI {
@@ -20,10 +21,14 @@ void applyToolCallRedaction(ToolCall& call) {
         return;
     }
 
+    nlohmann::json args = nlohmann::json::object();
+    std::string parseError;
+    if (!call.arguments.empty() &&
+        !parseToolArgumentJson(call.arguments, args, parseError)) {
+        call.redactedArguments = R"({"redacted":true})";
+        return;
+    }
     try {
-        nlohmann::json args = call.arguments.empty()
-            ? nlohmann::json::object()
-            : nlohmann::json::parse(call.arguments);
         if (!args.is_object()) {
             call.redactedArguments = R"({"redacted":true})";
             return;

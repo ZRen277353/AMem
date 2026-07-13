@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace AI {
 
@@ -38,6 +39,13 @@ struct JsonDocumentLoadResult {
     PersistenceLoadResult result;
     nlohmann::json document;
 };
+
+bool validateSerializedJsonComplexity(std::string_view serialized,
+                                      std::string& error);
+
+bool parseBoundedJson(std::string_view serialized,
+                      nlohmann::json& document,
+                      std::string& error);
 
 JsonDocumentLoadResult loadJsonDocument(
     const std::filesystem::path& filepath);

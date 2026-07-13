@@ -4,6 +4,7 @@
 #include "../Window.h"
 #include "AgentController.h"
 #include "AIProvider.h"
+#include "ChatSettingsDraft.h"
 #include "ChatSession.h"
 
 #include <atomic>
@@ -37,27 +38,8 @@ public:
     unsigned int getWindowFlags() const override;
 
     // ---- settings-panel state (shared with ChatWindowSettings.cpp) ------
-    // Temporary editable buffer for one provider's settings. Populated on
-    // demand when the settings panel opens and written back to the
-    // ApiKeyStore via validateSettings() on save.
-    struct SettingsBuffer {
-        char apiKey[512] = {};
-        char baseUrl[2049] = {};
-        char model[256] = {};
-        char apiVersion[64] = {};
-        bool showApiKey = false;
-        bool dirty = false;
-        std::string validationError;
-    };
-
     bool showSettings_ = false;
-    std::map<std::string, SettingsBuffer> settingsBuffers_;
-
-    // Proxy configuration mirrored by the settings panel. Applied to
-    // HttpClient when the user saves the panel.
-    char proxyHost_[256] = {};
-    int proxyPort_ = 0;
-    bool proxyEnabled_ = false;
+    ChatSettingsDraft settingsDraft_;
 
     // Entry points owned by ChatWindowSettings.cpp (task 8.4). Declared
     // here so ChatWindow.cpp's onDraw() can call into them without an
@@ -65,6 +47,7 @@ public:
     void drawSettingsPanel();
     void drawProviderSettings(const std::string& providerName);
     bool validateSettings();
+    void loadSettingsDraft();
 
 private:
     // ---- per-frame UI drawing ------------------------------------------

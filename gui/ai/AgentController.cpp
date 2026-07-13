@@ -2,7 +2,10 @@
 
 #include "AgentController.h"
 
+#include "ContextBudget.h"
 #include "ProviderRegistry.h"
+#include "ProviderResponseLimits.h"
+#include "ProviderTrust.h"
 #include "ToolExecutor.h"
 #include "../../mem/IMemService.h"
 #include "../../third_party/nlohmann/json.hpp"
@@ -71,6 +74,9 @@ std::string validateProviderConfig(const AIProvider& provider,
     if (cfg.baseUrl.empty() || !startsWithICase(cfg.baseUrl, "https://")) {
         return "Configure a valid https:// endpoint in Settings before sending";
     }
+    if (!isProviderEndpointTrusted(provider, cfg)) {
+        return "Trust the custom endpoint in Settings before sending credentials";
+    }
     if (modelOverride.empty() && cfg.model.empty()) {
         return "Enter a model name before sending";
     }
@@ -89,10 +95,12 @@ ToolResult contextFailureResult(const Mem::Error& error,
     if (staleResult && staleResult->success) {
         output["stale_result_was_success"] = true;
         if (!staleResult->resultJson.empty()) {
-            try {
-                output["stale_result"] =
-                    nlohmann::json::parse(staleResult->resultJson);
-            } catch (const nlohmann::json::exception&) {
+            nlohmann::json staleResultJson;
+            std::string parseError;
+            if (parseToolResultJson(
+                    staleResult->resultJson, staleResultJson, parseError)) {
+                output["stale_result"] = std::move(staleResultJson);
+            } else {
                 output["stale_result_raw"] = staleResult->resultJson;
             }
         }
@@ -173,19 +181,57 @@ AgentController::DispatchResult AgentController::dispatchModelRequest(
 
     CompletionRequest completion;
     completion.runId = run_.id;
-    completion.messages = request.messages;
     completion.tools = ToolExecutor::getInstance().getToolDefinitions();
     completion.model =
         request.modelOverride.empty() ? cfg.model : request.modelOverride;
     completion.stream = request.stream;
 
+    const ProviderCapabilities capabilities = provider->getCapabilities();
+    ContextBudgetConfig budgetConfig;
+    budgetConfig.userTokenLimit = request.userTokenLimit > 0
+        ? request.userTokenLimit
+        : capabilities.maxContextTokens;
+    budgetConfig.providerContextTokens = capabilities.maxContextTokens;
+    budgetConfig.configuredContextTokens = cfg.contextWindowTokens;
+    budgetConfig.configuredContextMayExceedProvider =
+        !isDefaultProviderEndpoint(*provider, cfg.baseUrl);
+    budgetConfig.providerMaxOutputTokens = capabilities.maxOutputTokens;
+    ContextBudgetResult budget = prepareContextBudget(
+        request.messages, completion.tools, budgetConfig);
+    if (!budget.success) {
+        result.error = "context budget rejected request: " + budget.error;
+        result.traceEvent = makeTrace(AgentTraceType::ProviderError,
+                                      request.providerName,
+                                      result.error);
+        appendTraceEvent(result.traceEvent);
+        markFailed();
+        return result;
+    }
+    completion.messages = std::move(budget.messages);
+    completion.maxOutputTokens = budget.outputTokenReserve;
+    result.contextWindowTokens = budget.contextWindowTokens;
+    result.estimatedInputTokens = budget.estimatedInputTokens;
+    result.outputTokenReserve = budget.outputTokenReserve;
+    result.droppedMessages = budget.droppedMessages;
+
     result.model = completion.model;
+    std::string dispatchDetail = completion.model.empty()
+        ? "model request dispatched"
+        : "model request dispatched: " + completion.model;
+    dispatchDetail += " (input " +
+        std::to_string(result.estimatedInputTokens) + "/" +
+        std::to_string(budget.inputBudgetTokens) +
+        ", output reserve " +
+        std::to_string(result.outputTokenReserve);
+    if (result.droppedMessages != 0) {
+        dispatchDetail += ", dropped " +
+            std::to_string(result.droppedMessages) + " old messages";
+    }
+    dispatchDetail += ")";
     result.traceEvent =
         makeTrace(AgentTraceType::ModelRequestDispatched,
-                  request.providerName,
-                  completion.model.empty()
-                      ? "model request dispatched"
-                      : "model request dispatched: " + completion.model);
+                   request.providerName,
+                   dispatchDetail);
     appendTraceEvent(result.traceEvent);
     if (!cancelToken) {
         cancelToken = std::make_shared<std::atomic<bool>>(false);
@@ -212,7 +258,6 @@ AgentController::ToolOutcome AgentController::resumeApprovedTool(
 
 AgentController::ToolOutcome AgentController::approvePendingTool(
     const ToolConfig& config) {
-    run_.approvalDecision = AgentApprovalDecision::Approved;
     return resumeApprovedTool(config);
 }
 
@@ -268,7 +313,6 @@ AgentController::ToolOutcome AgentController::completeToolExecution(
 
 AgentController::ToolOutcome AgentController::denyPendingTool(
     const ToolConfig& config) {
-    run_.approvalDecision = AgentApprovalDecision::Denied;
     return resumeDeniedTool(config);
 }
 
@@ -279,7 +323,6 @@ void AgentController::reset() {
     run_.modelTurns = 0;
     run_.toolSteps = 0;
     run_.pendingApproval.reset();
-    run_.approvalDecision = AgentApprovalDecision::Pending;
     run_.context = {};
 }
 
@@ -369,10 +412,8 @@ void AgentController::updateRunFromToolOutcome(const ToolOutcome& outcome) {
     if (outcome.kind == ToolOutcomeKind::NeedsConfirmation &&
         outcome.pendingToolCall) {
         run_.pendingApproval = outcome.pendingToolCall;
-        run_.approvalDecision = AgentApprovalDecision::Pending;
     } else {
         run_.pendingApproval.reset();
-        run_.approvalDecision = AgentApprovalDecision::Pending;
     }
 
     switch (outcome.kind) {
@@ -413,19 +454,16 @@ void AgentController::markWaitingApproval() {
 void AgentController::markCompleted() {
     run_.state = RunState::Completed;
     run_.pendingApproval.reset();
-    run_.approvalDecision = AgentApprovalDecision::Pending;
 }
 
 void AgentController::markFailed() {
     run_.state = RunState::Failed;
     run_.pendingApproval.reset();
-    run_.approvalDecision = AgentApprovalDecision::Pending;
 }
 
 void AgentController::markCancelled() {
     run_.state = RunState::Cancelled;
     run_.pendingApproval.reset();
-    run_.approvalDecision = AgentApprovalDecision::Pending;
 }
 
 void AgentController::finishCompleted() {
@@ -454,7 +492,6 @@ AgentRunSnapshot AgentController::snapshot() const {
     snap.toolSteps = run_.toolSteps;
     snap.trace = run_.trace;
     snap.pendingApproval = run_.pendingApproval;
-    snap.approvalDecision = run_.approvalDecision;
     snap.context = run_.context;
     return snap;
 }

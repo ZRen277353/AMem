@@ -1,9 +1,10 @@
 #include "ProcessListWindow.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "Gui.h"
 
-ProcessListWindow::ProcessListWindow()
+ProcessListWindow::ProcessListWindow(Mem::IMemService& memService)
+	: memService_(memService)
 {
 	name = "Process List";
 }
@@ -17,8 +18,28 @@ void ProcessListWindow::onDraw()
 {
 	if (ImGui::Button("Refresh"))
 	{
-		std::vector<ProcessInfoItem> list;
-		if (FetchProcessList(list)) {
+		std::vector<Mem::ProcessInfo> list;
+		const Mem::OperationContext context = memService_.captureContext(false);
+		bool success = true;
+		size_t offset = 0;
+		while (success) {
+			Mem::ProcessListRequest request;
+			request.offset = offset;
+			request.limit = Mem::kMaxProcessPageSize;
+			auto response = memService_.listProcesses(context, request);
+			if (!response.ok()) {
+				Gui::log("Failed to fetch process list [%s]: %s",
+				         Mem::errorCodeName(response.error().code),
+				         response.error().message.c_str());
+				success = false;
+				break;
+			}
+			const auto& page = response.value();
+			list.insert(list.end(), page.items.begin(), page.items.end());
+			if (!page.nextOffset) break;
+			offset = *page.nextOffset;
+		}
+		if (success) {
 			hasData = true;
 			processes.clear();
 			processes.reserve(list.size());
@@ -46,4 +67,4 @@ void ProcessListWindow::onDraw()
 			ImGui::EndTable();
 		}
 	}
-} 
+}

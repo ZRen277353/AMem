@@ -2,6 +2,7 @@
 
 #include "Window.h"
 #include "../mem/MemTypes.h"
+#include "../mem/MemResult.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -12,7 +13,6 @@
 // 前向声明
 class DisassemblyHelper;
 struct DisassemblyResult;
-struct ModuleInfoItem;
 namespace Mem {
 class IMemService;
 }
@@ -74,6 +74,11 @@ public:
     unsigned int getWindowFlags() const override;
 
 private:
+    bool readTargetMemory(
+        uint64_t address, uint32_t size,
+        std::vector<unsigned char>& bytes,
+        Mem::MemoryReadChannel channel = Mem::MemoryReadChannel::Foreground,
+        Mem::Error* error = nullptr);
     void resetProcessState();
     void drawBreakpointList();
     void drawBreakpointControls();
@@ -90,10 +95,6 @@ private:
     std::string formatTimeDiff(uint64_t start, uint64_t end);
     void addBreakpoint(uint64_t address, BreakpointType type, BreakpointSize size, const std::string& description);
     
-    // 模块相关方法
-    void refreshModuleList();
-    const ModuleInfoItem* findModuleByAddress(uint64_t address);
-    std::string formatAddressWithModule(uint64_t address);
     void removeBreakpoint(int index);
     void toggleBreakpoint(int index);
     void suspendBreakpoint(int index);

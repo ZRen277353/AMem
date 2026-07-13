@@ -15,12 +15,14 @@ bool isValidFreezeDataSize(uint8_t dataSize) {
 }
 } // namespace
 
-bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
-               PortType port) {
+FreezeMutationIoResult FreezeAddTracked(
+    uint64_t address, uint8_t dataSize, const uint8_t data[8], PortType port) {
+    FreezeMutationIoResult result;
     if (!isValidFreezeDataSize(dataSize) || !data)
-        return false;
+        return result;
 
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_FREEZE_ADD;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -30,37 +32,66 @@ bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
         memcpy(input.data, data, 8);
         if (!client->Send(&input, sizeof(input)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
 }
 
-bool FreezeRemove(uint64_t address, PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
+               PortType port) {
+    const auto result = FreezeAddTracked(address, dataSize, data, port);
+    return result.responseReceived && result.applied;
+}
+
+FreezeMutationIoResult FreezeRemoveTracked(uint64_t address, PortType port) {
+    FreezeMutationIoResult result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_FREEZE_REMOVE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
         if (!client->Send(&address, sizeof(address)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
 }
 
-bool FreezeClear(PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+bool FreezeRemove(uint64_t address, PortType port) {
+    const auto result = FreezeRemoveTracked(address, port);
+    return result.responseReceived && result.applied;
+}
+
+FreezeMutationIoResult FreezeClearTracked(PortType port) {
+    FreezeMutationIoResult result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_FREEZE_CLEAR;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
+}
+
+bool FreezeClear(PortType port) {
+    const auto result = FreezeClearTracked(port);
+    return result.responseReceived && result.applied;
 }
 
 bool FreezePause(PortType port) {
@@ -119,8 +150,13 @@ bool FreezeGetList(std::vector<CeFreezeItem> &outList, bool &isPaused,
     });
 }
 
-bool FreezeUpdate(uint64_t address, const uint8_t data[8], PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+FreezeMutationIoResult FreezeUpdateTracked(
+    uint64_t address, const uint8_t data[8], PortType port) {
+    FreezeMutationIoResult result;
+    if (!data)
+        return result;
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        result.requestStarted = true;
         unsigned char command = CMD_FREEZE_UPDATE;
         if (!SocketCommand::sendCommandWithHandle(client, command, handle))
             return false;
@@ -129,11 +165,19 @@ bool FreezeUpdate(uint64_t address, const uint8_t data[8], PortType port) {
         memcpy(input.data, data, 8);
         if (!client->Send(&input, sizeof(input)))
             return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
+        int applied = 0;
+        if (!client->Receive(&applied, sizeof(applied)))
             return false;
-        return result != 0;
+        result.responseReceived = true;
+        result.applied = applied != 0;
+        return true;
     });
+    return result;
+}
+
+bool FreezeUpdate(uint64_t address, const uint8_t data[8], PortType port) {
+    const auto result = FreezeUpdateTracked(address, data, port);
+    return result.responseReceived && result.applied;
 }
 
 bool FreezeSetInterval(uint32_t interval_ms, PortType port) {

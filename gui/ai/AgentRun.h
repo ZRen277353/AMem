@@ -21,12 +21,6 @@ enum class AgentRunState {
     Cancelled
 };
 
-enum class AgentApprovalDecision {
-    Pending,
-    Approved,
-    Denied
-};
-
 inline const char* agentRunStateLabel(AgentRunState state) {
     switch (state) {
         case AgentRunState::Idle:            return "idle";
@@ -40,15 +34,6 @@ inline const char* agentRunStateLabel(AgentRunState state) {
     }
 }
 
-inline const char* agentApprovalDecisionLabel(AgentApprovalDecision decision) {
-    switch (decision) {
-        case AgentApprovalDecision::Pending:  return "pending";
-        case AgentApprovalDecision::Approved: return "approved";
-        case AgentApprovalDecision::Denied:   return "denied";
-        default:                              return "unknown";
-    }
-}
-
 struct AgentRun {
     std::string id;
     AgentRunState state = AgentRunState::Idle;
@@ -56,7 +41,6 @@ struct AgentRun {
     int toolSteps = 0;
     std::vector<AgentTraceEvent> trace;
     std::optional<ToolCall> pendingApproval;
-    AgentApprovalDecision approvalDecision = AgentApprovalDecision::Pending;
     AgentRunContext context;
 };
 
@@ -67,7 +51,6 @@ struct AgentRunSnapshot {
     int toolSteps = 0;
     std::vector<AgentTraceEvent> trace;
     std::optional<ToolCall> pendingApproval;
-    AgentApprovalDecision approvalDecision = AgentApprovalDecision::Pending;
     AgentRunContext context;
 };
 

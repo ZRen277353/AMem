@@ -111,7 +111,7 @@ require_text("${handshake_source}" "Observe-only grant remains fixed"
 
 string(FIND "${main_source}"
     "NativeIpc::ShutdownSystemNativeAgentRuntime();" shutdown_position)
-string(FIND "${main_source}" "DisconnectMultiPort();" disconnect_position)
+string(FIND "${main_source}" "memService.disconnect(" disconnect_position)
 if(shutdown_position EQUAL -1 OR disconnect_position EQUAL -1 OR
    shutdown_position GREATER disconnect_position)
     message(FATAL_ERROR

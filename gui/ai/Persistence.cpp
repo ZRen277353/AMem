@@ -3,12 +3,30 @@
 #include "Persistence.h"
 
 #include "AiLimits.h"
+#include "../../utils/BoundedJson.h"
 
 #include <array>
 #include <fstream>
 #include <system_error>
+#include <utility>
 
 namespace AI {
+
+namespace {
+
+const utils::JsonComplexityLimits& persistenceJsonLimits() {
+    static const utils::JsonComplexityLimits limits = {
+        Limits::kMaxPersistenceFileBytes,
+        Limits::kMaxPersistenceJsonDepth,
+        Limits::kMaxPersistenceJsonNodes,
+        Limits::kMaxPersistenceContainerItems,
+        Limits::kMaxPersistenceStringBytes,
+        Limits::kMaxPersistenceTotalStringBytes,
+    };
+    return limits;
+}
+
+} // namespace
 
 const char* persistenceLoadStatusName(PersistenceLoadStatus status) {
     switch (status) {
@@ -19,6 +37,19 @@ const char* persistenceLoadStatusName(PersistenceLoadStatus status) {
         case PersistenceLoadStatus::IoError:   return "io_error";
     }
     return "unknown";
+}
+
+bool validateSerializedJsonComplexity(std::string_view serialized,
+                                      std::string& error) {
+    return utils::validateJsonComplexity(
+        serialized, persistenceJsonLimits(), error);
+}
+
+bool parseBoundedJson(std::string_view serialized,
+                      nlohmann::json& document,
+                      std::string& error) {
+    return utils::parseBoundedJson(
+        serialized, persistenceJsonLimits(), document, error);
 }
 
 JsonDocumentLoadResult loadJsonDocument(
@@ -81,11 +112,10 @@ JsonDocumentLoadResult loadJsonDocument(
         return loaded;
     }
 
-    try {
-        loaded.document = nlohmann::json::parse(serialized);
-    } catch (const nlohmann::json::exception& error) {
+    std::string parseError;
+    if (!parseBoundedJson(serialized, loaded.document, parseError)) {
         loaded.result.status = PersistenceLoadStatus::Invalid;
-        loaded.result.message = std::string("invalid JSON: ") + error.what();
+        loaded.result.message = std::move(parseError);
         return loaded;
     }
 

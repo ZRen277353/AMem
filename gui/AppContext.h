@@ -1,10 +1,10 @@
 #pragma once
 
 #include "../mem/MemTypes.h"
-#include "../socket/client_singleton.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +15,33 @@ class IMemService;
 
 class AppContext {
 public:
+    class TargetMutation {
+    public:
+        TargetMutation(TargetMutation&& other) noexcept;
+        TargetMutation& operator=(TargetMutation&&) = delete;
+        TargetMutation(const TargetMutation&) = delete;
+        TargetMutation& operator=(const TargetMutation&) = delete;
+        ~TargetMutation();
+
+        explicit operator bool() const { return owner_ != nullptr; }
+        const Mem::TargetSnapshot& previousTarget() const {
+            return previousTarget_;
+        }
+        void publish(int pid, int processHandle, const std::string& name);
+        void clear();
+
+    private:
+        friend class AppContext;
+        TargetMutation(AppContext& owner,
+                       std::unique_lock<std::mutex> stateLock,
+                       Mem::TargetSnapshot previousTarget);
+        void finish();
+
+        AppContext* owner_ = nullptr;
+        std::unique_lock<std::mutex> stateLock_;
+        Mem::TargetSnapshot previousTarget_;
+    };
+
     static AppContext& Get() {
         static AppContext instance;
         return instance;
@@ -25,10 +52,10 @@ public:
     std::atomic<int> processHandle{0};
     std::atomic<uint64_t> processRevision{0};
 
-    void selectProcess(int pid, const std::string& name);
-    void clearProcess();
+    std::optional<TargetMutation> beginTargetMutation(
+        const std::optional<Mem::TargetSnapshot>& expected,
+        uint64_t connectionGeneration);
     void clearProcessForDisconnect();
-    void cleanupCurrentProcessServices();
     Mem::TargetSnapshot snapshotTarget(uint64_t connectionGeneration) const;
     bool matchesStableTarget(const Mem::TargetSnapshot& expected,
                              uint64_t connectionGeneration) const;
@@ -59,15 +86,15 @@ public:
             bool valid = false;
         };
 
-        std::vector<ModuleInfoItem> modules;
+        std::vector<Mem::ModuleInfo> modules;
         std::unordered_map<uint64_t, SymbolListCacheEntry> symbolCacheByModuleBase;
         bool valid = false;
         double lastRefreshTime = 0.0;
         std::mutex mutex;
         static constexpr double MIN_REFRESH_INTERVAL = 1.0;  // 最小刷新间隔（秒）
 
-        void refresh();
-        ModuleInfoItem findByAddress(uint64_t addr);  // 返回值拷贝，避免悬空指针
+        void refresh(Mem::IMemService& service);
+        Mem::ModuleInfo findByAddress(uint64_t addr);  // 返回值拷贝，避免悬空指针
         std::string formatWithModule(uint64_t addr);
         std::string formatWithSymbol(uint64_t addr, Mem::IMemService& service);
         std::string formatAddressWithModuleAndSymbol(
@@ -76,7 +103,7 @@ public:
             uint64_t addr, Mem::IMemService& service,
             SymbolInfoItem& outSymbol, uint64_t& outOffset);
         bool ensureSymbolListCached(
-            const ModuleInfoItem& module, Mem::IMemService& service,
+            const Mem::ModuleInfo& module, Mem::IMemService& service,
             std::vector<SymbolInfoItem>& outSymbols);
         void invalidate() {
             std::lock_guard<std::mutex> lock(mutex);
@@ -94,5 +121,4 @@ private:
     mutable std::mutex processStateMutex_;
     std::string selectedName_;
 
-    void clearProcessInternal(bool cleanupRemote);
 };

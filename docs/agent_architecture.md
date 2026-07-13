@@ -3,7 +3,7 @@
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 最后更新：2026-07-13
 
-本文描述当前工作区中的内置 AI Chat、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、统一的 GUI/Lua `IMemService` 边界、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
 > 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。`NativeAgent` 固定构建 AI Chat、Capstone 和 Keystone，缺少任一依赖时 CMake 配置失败；`HAVE_AI_CHAT`/`HAVE_CAPSTONE`/`HAVE_KEYSTONE` 不再对应受支持的 OFF 组合。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
 
@@ -21,6 +21,8 @@ Native Named Pipe IPC ----------+
 ```
 
 `socket/client_singleton.h` 及 `socket/*Commands.cpp` 是设备协议的主要真相源。GUI、内置 Agent 和 Native IPC 都不应各自重写协议。
+
+`Gui::mainLoop()` 的一次性 bootstrap 默认创建并显示 `ChatWindow`；窗口菜单保留关闭后的重新打开入口。该启动行为仍受固定实现宏 `HAVE_AI_CHAT` 保护，不改变 Native IPC 的 compile-time opt-in/runtime default-stopped 边界。
 
 内置 Agent 完成四件事：
 
@@ -46,7 +48,7 @@ Native IPC 不经过模型编排，但复用 server-owned catalog、`MemJsonTool
 | 会话 | `ChatSession`, `SessionManager` | 历史清洗、token/条数裁剪、会话文件和索引 |
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
-| 全局目标 | `AppContext` | PID、process handle、`processRevision`、模块/符号缓存 |
+| 目标/展示状态 | `AppContext`, `TargetMutation` | 单一发布 PID/handle/name/奇偶 revision，目标切换时原子失效模块/符号展示缓存 |
 | IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity` | native frame/I/O/Hello/request runtime、逐请求 privileged approval/execution |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
@@ -96,7 +98,6 @@ enum class ToolSafety { ReadOnly, Write };
 - model turn/tool step 计数
 - 最多 128 条 `AgentTraceEvent`
 - 待审批工具
-- `AgentApprovalDecision`
 - `AgentRunContext`：run id、`OperationContext`、connection generation、可选 target snapshot 和 cancellation token
 
 `AgentRunner` 是不依赖 ImGui 的状态机。UI 只消费它返回的 `Outcome`：
@@ -106,7 +107,7 @@ enum class ToolSafety { ReadOnly, Write };
 - `ReadyForFollowUp`
 - `Stopped`
 
-`approvalDecision` 当前会在 outcome 更新后很快重置为 `Pending`，可靠的审批审计来源是 trace 和 tool message。
+`AgentRunSnapshot` 不保存瞬时 approval decision。`pendingApproval` 表示当前阻塞点；批准、拒绝和自动批准通过 trace/tool message 表达，write-classified operation 另进入独立 mutation audit。该单一事实来源关闭 A-16。
 
 ## 4. 一次 model -> tool -> model 循环
 
@@ -172,7 +173,7 @@ HTTP 2xx 不等于 provider stream 完整：
 
 `ToolExecutor` 对最终 JSON 使用 4 MiB 上限。超限 mutation 的副作用可能已经发生，因此清空结果并返回 `completion_unknown`；`AgentRunner` 的 tool audit 最终必须落在 8 MiB 普通消息上限内。`ChatWindow` 若无法把 assistant/tool outcome 纳入 16 MiB retained session，会结束当前链，不执行未记录的工具，也不把未记录的结果发给下一轮模型。
 
-这些上限关闭 A-09 的无界累计路径，但不等价于 context token 预算或完整的 allocator 上界。JSON DOM、TLS 和库内部对象有额外开销，大型业务列表仍应分页；真实 provider HTTP/TLS/full-response 尚无端到端自动化。
+这些上限关闭 A-09 的无界累计路径，但不等价于 context token 预算或精确的 allocator 上界。所有不可信 JSON 在 DOM 构造前还会经过 SAX 结构预检，限制深度、节点、单容器元素、单字符串和累计字符串；`bad_alloc` 等构造失败会 fail closed。JSON DOM、TLS 和库内部对象仍有额外开销，大型业务列表仍应分页。本机自签名 HTTPS 集成测试已经覆盖 cpp-httplib/OpenSSL 传输、证书校验、三家 provider full-response 和结构过密拒绝。2026-07-13 又通过一个用户显式信任的外部 OpenAI-compatible endpoint 完成 `gpt-5.4` 流式文本和 tool-call 循环；该证据不代表其他 endpoint/model 自动兼容。
 
 ## 5. 实际线程与生命周期模型
 
@@ -291,7 +292,7 @@ Idle
 - catalog-owned effect/resource metadata（当前独立审计按 canonical/alias 名称归类）
 - endpoint/provider 数据去向
 
-二十三个非 Lua canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并以任务 absolute deadline 限制 Lua hook timeout；开始后不能硬取消。内置目录已无 legacy executor，新增 process-bound 工具仍必须在实际 service/host/send 边界消费相同 context。
+二十三个非 Lua canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并把同一个审批 `OperationContext` 写入 Lua registry，整段脚本中的 memory/process/module/scan/breakpoint API 都沿用原 generation、target、deadline 和 cancellation；开始后仍不能硬取消。内置目录已无 legacy executor，新增 process-bound 工具仍必须在实际 service/host/send 边界消费相同 context。
 
 ### 7.3 独立 mutation audit
 
@@ -311,13 +312,19 @@ Idle
 - selected process name
 - module/symbol cache
 
-`selectProcess()` 会清理旧进程相关服务、打开新 handle、设置当前 PID、失效缓存并推进 revision。`AgentRunContext` 在首轮模型请求前捕获该 snapshot；审批、出队和结果回收均复核。`process_open` 是特殊的 `Selection` 工具：send 前校验旧 snapshot，成功后只在返回 target 与当前状态一致时推进 run。
+`AppContext` 不再发送协议命令。只有可移动 RAII `TargetMutation` 能把 revision 置为奇数、发布或清空 PID/handle/name、失效展示缓存，并在析构时恢复偶数稳定 revision。`SystemMemBackend::openProcess()` 按 connection request lease -> process mutation -> DEBUG transaction -> MAIN cleanup/close/open transaction 的顺序切换目标；只有设备返回非零 handle 且 generation 仍当前时才发布。`AgentRunContext` 在首轮模型请求前捕获 snapshot；审批、出队和结果回收均复核。`process_open` 是特殊的 `Selection` 工具：send 前校验旧 snapshot，成功后只在返回 target 与当前状态一致时推进 run。
+
+Android server 的 `SysCall`/`Kernel` 类型只选择读写与断点实现，不属于 target identity。切换该类型不需要推进 connection generation、PID/handle 或 process revision，也不应把 backend type 加入 `TargetSnapshot`。
+
+`Gui.cpp` 是 GUI composition root，只在这里取得 system service，并向 `CEWindow`、连接/进程/模块/版本/扫描/内存/断点窗口与 `LuaScriptWindow` 显式注入同一个引用；所有子面板继续传递该引用。GUI/Lua 源码不再包含 `client_singleton.h` 或调用设备协议函数，`main.cpp` 也通过 service disconnect。`native_gui_mem_service_boundary` 同时禁止协议回归、非 `AppContext` 目标字段写入，并固定 Lua 的整段 context binding。
 
 ### 8.2 端口锁只保证单命令
 
 `SocketCommand::execute*` 的端口 mutex 保证一个 request-response 不被并发响应串包。每条命令还会短暂持有可重入的 per-port transaction gate；复合操作只有显式把 `SocketCommand::TransactionLease` 保持到最后一步，才会阻止其他前端在命令之间插入。
 
-`pointer_resolve` 已使用该高层 gate：system backend 在稳定 generation/PID/handle/revision 上获得事务，`MemService` 在事务内完成 module list、唯一匹配和每次 8-byte pointer read，释放后再做完整 target 校验。旧 GUI/Lua/IPC 使用的 `ResolveModuleOffsetChain()` 也持有同一 gate，但仍保留旧的首个子串匹配和结果契约。
+`pointer_resolve` 已使用该高层 gate：system backend 在稳定 generation/PID/handle/revision 上获得事务，`MemService` 在事务内完成 module list、唯一匹配和每次 8-byte pointer read，释放后再做完整 target 校验。低层兼容 helper 仍属于协议实现，但 GUI、Lua、Agent 与 Native IPC 都不再把它作为业务入口。
+
+`module_list` 按服务端 mapping 原样返回条目。解析层则把大小写归一化后完整路径相同的分段视为一个模块身份，并以最低地址 mapping 作为 canonical base；因此 executable/read-only 等同 ELF 分段不会让 `module_resolve`、pointer 或 symbol lookup 误报歧义。不同完整路径的同 basename 仍保持歧义并要求调用方收窄查询。现有 wire entry 没有 file offset/inode/load-instance id，不能区分同一路径的多个真实加载实例。
 
 canonical scan 也使用该 gate 和独立 domain mutex。`scan_start` 在一个 MAIN transaction 内发送 range 与 start；每次 scan mutation（包括 IPC 旧入口和 DEBUG stop）推进单调 epoch。`scan_refine`、`scan_results`、`scan_clear` 校验 `{target, scanEpoch}`；结果页把 count+page 放在同一事务，clear 发送后再以 count=0 确认。已发送但没有 terminal count 的 start/refine 返回 `completion_unknown`。GUI `ScanWindow` 注入同一个 `IMemService`，start/refine/results/clear/remove 均绑定 target 与 epoch；remove 在一个 transaction 内去重地址、确认前后 count 并要求 epoch 前进。Stop 只设置共享 token，由 system backend 的 progress callback 发送一次 DEBUG stop。
 
@@ -327,13 +334,7 @@ canonical symbol 使用独立 domain mutex 和 MAIN transaction。`symbol_resolv
 
 canonical breakpoint 使用 service domain mutex，单条 mutation 的设备确认和本地 cleanup tracker 更新处于同一 MAIN transaction。`ClearTrackedKernelBreakpoints()` 持 gate 完成 tracker snapshot 和逐项 remove，避免并发 set 落在 cleanup 缝隙；disconnect/reconnect 不向旧 target 发命令，只清本地 tracker。四种 mutation 使用相同 receipt：未发送可重试，已发送无响应为非重试 `completion_unknown`，确认后才报告 completed/cancel/deadline 状态。`BreakpointWindow` 显式注入同一个 `IMemService`，mutation 与 hit refresh 每次捕获 target context。hits 协议没有 offset/cursor，socket 层必须排空一次响应；`ReadKernelBreakpointInfoTail` 按块接收并只保留最新 tail。service DTO 保存 GPR、`orig_x0`、syscall、FPSR/FPCR 和 32 个 128-bit vector registers；GUI 上限 50,000，Agent 上限 100，二者返回 `available/dropped` 而不是虚假 continuation cursor。
 
-当前复合序列包括：
-
-- 旧 IPC 的 `ScanSetRange` -> `ScanValue`/fuzzy/hex scan
-- 旧 IPC 的 `SymbolInit` -> `SymbolGetList`
-- `AppContext::selectProcess()` 的清理/open/set PID/cache 流程
-
-canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC scan/symbol 和 process selection 分步流程仍可能被插入。旧 mutation 会使 native epoch 失效，但旧调用自身仍没有 canonical completion/session 契约。新增复合工具时应增加高层事务锁、revision/epoch 校验，或把操作下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
+当前产品复合序列都已有明确 owner：pointer 使用 read transaction，scan/symbol 使用 domain mutex + epoch + MAIN transaction，breakpoint mutation/cleanup 使用 MAIN transaction，process selection 使用 request lease + odd/even target mutation + DEBUG/MAIN transaction。GUI、Agent、Lua 与 Native IPC 均从 `MemService` 进入这些 owner，不能在中间插入裸协议步骤。低层协议 helper 仍不是自动事务；新增复合能力时必须进入相同 service 模式、增加 revision/epoch，或下沉为服务端单命令。持有 transaction gate 时不得再获取 `AppContext` 的 process-state mutex，避免与 process -> command 的既有锁顺序反转。
 
 ### 8.3 地址语义
 
@@ -343,7 +344,7 @@ canonical pointer/scan/symbol 与 GUI scan/symbol cache 已迁移；旧 IPC scan
 
 Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`DeviceSession` 现在为普通请求提供 shared lease，为 connect/disconnect/reconnect 提供 exclusive lifecycle gate；任意 I/O 错误、EOF 或 partial failure 都会 poison session、推进 generation、关闭失败 client 并拒绝新请求。旧的待处理字节清理恢复路径已删除。
 
-进程切换保持 connection -> process -> port 锁顺序，同线程嵌套命令复用已有 request lease。首批 `MemService` 操作在执行前后拒绝跨 generation 结果，应用退出也会在静态析构前显式断开。
+进程切换保持 connection -> process -> DEBUG/MAIN port 锁顺序，同线程嵌套命令复用已有 request lease。旧 target 的已在途命令先完成；mutation 期间的新捕获会等待，已捕获旧 snapshot 的命令在取得端口 gate 后因奇数/新 revision 失败。所有 `MemService` 操作在执行前后拒绝跨 generation/target 结果，应用退出也通过 service 在静态析构前显式断开。
 
 `WindowsSocketClient` 通过 `IWindowsSocketOps` 保留默认 `SystemWindowsSocketOps`，同时允许测试注入确定性的 partial I/O、`WSAETIMEDOUT`、EOF 和 endpoint 数据。`MultiPortClientManager` 复用同一注入边界持有三个 client 和 lifecycle gate。自动测试证明旧 endpoint 的迟到字节不会进入新 generation，并用真实 Winsock 三连接验证统一 disconnect/EOF；A-19、A-20 已关闭。Android driver/process/scan/breakpoint 的远端恢复不由 client lifecycle 自动承诺。
 
@@ -353,10 +354,10 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 | 文件 | 管理者 | 内容 | 安全/一致性说明 |
 |------|--------|------|-----------------|
-| `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；无效/I/O 失败保留原文件和内存快照，只有缺失才写默认值 |
+| `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；load 与批量 update/remove 都先构造临时快照，原子安装成功后才提交内存 |
 | `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；临时解析/完整校验后一次提交，只有缺失才写默认值 |
-| `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏索引先保留为 `.corrupt*`，再扫描合法会话重建；备份失败时禁止自动写回 |
-| `ai_sessions/<id>.json` | `ChatSession` | format v2 消息与 tool calls/results | 明文；32 MiB 文件、16 MiB retained payload、1,000 内存消息/10,000 磁盘消息；失败加载不绑定损坏路径，写入使用统一原子安装 |
+| `ai_sessions/index.json` | `SessionManager` | 会话元数据、标题和 active id | `AMEMAIP1` purpose-bound 当前用户 DPAPI 信封；损坏索引先保留为 `.corrupt*`，再扫描合法会话重建 |
+| `ai_sessions/<id>.json` | `ChatSession` | format v2 消息与 tool calls/results | `AMEMAIP1` purpose-bound 当前用户 DPAPI 信封；32 MiB 解密 JSON/33 MiB 外层文件、16 MiB retained payload、1,000 内存消息/10,000 磁盘消息 |
 | `ai_mutation_audit.jsonl` / `.1` | `AgentMutationAuditLog` | mutation/session-effect 完成摘要 | 明文、字段脱敏；64 KiB/record，4 MiB active + 一个轮转备份 |
 | `native_ipc_approval_audit.jsonl` / `.1` | `IpcApprovalAuditLog` | Native IPC approval 状态转换 | 明文；无 params/results；16 KiB/record，4 MiB active + 一个轮转备份 |
 
@@ -364,25 +365,29 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 `AiSettings` 是 system prompt 与 token limit 的唯一持久化所有者。`ChatSession` 保留一份供请求构造和裁剪使用的实时副本，但 session format v2 只写 `version` 和消息历史，不再保存这两个全局字段。启动、切换和创建会话都保留当前全局值。
 
-format v1 仍可迁移；旧文件中的 `systemPrompt`/`tokenLimit` 无论类型是否有效都被忽略，不会阻止消息载入。成功 load 后立即按当前全局 token limit 裁剪消息组。该所有权规则关闭 A-12，但裁剪仍是 UTF-8 bytes/4 的本地启发式，provider-aware context 预算仍属于 A-21。
+format v1 仍可迁移；旧文件中的 `systemPrompt`/`tokenLimit` 无论类型是否有效都被忽略，不会阻止消息载入。成功 load 后立即按当前全局 token limit 和保守 UTF-8 消息估算裁剪持久化消息组。该规则只管理全局用户/历史保留上限；实际 provider dispatch 另有 A-21 的 request-copy 预算，不把 provider 特性写回 session。
+
+设置弹窗使用单一 `ChatSettingsDraft`，打开时从 live persistence snapshot 初始化；provider、prompt、数值和 proxy 只有 Save 才应用。Cancel、标题栏关闭和成功 Save 都主动清零并销毁草稿。已配置 provider 的 Forget 是暂存 mutation，`ApiKeyStore::applyChangesAndSave()` 先加密全部 update、在临时 map 应用 remove，并仅在原子写盘成功后替换 live map；随后 live provider 用空 key 重新配置。`ProviderConfig` 和草稿析构主动擦除其拥有的明文 key buffer。该边界关闭 A-15，但不能撤回已经发出的 HTTP header，也不证明 OS/allocator/剪贴板没有副本。
 
 ### 9.2 写盘保证
 
-`ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 统一使用 `utils::installTempFile()`。加载入口统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid` 或 `IoError`，先把 JSON 完整解析并校验到临时状态，成功后才替换内存状态；只有 `Missing` 会自动创建默认文件。
+`ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 统一使用 `utils::installTempFile()`。加载入口统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid` 或 `IoError`，先把 JSON 完整解析并校验到临时状态，成功后才替换内存状态；只有 `Missing` 会自动创建默认文件。provider 设置批量变更同样先写 candidate map，文件安装失败不会部分更新内存或 live provider。
 
-索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。所有 JSON loader 在 parse 前拒绝超过 32 MiB 的文件；会话逐消息校验 8 MiB content 和 tool 字段预算，磁盘数组超过 10,000 条拒绝，只 reserve/物化最后 1,000 条，并要求 retained payload 不超过 16 MiB。保存时最终 JSON 转义后超过 32 MiB 也不会安装。A-04、A-09 与 A-12 因此关闭。
+索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。保护层先限制外层文件为 33 MiB，DPAPI 解密后再次限制 JSON 为 32 MiB；会话逐消息校验 8 MiB content 和 tool 字段预算，磁盘数组超过 10,000 条拒绝，只 reserve/物化最后 1,000 条，并要求 retained payload 不超过 16 MiB。有效 legacy 明文只有在完整业务 schema 校验后才原子替换为 DPAPI 信封；无效/超限文件保持原字节且不绑定。A-04、A-09、A-11 与 A-12 因此同时保持成立。
 
 ### 9.3 远端 provider 边界
 
-会发送给 provider 的数据包括 system prompt、用户消息、模型历史、工具参数和工具结果。DPAPI 只保护本地磁盘上的 provider key，不会保护发送给 endpoint 的数据。
+会发送给 provider 的数据包括 system prompt、用户消息、模型历史、工具参数和工具结果。DPAPI 保护本地磁盘上的 provider key 与可用 session/index 文件，但不会保护进程内解密副本或发送给 endpoint 的数据；`ai_settings.json` 和两类脱敏 JSONL 审计仍是明文。
 
-`OpenAIProvider` 当前默认 endpoint 是 `https://ai.ikik.net/v1`，即第三方兼容网关。UI 只验证 HTTPS，使用者必须把 endpoint 域名本身视为信任决策。
+`OpenAIProvider` 当前默认 endpoint 是官方 `https://api.openai.com/v1`。自定义 OpenAI-compatible endpoint 必须在设置中显式勾选 `Trust this endpoint`；信任绑定到规范化后的完整 URL，scheme/authority 大小写与末尾斜杠不改变身份，host 或 path 变化会立即失效。`ChatWindow` 预检和 `AgentController` 唯一 dispatch 边界都会在发送 credentials 前 fail closed。配置格式 v3 持久化 `trustedBaseUrl`，旧第三方配置不会被静默信任或改写。HTTPS 仍只证明传输加密，不证明自定义接收方可信。A-10 已关闭。
 
 ### 9.4 Context 预算
 
-provider 声明了 `maxContextTokens`，但当前没有调用方读取 `getCapabilities()`。会话 token limit 可设到 1,000,000，裁剪只按消息 UTF-8 字节数/4，未计工具 schema、provider JSON 开销和输出 token 预留。
+`AgentController` 是 provider-aware 预算的唯一执行边界。它先取得清洗后的 request history 与 advertised tool definitions，再读取当前 provider 的 `maxContextTokens`/`maxOutputTokens`。总窗口取全局用户 `tokenLimit` 与当前 provider/model 上限的较小值；provider config 的 `contextWindowTokens` 可以显式收紧内置 endpoint，自定义 endpoint 则可替换 provider 默认，但仍不能超过用户上限。
 
-因此 `tokenLimit` 只是本地近似阈值，不是“请求一定适配当前模型”的保证。自定义 endpoint/model 还需要显式的 context 配置。
+`ContextBudget` 对 ASCII 采用 3 bytes/token，对非 ASCII code point 更保守计数，并加入每消息/tool-call framing、provider envelope、全部工具 name/description/schema 和 256..4096 output reserve。超限时只从 request copy 删除最旧完整 user-owned group；最新组仍不适配就 fail closed。预算的 reserve 同时写入 Claude/DeepSeek `max_tokens` 和 OpenAI-compatible `max_completion_tokens`。trace 记录估算 input、可用 input、reserve 与 dropped messages，持久化历史不因切换 provider 而丢失。
+
+该估算仍不是各模型精确 tokenizer。自定义 endpoint context 配置和 provider 实际 usage/400 响应是外部事实；真实 provider 集成应继续校准保守 profile，但不能跳过 tool schema/output reserve 或在失败时发送已知超限请求。A-21 已关闭。
 
 ## 10. IPC 迁移状态
 
@@ -508,16 +513,12 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界和 4 MiB tool-result 限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits/global-settings ownership 有 8 组；HTTP lifecycle/receiver limit 有 5 组。四个 A-09 相关 executable 连续 20/20 通过。连同五个静态 gate，当前共 22 项 CTest；fresh mandatory-feature Release 的最终链接证据见重构计划。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 31 个测试组覆盖 service/Agent 边界、连接 generation、批量读取完整性、冻结 completion、ToolExecutor schema 矩阵、AgentRunner 审批组合、tool history 配对、JSON 结构限制和 4 MiB tool-result 语义；`native_app_context_state` 覆盖 target mutation、cache invalidation 和 disconnect publication。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、7 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 19 组；本机 HTTPS/full-response 有 6 组；context budget 有 5 组；provider trust 有 3 组；persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组；HTTP lifecycle/receiver limit 有 5 组。连同九个静态 gate，当前共 30 项 CTest。最新 fresh mandatory-feature + Native IPC Release 产品链接证据见重构计划。以下真实环境路径仍缺验收：
 
-- provider 真实 HTTP/TLS 与 full-response 端到端解析
-- ChatSession 通用工具配对与预算裁剪
-- 持久化原子安装故障注入和 JSON DOM allocator 放大
-- AgentRunner context 预算、auto approve 和 denial 的完整组合
-- ToolExecutor 完整 schema 和错误契约
 - Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - 真实 Android 三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复策略
-- C++ Agent/IPC 名称、结果和 feature gate 对齐
+- 真实 GUI 连接、进程切换、批量刷新和冻结交互 smoke
+- 真实外部 provider 互操作；本机 HTTPS transport、证书拒绝和 full-response 已自动化
 
-真实 Android 设备测试保留给协议兼容、驱动和硬件断点 smoke test。
+真实 Android `Kernel` execute breakpoint 的 set/hits/suspend/resume/remove 链已在内置 Agent 中通过：目标指令读回、命中 PC/寄存器、暂停期间时间戳不增长、恢复后继续增长、移除后命中归零及最终未 poisoned 状态均有记录。同 ELF 多 mapping 的解析已由 A-23 自动化覆盖；尚未自动化的仍是硬件断点 smoke 的可重复 fixture 和 reconnect 后的远端状态恢复。

@@ -1,8 +1,7 @@
 #include "ServerConnectWindow.h"
 #include "ColorScheme.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
-#include "../socket/client.hpp"
+#include "../mem/IMemService.h"
 #include "Gui.h"
 #include "version.h"
 #include "ConfigManager.h"
@@ -10,7 +9,7 @@
 namespace {
 bool isValidPort(int port)
 {
-	return port > 0 && port <= 65535;
+	return port > 0 && port <= 65533;
 }
 
 const char* getMemTypeName(const std::string (&names)[5], int memType)
@@ -19,14 +18,14 @@ const char* getMemTypeName(const std::string (&names)[5], int memType)
 }
 } // namespace
 
-ServerConnectWindow::ServerConnectWindow()
+ServerConnectWindow::ServerConnectWindow(Mem::IMemService& memService)
+	: memService_(memService)
 {
 	name = "服务器连接";
 	std::snprintf(hostBuf, sizeof(hostBuf), "%s", "127.0.0.1");
 	port = 52736;
 	autoReconnect = false;
 	status = "空闲";
-	lastConnected = IsMultiPortConnected();
 	
 	// 初始化新增成员变量
 	currentMemType = 0;
@@ -47,19 +46,26 @@ ServerConnectWindow::ServerConnectWindow()
 void ServerConnectWindow::updateStatus(bool ok, const char* action)
 {
 	if (ok) {
-		ServerVersionInfo versionInfo;
-		if (FetchServerVersion(versionInfo)) {
+		auto response = memService_.status(memService_.captureContext(true));
+		if (response.ok() && response.value().serverVersion) {
+			const auto& server = response.value();
 			status = std::string(action) + ": 已连接到 " + hostBuf + ":" + std::to_string(port);
 			Gui::log("%s", status.c_str());
-			Gui::log("服务器版本: %d", versionInfo.version);
-			Gui::log("服务器版本字符串: %s", versionInfo.versionString.c_str());
-			status = status  +"\n" + " (版本: " + versionInfo.versionString + ")";
+			Gui::log("服务器版本: %d", *server.serverVersion);
+			Gui::log("服务器版本字符串: %s", server.serverVersionString.c_str());
+			status = status  +"\n" + " (版本: " + server.serverVersionString + ")";
 			
 			// 连接成功后更新MemType
 			updateMemType();
 		} else {
 			status = std::string(action) + ": 失败 -> 未知服务器";
-			Gui::log("获取服务器版本失败，服务端可能不兼容");
+			if (response.ok()) {
+				Gui::log("获取服务器版本失败，服务端可能不兼容");
+			} else {
+				Gui::log("获取服务器状态失败 [%s]: %s",
+				         Mem::errorCodeName(response.error().code),
+				         response.error().message.c_str());
+			}
 		}
 	} else {
 		status = std::string(action) + ": 失败";
@@ -69,23 +75,33 @@ void ServerConnectWindow::updateStatus(bool ok, const char* action)
 
 void ServerConnectWindow::updateMemType()
 {
-	if (IsMultiPortConnected()) {
-		int memType = 0;
-		if (GetMemType(memType)) {
-			currentMemType = memType;
+	if (isConnected()) {
+		auto response = memService_.status(memService_.captureContext(true));
+		if (response.ok() && response.value().architectureType) {
+			currentMemType = *response.value().architectureType;
 			Gui::log("当前内存类型: %s (%d)", getMemTypeName(memTypeNames, currentMemType), currentMemType);
 		} else {
-			Gui::log("获取内存类型失败，请检查连接状态");
+			if (!response.ok()) {
+				Gui::log("获取内存类型失败 [%s]: %s",
+				         Mem::errorCodeName(response.error().code),
+				         response.error().message.c_str());
+			} else {
+				Gui::log("服务器未返回内存类型");
+			}
 			currentMemType = 0;
 		}
 	}
+}
+
+bool ServerConnectWindow::isConnected() const
+{
+	return memService_.connectionSnapshot().connected;
 }
 
 void ServerConnectWindow::initializeDriver()
 {
 	std::string cardKey = std::string(cardKeyBuf);
 	std::string kernelVersion = std::string(1, KernelVersionBuf);
-	std::string resultStr;
 	
 	if (cardKey.empty()) {
 		driverStatus = "初始化失败: 卡密不能为空";
@@ -93,16 +109,22 @@ void ServerConnectWindow::initializeDriver()
 		return;
 	}
 	
-	Gui::log("正在初始化驱动，卡密: %s", cardKey.c_str());
+	Gui::log("正在初始化驱动");
 	cardKey = cardKey +"-"+ kernelVersion;
-	if (InitDriver(cardKey, resultStr)) {
-		driverStatus = "初始化成功: " + resultStr;
-		Gui::log("驱动初始化成功: %s", resultStr.c_str());
+	Mem::DriverInitializeRequest request;
+	request.card = cardKey;
+	auto response = memService_.initializeDriver(
+		memService_.captureContext(false), request);
+	if (response.ok()) {
+		driverStatus = "初始化成功: " + response.value().message;
+		Gui::log("驱动初始化成功: %s", response.value().message.c_str());
 		// 初始化成功后更新MemType
 		updateMemType();
 	} else {
-		driverStatus = "初始化失败: " + resultStr;
-		Gui::log("驱动初始化失败: %s", resultStr.c_str());
+		driverStatus = "初始化失败: " + response.error().message;
+		Gui::log("驱动初始化失败 [%s]: %s",
+		         Mem::errorCodeName(response.error().code),
+		         response.error().message.c_str());
 	}
 }
 
@@ -121,30 +143,54 @@ void ServerConnectWindow::drawConnectionControls() {
   ImGui::Checkbox("自动重连", &autoReconnect);
   ImGui::Text("状态: %s", status.c_str());
 
-  if (!IsMultiPortConnected()) {
+  if (!isConnected()) {
     if (ImGui::Button("连接")) {
       if (!isValidPort(port)) {
         status = "连接: 失败 -> invalid port";
         Gui::log("连接失败: invalid port %d", port);
         return;
       }
-      bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
-      updateStatus(ok, "连接");
+      Mem::ConnectRequest request;
+      request.host = hostBuf;
+      request.port = static_cast<uint16_t>(port);
+      auto response = memService_.connect(
+          memService_.captureContext(false), request);
+      updateStatus(response.ok(), "连接");
+      if (!response.ok()) {
+        Gui::log("连接失败 [%s]: %s",
+                 Mem::errorCodeName(response.error().code),
+                 response.error().message.c_str());
+      }
     }
   } else {
     if (ImGui::Button("断开连接")) {
-      GetSocketMgr().DisconnectMultiPort();
-      updateStatus(false, "断开连接");
+      auto response = memService_.disconnect(
+          memService_.captureContext(false));
+      if (response.ok()) {
+        status = "断开连接: 已断开";
+        currentMemType = 0;
+        driverStatus = "未初始化";
+        Gui::log("服务器连接已断开");
+      } else {
+        status = "断开连接: 失败";
+        Gui::log("断开连接失败 [%s]: %s",
+                 Mem::errorCodeName(response.error().code),
+                 response.error().message.c_str());
+      }
     }
   }
 
-  if (autoReconnect && !IsMultiPortConnected()) {
+  if (autoReconnect && !isConnected()) {
     if (!isValidPort(port)) {
       status = "自动重连: 失败 -> invalid port";
       return;
     }
-    bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
-    if (ok)
+    Mem::ConnectRequest request;
+    request.host = hostBuf;
+    request.port = static_cast<uint16_t>(port);
+    auto response = memService_.connect(
+        memService_.captureContext(false), request);
+    if (response.ok())
       updateStatus(true, "自动重连");
   }
 }
@@ -183,7 +229,7 @@ void ServerConnectWindow::drawDriverControls() {
     saveConfig();
   }
 
-  if (IsMultiPortConnected()) {
+  if (isConnected()) {
     if (ImGui::Button("初始化驱动")) {
       initializeDriver();
     }

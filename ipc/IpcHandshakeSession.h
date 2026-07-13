@@ -10,7 +10,8 @@
 
 namespace NativeIpc {
 
-constexpr uint32_t kMaxHandshakePayloadBytes = 16u * 1024u;
+constexpr uint32_t kMaxHandshakePayloadBytes =
+    IpcProtocol::kMaxHandshakePayloadBytes;
 constexpr size_t kMaxClientNameBytes = 128;
 constexpr size_t kMaxClientVersionBytes = 64;
 

@@ -3,6 +3,7 @@
 #include "Window.h"
 #include "MemoryTypes.h"
 #include "../mem/MemTypes.h"
+#include "../mem/MemResult.h"
 #include "../utils/ScopedThread.h"
 #include <vector>
 #include <string>
@@ -98,6 +99,19 @@ public:
 
 private:
     Mem::IMemService& memService_;
+    bool readTargetMemory(
+        uint64_t address, uint32_t size,
+        std::vector<unsigned char>& bytes,
+        Mem::MemoryReadChannel channel = Mem::MemoryReadChannel::Foreground,
+        Mem::Error* error = nullptr);
+    bool readTargetMemoryBatch(
+        const std::vector<Mem::MemoryReadRequest>& requests,
+        std::vector<Mem::MemoryBlock>& blocks,
+        Mem::MemoryReadChannel channel = Mem::MemoryReadChannel::Background,
+        Mem::Error* error = nullptr);
+    bool writeTargetMemory(
+        uint64_t address, const std::vector<unsigned char>& bytes,
+        Mem::Error* error = nullptr);
     Mem::CancellationToken scanCancellation_;
     void drawScanPanel();
     void drawResultsPanel();

@@ -3,7 +3,6 @@
 #include "../Gui.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -45,7 +44,8 @@ static uint8_t getFreezeDataSize(FieldType type) {
     }
 }
 
-static bool resolveWatchItemAddress(const MemoryWatchItem& item, uint64_t& address) {
+bool MemoryViewerWindow::resolveWatchItemAddress(
+    const MemoryWatchItem& item, uint64_t& address) {
     address = item.address;
 
     if (!item.isPointer || item.offsets.empty()) {
@@ -54,7 +54,10 @@ static bool resolveWatchItemAddress(const MemoryWatchItem& item, uint64_t& addre
 
     for (uint64_t offset : item.offsets) {
         std::vector<unsigned char> ptrData;
-        if (!ReadProcessMemoryBytes(address, 8, ptrData) || ptrData.size() < 8) {
+        if (!readTargetMemory(
+                address, 8, ptrData,
+                Mem::MemoryReadChannel::Background) ||
+            ptrData.size() < 8) {
             return false;
         }
 
@@ -69,10 +72,10 @@ static bool resolveWatchItemAddress(const MemoryWatchItem& item, uint64_t& addre
     return true;
 }
 
-static void clearWatchItemFreeze(MemoryWatchItem& item) {
+void MemoryViewerWindow::clearWatchItemFreeze(MemoryWatchItem& item) {
     if (item.frozen || item.frozenDataSize > 0 || item.frozenAddress != 0) {
         const uint64_t address = item.frozenAddress != 0 ? item.frozenAddress : item.address;
-        FreezeRemove(address);
+        (void)removeFrozenValue(address);
     }
 
     item.frozen = false;
@@ -81,7 +84,8 @@ static void clearWatchItemFreeze(MemoryWatchItem& item) {
     memset(item.frozenData, 0, sizeof(item.frozenData));
 }
 
-static void clearWatchItemFreezes(std::vector<MemoryWatchItem>& items) {
+void MemoryViewerWindow::clearWatchItemFreezes(
+    std::vector<MemoryWatchItem>& items) {
     for (auto& item : items) {
         clearWatchItemFreeze(item);
     }
@@ -446,10 +450,14 @@ void MemoryViewerWindow::drawAddressList()
                         if (item.frozen && item.frozenDataSize > 0) {
                             uint64_t freezeAddress = item.frozenAddress != 0 ? item.frozenAddress : item.address;
                             std::vector<unsigned char> rawData;
-                            if (ReadProcessMemoryBytes(freezeAddress, item.frozenDataSize, rawData) &&
+                            if (readTargetMemory(
+                                    freezeAddress, item.frozenDataSize, rawData,
+                                    Mem::MemoryReadChannel::Background) &&
                                 rawData.size() >= item.frozenDataSize) {
                                 memcpy(item.frozenData, rawData.data(), item.frozenDataSize);
-                                FreezeUpdate(freezeAddress, item.frozenData);
+                                (void)updateFrozenValue(
+                                    freezeAddress, item.frozenData,
+                                    item.frozenDataSize);
                             }
                         }
                     }
@@ -501,14 +509,17 @@ void MemoryViewerWindow::drawAddressList()
                     std::vector<unsigned char> rawData;
                     if (dataSize > 0 && dataSize <= 8 &&
                         resolveWatchItemAddress(item, targetAddress) &&
-                        ReadProcessMemoryBytes(targetAddress, dataSize, rawData) &&
+                        readTargetMemory(
+                            targetAddress, dataSize, rawData,
+                            Mem::MemoryReadChannel::Background) &&
                         rawData.size() >= dataSize) {
                         item.frozenDataSize = dataSize;
                         item.frozenAddress = targetAddress;
                         memset(item.frozenData, 0, sizeof(item.frozenData));
                         memcpy(item.frozenData, rawData.data(), dataSize);
                         // 委托服务端冻结
-                        if (!FreezeAdd(targetAddress, dataSize, item.frozenData)) {
+                        if (!addFrozenValue(
+                                targetAddress, item.frozenData, dataSize)) {
                             Gui::log("冻结失败: 0x%llX", (unsigned long long)targetAddress);
                             item.frozen = false;
                             item.frozenDataSize = 0;
@@ -703,7 +714,9 @@ std::string MemoryViewerWindow::readWatchItemValue(MemoryWatchItem& item)
         dataSize = 256;  // 字符串读取更多
     }
     
-    if (!ReadProcessMemoryBytes(addr, dataSize, data) || data.empty()) return "??";
+    if (!readTargetMemory(
+            addr, static_cast<uint32_t>(dataSize), data,
+            Mem::MemoryReadChannel::Background) || data.empty()) return "??";
     
     std::stringstream ss;
     
@@ -871,7 +884,7 @@ bool MemoryViewerWindow::writeWatchItemValue(MemoryWatchItem& item, const std::s
         }
 
         // 写入内存
-        if (WriteProcessMemoryBytes(targetAddress, data.size(), data)) {
+        if (writeTargetMemory(targetAddress, data)) {
             Gui::log("成功写入地址 0x%llX: %s", targetAddress, value.c_str());
             return true;
         } else {
@@ -997,7 +1010,8 @@ void MemoryViewerWindow::loadWatchList()
         if (item.frozen && item.frozenDataSize > 0 && isFreezableType(item.type)) {
             uint64_t targetAddress = 0;
             if (!resolveWatchItemAddress(item, targetAddress) ||
-                !FreezeAdd(targetAddress, item.frozenDataSize, item.frozenData)) {
+                !addFrozenValue(
+                    targetAddress, item.frozenData, item.frozenDataSize)) {
                 item.frozen = false;
                 item.frozenDataSize = 0;
                 item.frozenAddress = 0;

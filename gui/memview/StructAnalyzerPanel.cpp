@@ -3,7 +3,6 @@
 #include "../Gui.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -46,15 +45,6 @@ uint64_t normalizePointerAddress(uint64_t rawAddress)
     }
 
     return rawAddress;
-}
-
-bool readDissectMemory(uint64_t address, int size, std::vector<unsigned char>& out)
-{
-    out.clear();
-    if (address == 0 || size <= 0) {
-        return false;
-    }
-    return ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), out);
 }
 
 bool getStructFieldSpan(const StructField& field, size_t bufferSize,
@@ -311,6 +301,18 @@ void markNodesUnavailable(std::vector<DissectNode>& nodes)
 // ============================================================
 // resolveNodeByPath — 通过路径定位树中节点
 // ============================================================
+bool MemoryViewerWindow::readDissectMemory(
+    uint64_t address, int size, std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (address == 0 || size <= 0) {
+        return false;
+    }
+    return readTargetMemory(
+        address, static_cast<uint32_t>(size), out,
+        Mem::MemoryReadChannel::Foreground);
+}
+
 DissectNode* MemoryViewerWindow::resolveNodeByPath(const std::vector<int>& path)
 {
     if (path.empty()) return nullptr;
@@ -1312,7 +1314,7 @@ bool MemoryViewerWindow::writeDissectNodeValue(DissectNode& node, uint64_t baseA
                 return false;
         }
 
-        if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
+        if (writeTargetMemory(addr, data)) {
             Gui::log("写入 %s @ 0x%llX: %s", node.name.c_str(), (unsigned long long)addr, valueStr.c_str());
             // 刷新整棵树的值
             if (readDissectMemory(structBaseAddress, dissectTotalSize, structBuffer)) {
@@ -1888,7 +1890,7 @@ bool MemoryViewerWindow::writeStructFieldValue(int fieldIndex, const std::string
             }
             default: return false;
         }
-        if (WriteProcessMemoryBytes(addr, (uint32_t)data.size(), data)) {
+        if (writeTargetMemory(addr, data)) {
             const size_t fieldOffset = static_cast<size_t>(field.offset);
             if (fieldOffset <= structBuffer.size() &&
                 data.size() <= structBuffer.size() - fieldOffset) {

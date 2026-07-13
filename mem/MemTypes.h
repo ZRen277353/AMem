@@ -58,6 +58,27 @@ struct Status {
     std::string architectureName;
 };
 
+struct ConnectionSnapshot {
+    bool connected = false;
+    bool connectionPoisoned = false;
+    uint64_t connectionGeneration = 0;
+};
+
+struct ConnectRequest {
+    std::string host;
+    uint16_t port = 0;
+};
+
+struct ConnectionReceipt {
+    bool connected = false;
+    uint64_t connectionGeneration = 0;
+};
+
+struct DisconnectReceipt {
+    bool wasConnected = false;
+    uint64_t connectionGeneration = 0;
+};
+
 struct DriverInitializeRequest {
     std::string card;
 };
@@ -428,14 +449,30 @@ struct ScanRemoveResult {
     TargetSnapshot target;
 };
 
+enum class MemoryReadChannel {
+    Foreground,
+    Background,
+};
+
 struct MemoryReadRequest {
     uint64_t address = 0;
     uint32_t size = 0;
+    MemoryReadChannel channel = MemoryReadChannel::Foreground;
 };
 
 struct MemoryBlock {
     uint64_t address = 0;
     std::vector<unsigned char> bytes;
+    TargetSnapshot target;
+};
+
+struct MemoryBatchReadRequest {
+    std::vector<MemoryReadRequest> items;
+    MemoryReadChannel channel = MemoryReadChannel::Background;
+};
+
+struct MemoryBatch {
+    std::vector<MemoryBlock> items;
     TargetSnapshot target;
 };
 
@@ -494,8 +531,44 @@ struct WriteReceipt {
     TargetSnapshot target;
 };
 
+enum class FreezeAction {
+    Add,
+    Update,
+    Remove,
+    Clear,
+};
+
+struct FreezeValueRequest {
+    uint64_t address = 0;
+    std::vector<unsigned char> bytes;
+};
+
+struct FreezeAddressRequest {
+    uint64_t address = 0;
+};
+
+struct FreezeMutationBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    bool applied = false;
+};
+
+struct FreezeMutationReceipt {
+    uint64_t address = 0;
+    FreezeAction action = FreezeAction::Add;
+    uint32_t valueSize = 0;
+    bool completedAfterCancelRequest = false;
+    bool completedAfterDeadline = false;
+    TargetSnapshot target;
+};
+
 inline constexpr uint32_t kMaxAgentMemoryReadBytes = 64u * 1024u;
 inline constexpr uint32_t kMaxAgentMemoryWriteBytes = 4u * 1024u;
+inline constexpr uint32_t kMaxServiceMemoryReadBytes = 16u * 1024u * 1024u;
+inline constexpr uint32_t kMaxServiceMemoryWriteBytes = 1024u * 1024u;
+inline constexpr size_t kMaxMemoryBatchReadCount = 4096;
+inline constexpr size_t kMaxMemoryBatchReadBytes = 16u * 1024u * 1024u;
+inline constexpr size_t kMaxFreezeValueBytes = 8;
 inline constexpr size_t kMaxProcessPageSize = 1000;
 inline constexpr size_t kMaxModulePageSize = 1000;
 inline constexpr size_t kMaxModuleResultCount = 65536;

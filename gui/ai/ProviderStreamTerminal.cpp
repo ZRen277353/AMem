@@ -2,6 +2,7 @@
 
 #include "ProviderStreamTerminal.h"
 
+#include "ProviderResponseLimits.h"
 #include "nlohmann/json.hpp"
 
 #include <utility>
@@ -24,8 +25,9 @@ ProviderError invalidEvent(const std::string& message) {
 StreamEventObservation InspectClaudeStreamEvent(
     const std::string& eventData) {
     StreamEventObservation observation;
-    try {
-        const json event = json::parse(eventData);
+    json event;
+    std::string parseError;
+    if (parseProviderEventJson(eventData, event, parseError)) {
         if (!event.is_object() || !event.contains("type") ||
             !event["type"].is_string()) {
             observation.error = invalidEvent(
@@ -36,10 +38,9 @@ StreamEventObservation InspectClaudeStreamEvent(
         const std::string type = event["type"].get<std::string>();
         observation.started = type == "message_start";
         observation.terminal = type == "message_stop";
-    } catch (const json::exception& error) {
+    } else {
         observation.error = invalidEvent(
-            std::string("Claude stream event is invalid JSON: ") +
-            error.what());
+            "Claude stream event is invalid JSON: " + parseError);
     }
     return observation;
 }
@@ -53,8 +54,9 @@ StreamEventObservation InspectOpenAICompatibleStreamEvent(
         return observation;
     }
 
-    try {
-        const json event = json::parse(eventData);
+    json event;
+    std::string parseError;
+    if (parseProviderEventJson(eventData, event, parseError)) {
         if (!event.is_object()) {
             observation.error = invalidEvent(
                 providerName + " stream event must be an object");
@@ -96,10 +98,10 @@ StreamEventObservation InspectOpenAICompatibleStreamEvent(
             observation.terminal =
                 !choice["finish_reason"].get<std::string>().empty();
         }
-    } catch (const json::exception& error) {
+    } else {
         observation.error = invalidEvent(
             providerName + " stream event is invalid JSON: " +
-            error.what());
+            parseError);
     }
     return observation;
 }

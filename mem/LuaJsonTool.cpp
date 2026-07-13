@@ -138,7 +138,7 @@ std::string executeLuaJson(IMemService &service, const std::string &argsJson,
 
     SocketIoTimeout::ScopedTimeout luaTimeout(effectiveDeadline);
     LuaEngine &engine = LuaEngine::GetInstance();
-    if (!engine.IsInitialized() && !engine.Initialize()) {
+    if (!engine.Initialize(service)) {
       return errorJson("internal_error",
                        "Lua engine initialization failed: " +
                            engine.GetLastError(),
@@ -152,7 +152,8 @@ std::string executeLuaJson(IMemService &service, const std::string &argsJson,
     std::string output;
     if (!engine.ExecuteStringCapture(
             code, "agent_tool", output,
-            static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()))) {
+            static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()),
+            &context)) {
       const bool timedOut = engine.GetLastError() == "Lua execution timed out";
       return errorJson(timedOut ? "timeout" : "internal_error",
                        engine.GetLastError(), false,

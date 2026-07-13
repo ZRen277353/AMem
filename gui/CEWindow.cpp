@@ -3,13 +3,12 @@
 #include "ColorScheme.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "ModulesWindow.h"
 #include "ScanWindow.h"
 #include "MemoryViewerWindow.h"
 #include "BreakpointWindow.h"
 #include "LogWindow.h"
-#include "../mem/SystemMemService.h"
 
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
@@ -30,7 +29,40 @@
 #include <cctype>
 #include <vector>
 
-CEWindow::CEWindow()
+namespace {
+
+bool loadProcesses(Mem::IMemService& service,
+                   std::vector<Mem::ProcessInfo>& processes,
+                   Mem::Error* error = nullptr) {
+    const Mem::OperationContext context = service.captureContext(false);
+    std::vector<Mem::ProcessInfo> loaded;
+    size_t offset = 0;
+    while (true) {
+        Mem::ProcessListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxProcessPageSize;
+        auto response = service.listProcesses(context, request);
+        if (!response.ok()) {
+            if (error) {
+                *error = response.error();
+            }
+            return false;
+        }
+        const auto& page = response.value();
+        loaded.insert(loaded.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            break;
+        }
+        offset = *page.nextOffset;
+    }
+    processes = std::move(loaded);
+    return true;
+}
+
+} // namespace
+
+CEWindow::CEWindow(Mem::IMemService& memService)
+    : memService_(memService)
 {
     name = "Cheat Engine";
 }
@@ -116,7 +148,7 @@ void CEWindow::drawSelectedProcessBanner()
 
 void CEWindow::drawProcessSelectModal()
 {
-    static std::vector<ProcessInfoItem> list;
+    static std::vector<Mem::ProcessInfo> list;
     static char filterText[256] = "";
     static bool listLoadAttempted = false;
 
@@ -128,8 +160,10 @@ void CEWindow::drawProcessSelectModal()
         if (ImGui::Button("刷新")) {
             list.clear();
             listLoadAttempted = true;
-            if (!FetchProcessList(list))
-                Gui::log("获取进程列表失败，请检查服务器连接状态");
+            Mem::Error error;
+            if (!loadProcesses(memService_, list, &error))
+                Gui::log("获取进程列表失败 [%s]: %s",
+                         Mem::errorCodeName(error.code), error.message.c_str());
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(450.0f);
@@ -139,8 +173,10 @@ void CEWindow::drawProcessSelectModal()
         if (!listLoadAttempted) {
             list.clear();
             listLoadAttempted = true;
-            if (!FetchProcessList(list))
-                Gui::log("获取进程列表失败，请检查服务器连接状态");
+            Mem::Error error;
+            if (!loadProcesses(memService_, list, &error))
+                Gui::log("获取进程列表失败 [%s]: %s",
+                         Mem::errorCodeName(error.code), error.message.c_str());
         }
 
         if (ImGui::BeginChild("proc_modal", ImVec2(600, 400), ImGuiChildFlags_Borders))
@@ -172,10 +208,24 @@ void CEWindow::drawProcessSelectModal()
                     ImGui::Text("%d", it.pid);
                     ImGui::TableSetColumnIndex(1);
                     if (ImGui::Selectable(it.name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
-                        AppContext::Get().selectProcess(it.pid, it.name);
-                        ImGui::CloseCurrentPopup();
-                        openProcessModal = false;
-                        listLoadAttempted = false;
+                        Mem::OpenProcessRequest request;
+                        request.pid = it.pid;
+                        request.name = it.name;
+                        auto response = memService_.openProcess(
+                            memService_.captureContext(true), request);
+                        if (response.ok()) {
+                            Gui::log("进程已打开: %s (PID %d, handle %d)",
+                                     response.value().name.c_str(),
+                                     response.value().target.pid,
+                                     response.value().target.processHandle);
+                            ImGui::CloseCurrentPopup();
+                            openProcessModal = false;
+                            listLoadAttempted = false;
+                        } else {
+                            Gui::log("打开进程失败 [%s]: %s",
+                                     Mem::errorCodeName(response.error().code),
+                                     response.error().message.c_str());
+                        }
                     }
                 }
                 ImGui::EndTable();
@@ -252,35 +302,35 @@ void CEWindow::onDraw()
 // 窗口管理方法 — 使用 Gui::getOrCreate 简化
 void CEWindow::openScanWindow()
 {
-    Gui::getOrCreate<ScanWindow>(Mem::getSystemMemService());
+    Gui::getOrCreate<ScanWindow>(memService_);
 }
 
 void CEWindow::openMemoryViewerWindow()
 {
-    Gui::getOrCreate<MemoryViewerWindow>(Mem::getSystemMemService());
+    Gui::getOrCreate<MemoryViewerWindow>(memService_);
 }
 
 void CEWindow::openBreakpointWindow()
 {
-    Gui::getOrCreate<BreakpointWindow>(Mem::getSystemMemService());
+    Gui::getOrCreate<BreakpointWindow>(memService_);
 }
 
 void CEWindow::openModulesWindow()
 {
-    auto* mw = Gui::getOrCreate<ModulesWindow>();
+    auto* mw = Gui::getOrCreate<ModulesWindow>(memService_);
     if (mw) mw->triggerAutoRefresh();
 }
 
 void CEWindow::openLuaScriptWindow()
 {
 #ifdef HAVE_LUAJIT
-    Gui::getOrCreate<LuaScriptWindow>();
+    Gui::getOrCreate<LuaScriptWindow>(memService_);
 #endif
 }
 
 void CEWindow::openServerConnectWindow()
 {
-    Gui::getOrCreate<ServerConnectWindow>();
+    Gui::getOrCreate<ServerConnectWindow>(memService_);
 }
 
 void CEWindow::openLogWindow()

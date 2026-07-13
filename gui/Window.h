@@ -3,6 +3,10 @@
 #include <string>
 #include <cstdint>
 
+namespace Mem {
+class IMemService;
+}
+
 class Window {
 public:
 	bool pOpen = true;
@@ -23,7 +27,7 @@ public:
 	bool hasProcess() const;
 	int currentPid() const;
 	std::string currentProcessName() const;
-	void navigateToAddress(uint64_t addr);
+	void navigateToAddress(uint64_t addr, Mem::IMemService& memService);
 
 protected:
 	bool shouldRefresh(float& timer, float interval);

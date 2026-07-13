@@ -86,11 +86,11 @@ LuaEngine& LuaEngine::GetInstance() {
     return instance;
 }
 
-bool LuaEngine::Initialize() {
+bool LuaEngine::Initialize(Mem::IMemService& memService) {
     std::lock_guard<std::mutex> lock(mutex);
     
     if (initialized) {
-        return true;
+        return memService_ == &memService;
     }
 
     // 创建Lua状态机
@@ -104,6 +104,7 @@ bool LuaEngine::Initialize() {
     RegisterStandardLibs();
     
     // 注册自定义API
+    memService_ = &memService;
     RegisterAPIs();
 
     initialized = true;
@@ -119,6 +120,7 @@ void LuaEngine::Shutdown() {
     }
     
     initialized = false;
+    memService_ = nullptr;
     loadedScripts.clear();
     callbacks.clear();
     lastError.clear();
@@ -139,7 +141,9 @@ void LuaEngine::RegisterAPIs() {
     if (!L) return;
     
     // 注册所有自定义API
-    LuaAPI::RegisterAll(L);
+    if (memService_) {
+        LuaAPI::RegisterAll(L, *memService_);
+    }
 }
 
 bool LuaEngine::ExecuteFile(const std::string& filepath) {
@@ -212,7 +216,8 @@ bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkN
 bool LuaEngine::ExecuteStringCapture(const std::string& code,
                                      const std::string& chunkName,
                                      std::string& output,
-                                     int timeoutMs) {
+                                     int timeoutMs,
+                                     const Mem::OperationContext* context) {
     std::lock_guard<std::mutex> lock(mutex);
 
     if (!initialized || !L) {
@@ -271,7 +276,10 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code,
         lua_sethook(L, LuaTimeoutHook, LUA_MASKCOUNT, kLuaTimeoutInstructionInterval);
     }
 
+    const Mem::OperationContext* previousContext =
+        LuaAPI::BindOperationContext(L, context);
     result = lua_pcall(L, 0, 0, 0);
+    LuaAPI::BindOperationContext(L, previousContext);
     bool ok = (result == LUA_OK);
     if (!ok) {
         lastError = GetLuaError(L);

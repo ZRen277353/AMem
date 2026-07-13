@@ -80,6 +80,11 @@ public:
     return result;
   }
 
+  Mem::ConnectionSnapshot connectionSnapshot() const override {
+    const auto context = captureContext(false);
+    return {true, false, context.connectionGeneration};
+  }
+
   Mem::Result<Mem::Status>
   status(const Mem::OperationContext &context) override {
     ++statusCalls_;
@@ -104,6 +109,17 @@ public:
     value.target = *current.target;
     value.processName = "com.example.game";
     return Mem::Result<Mem::Status>::success(std::move(value), 1);
+  }
+
+  Mem::Result<Mem::ConnectionReceipt>
+  connect(const Mem::OperationContext &context,
+          const Mem::ConnectRequest &) override {
+    return unsupported<Mem::ConnectionReceipt>(context);
+  }
+
+  Mem::Result<Mem::DisconnectReceipt>
+  disconnect(const Mem::OperationContext &context) override {
+    return unsupported<Mem::DisconnectReceipt>(context);
   }
 
   Mem::Result<Mem::ProcessPage>
@@ -140,8 +156,12 @@ public:
   STUB_METHOD(clearScan, ScanClearResult, ScanClearRequest)
   STUB_METHOD(removeScanResults, ScanRemoveResult, ScanRemoveRequest)
   STUB_METHOD(readMemory, MemoryBlock, MemoryReadRequest)
+  STUB_METHOD(readMemoryBatch, MemoryBatch, MemoryBatchReadRequest)
   STUB_METHOD(readValue, ScalarValue, ValueReadRequest)
   STUB_METHOD(writeValue, WriteReceipt, ValueWriteRequest)
+  STUB_METHOD(freezeAdd, FreezeMutationReceipt, FreezeValueRequest)
+  STUB_METHOD(freezeUpdate, FreezeMutationReceipt, FreezeValueRequest)
+  STUB_METHOD(freezeRemove, FreezeMutationReceipt, FreezeAddressRequest)
 
 #undef STUB_METHOD
 
@@ -162,6 +182,11 @@ public:
     value.writtenBytes = value.requestedBytes;
     value.target = *current.target;
     return Mem::Result<Mem::WriteReceipt>::success(std::move(value), 1);
+  }
+
+  Mem::Result<Mem::FreezeMutationReceipt>
+  freezeClear(const Mem::OperationContext &context) override {
+    return unsupported<Mem::FreezeMutationReceipt>(context);
   }
 
   Mem::Result<Mem::ScanSummary>

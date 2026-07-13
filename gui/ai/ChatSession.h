@@ -12,7 +12,8 @@ namespace AI {
 
 // ChatSession owns the ordered conversation history for a single chat window.
 // It is responsible for message retention (max 1000), token-limit truncation,
-// and JSON persistence so sessions survive application restarts.
+// and Windows-user-protected JSON persistence so sessions survive restarts
+// without leaving message/tool payloads readable at rest.
 //
 // The class is lightly thread-safe: all public mutating/observing operations
 // take an internal mutex so background completion threads can append tokens

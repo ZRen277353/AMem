@@ -1,6 +1,7 @@
 #include "IpcMemServiceDispatcher.h"
 
 #include "IpcApprovalBroker.h"
+#include "IpcJsonLimits.h"
 
 #include <nlohmann/json.hpp>
 
@@ -97,8 +98,11 @@ bool successfulCompletion(RequestCompletion completion) {
 }
 
 std::optional<Mem::TargetSnapshot> selectedTarget(const std::string &payload) {
-  const json parsed = json::parse(payload, nullptr, false);
-  if (parsed.is_discarded() || !parsed.is_object()) {
+  json parsed;
+  std::string error;
+  if (!utils::parseBoundedJson(
+          payload, kResponseJsonLimits, parsed, error) ||
+      !parsed.is_object()) {
     return std::nullopt;
   }
   try {
@@ -127,8 +131,11 @@ bool applySelectionCompletion(IpcDispatchResult &result,
   if (!cancelled && !deadline) {
     return true;
   }
-  json payload = json::parse(result.resultJson, nullptr, false);
-  if (payload.is_discarded() || !payload.is_object()) {
+  json payload;
+  std::string error;
+  if (!utils::parseBoundedJson(
+          result.resultJson, kResponseJsonLimits, payload, error) ||
+      !payload.is_object()) {
     return false;
   }
   const bool cancelledAfterStart =
@@ -606,8 +613,11 @@ IpcDispatchResult IpcMemServiceDispatcher::finishSelection(
 
 IpcDispatchResult IpcMemServiceDispatcher::fromToolJson(
     const std::string& payload) {
-    const json parsed = json::parse(payload, nullptr, false);
-    if (parsed.is_discarded() || !parsed.is_object()) {
+    json parsed;
+    std::string parseError;
+    if (!utils::parseBoundedJson(
+            payload, kResponseJsonLimits, parsed, parseError) ||
+        !parsed.is_object()) {
         return localError("internal_response_error",
                           "MemService adapter returned invalid JSON",
                           RequestCompletion::CompletionUnknown);

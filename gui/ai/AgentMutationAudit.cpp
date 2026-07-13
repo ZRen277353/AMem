@@ -2,7 +2,9 @@
 
 #include "AgentMutationAudit.h"
 
+#include "ProviderResponseLimits.h"
 #include "ToolCallSecurity.h"
+#include "../../utils/BoundedJson.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <algorithm>
@@ -23,6 +25,15 @@ constexpr size_t kMaxAuditErrorBytes = 2048;
 constexpr size_t kMaxObjectFields = 64;
 constexpr size_t kMaxArrayItems = 32;
 constexpr int kMaxJsonDepth = 4;
+
+constexpr utils::JsonComplexityLimits kAuditJsonLimits = {
+    kMaxRecordBytes,
+    16u,
+    2048u,
+    256u,
+    kMaxRecordBytes,
+    kMaxRecordBytes,
+};
 
 long long nowUnixMilliseconds() {
     using namespace std::chrono;
@@ -147,8 +158,10 @@ json parseAndSanitize(const std::string& text,
     if (text.empty()) {
         return json::object();
     }
-    try {
-        json sanitized = sanitizeJson(json::parse(text));
+    json parsed;
+    std::string parseError;
+    if (parseToolResultJson(text, parsed, parseError)) {
+        json sanitized = sanitizeJson(parsed);
         if (redactMessages && sanitized.is_object()) {
             if (sanitized.contains("message")) {
                 sanitized["message"] = json{{"omitted", true}};
@@ -160,9 +173,8 @@ json parseAndSanitize(const std::string& text,
             }
         }
         return sanitized;
-    } catch (const json::exception&) {
-        return json{{"invalid_json", true}, {"text_bytes", text.size()}};
     }
+    return json{{"invalid_json", true}, {"text_bytes", text.size()}};
 }
 
 std::string boundedError(std::string error) {
@@ -351,22 +363,46 @@ void AgentMutationAuditLog::loadRecent() {
         return;
     }
 
-    std::string line;
-    while (std::getline(input, line)) {
-        try {
-            const json record = json::parse(line);
+    const auto loadLine = [this](const std::string& line) {
+        json record;
+        std::string parseError;
+        if (utils::parseBoundedJson(
+                line, kAuditJsonLimits, record, parseError)) {
             if (!record.is_object() ||
                 record.value("schema_version", 0) != 1) {
-                continue;
+                return;
             }
             recent_.push_back(entryFromJson(record));
             if (recent_.size() > maxRecentEntries_) {
                 recent_.erase(recent_.begin());
             }
-        } catch (const json::exception&) {
-            // A crash may leave one partial trailing JSONL record. Keep prior
-            // valid records and ignore malformed lines.
         }
+    };
+
+    std::string line;
+    line.reserve((std::min)(kMaxRecordBytes, size_t{1024}));
+    bool oversized = false;
+    char item = 0;
+    while (input.get(item)) {
+        if (item == '\n') {
+            if (!oversized && !line.empty()) {
+                loadLine(line);
+            }
+            line.clear();
+            oversized = false;
+            continue;
+        }
+        if (!oversized) {
+            if (line.size() < kMaxRecordBytes) {
+                line.push_back(item);
+            } else {
+                line.clear();
+                oversized = true;
+            }
+        }
+    }
+    if (!oversized && !line.empty()) {
+        loadLine(line);
     }
 }
 

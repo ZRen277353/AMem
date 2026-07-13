@@ -215,7 +215,13 @@ void testRotationReloadAndMalformedLinesStayBounded() {
 
   {
     std::ofstream output(path, std::ios::binary | std::ios::app);
-    output << "{malformed-json}\n" << std::string(20u * 1024u, 'x') << '\n'
+    output << "{malformed-json}\n" << std::string(20u * 1024u, 'x') << '\n';
+    output << "{\"schema_version\":2,\"dense\":[";
+    for (size_t item = 0; item < 2000u; ++item) {
+      if (item != 0) output << ',';
+      output << '0';
+    }
+    output << "]}\n"
            << R"({"schema_version":1,"timestamp_ms":1,"approval_id":777,"session_id":9,"request_id":7,"client_name":"legacy","method":"memory_write","state":"pending"})"
            << '\n';
   }

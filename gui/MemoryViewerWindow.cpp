@@ -6,7 +6,7 @@
 #include "EventBus.h"
 #include "Events.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -138,6 +138,84 @@ MemoryViewerWindow::~MemoryViewerWindow()
     EventBus::Get().unsubscribe<NavigateToAddressEvent>(navSubscriptionId);
 }
 
+bool MemoryViewerWindow::readTargetMemory(
+    uint64_t address, uint32_t size,
+    std::vector<unsigned char>& bytes,
+    Mem::MemoryReadChannel channel,
+    Mem::Error* error) {
+    Mem::MemoryReadRequest request;
+    request.address = address;
+    request.size = size;
+    request.channel = channel;
+    auto response = memService_.readMemory(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        bytes.clear();
+        if (error) *error = response.error();
+        return false;
+    }
+    bytes = std::move(response.value().bytes);
+    return true;
+}
+
+bool MemoryViewerWindow::writeTargetMemory(
+    uint64_t address, const std::vector<unsigned char>& bytes,
+    Mem::Error* error) {
+    Mem::MemoryWriteRequest request;
+    request.address = address;
+    request.bytes = bytes;
+    auto response = memService_.writeMemory(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        if (error) *error = response.error();
+        return false;
+    }
+    return true;
+}
+
+bool MemoryViewerWindow::addFrozenValue(
+    uint64_t address, const unsigned char* bytes, size_t size,
+    Mem::Error* error) {
+    Mem::FreezeValueRequest request;
+    request.address = address;
+    request.bytes.assign(bytes, bytes + size);
+    auto response = memService_.freezeAdd(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        if (error) *error = response.error();
+        return false;
+    }
+    return true;
+}
+
+bool MemoryViewerWindow::updateFrozenValue(
+    uint64_t address, const unsigned char* bytes, size_t size,
+    Mem::Error* error) {
+    Mem::FreezeValueRequest request;
+    request.address = address;
+    request.bytes.assign(bytes, bytes + size);
+    auto response = memService_.freezeUpdate(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        if (error) *error = response.error();
+        return false;
+    }
+    return true;
+}
+
+bool MemoryViewerWindow::removeFrozenValue(
+    uint64_t address, Mem::Error* error) {
+    Mem::FreezeAddressRequest request;
+    request.address = address;
+    auto response = memService_.freezeRemove(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        if (error) *error = response.error();
+        return false;
+    }
+    return true;
+}
+
 unsigned int MemoryViewerWindow::getWindowFlags() const
 {
     return ImGuiWindowFlags_NoDocking;
@@ -158,7 +236,8 @@ void MemoryViewerWindow::jumpToAddress(uint64_t address)
     viewSize = pageSize;  // 确保读取一整页
     buffer.resize(viewSize);
     
-    if (ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer)) {
+    if (readTargetMemory(
+            viewAddress, static_cast<uint32_t>(viewSize), buffer)) {
         // 读取成功
         Gui::log("内存查看器已跳转到地址: 0x%llX (页首: 0x%llX, 页内偏移: 0x%llX)", 
                  address, pageBaseAddress, address - pageBaseAddress);
@@ -262,7 +341,9 @@ void MemoryViewerWindow::refreshMemory()
         buffer.resize(viewSize);
         
         // 使用调试端口进行自动刷新，避免阻塞主端口
-        if (!ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer, PORT_DEBUG)) {
+        if (!readTargetMemory(
+                viewAddress, static_cast<uint32_t>(viewSize), buffer,
+                Mem::MemoryReadChannel::Background)) {
             // 读取失败时，清空buffer避免显示错误数据
             std::fill(buffer.begin(), buffer.end(), 0);
             Gui::log("刷新内存失败: 0x%llX", viewAddress);
@@ -283,12 +364,14 @@ void MemoryViewerWindow::writeMemoryByte(uint64_t address, unsigned char value)
     }
     
     std::vector<unsigned char> data = { value };
-    if (WriteProcessMemoryBytes(address, 1, data)) {
+    Mem::Error error;
+    if (writeTargetMemory(address, data, &error)) {
         Gui::log("成功写入内存: 0x%llX = 0x%02X", address, value);
         // 写入成功后刷新内存显示
         refreshMemory();
     } else {
-        Gui::log("错误：写入内存失败 - 地址 0x%llX", address);
+        Gui::log("错误：写入内存失败 - 地址 0x%llX [%s]: %s",
+                 address, Mem::errorCodeName(error.code), error.message.c_str());
     }
 }
 

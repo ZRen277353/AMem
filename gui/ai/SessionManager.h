@@ -41,12 +41,12 @@ struct SessionInfo {
 // executable when run via `bin/ImGuiProject.exe`):
 //
 //   ai_sessions/
-//     index.json            ← metadata list + activeId
-//     <id>.json             ← one per session, matches ChatSession format
+//     index.json            ← DPAPI envelope: metadata list + activeId
+//     <id>.json             ← DPAPI envelope: ChatSession format v2 JSON
 //
-// Legacy migration: if `ai_session.json` exists at startup but no
-// `ai_sessions/` directory, it gets moved in under a new id so users
-// never lose their history.
+// Valid legacy plaintext sessions are schema-validated and atomically
+// migrated to current-user DPAPI protection before use. Invalid legacy files
+// remain byte-for-byte unchanged and are never bound to a live ChatSession.
 class SessionManager {
 public:
     static SessionManager& getInstance() {

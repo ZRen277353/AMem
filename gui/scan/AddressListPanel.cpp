@@ -3,7 +3,6 @@
 #include "../ColorScheme.h"
 #include "../Gui.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -216,7 +215,7 @@ void ScanWindow::drawAddressListPanel()
                 // 临时释放锁，避免死锁
                 lock.unlock();
 
-                navigateToAddress(itemAddress);
+                navigateToAddress(itemAddress, memService_);
 
                 // 重新获取锁以继续循环（如果失败则退出）
                 lock.lock();
@@ -241,7 +240,7 @@ void ScanWindow::drawAddressListPanel()
                         // 临时释放锁
                         lock.unlock();
 
-                        navigateToAddress(itemAddress);
+                        navigateToAddress(itemAddress, memService_);
 
                         // 重新获取锁
                         lock.lock();
@@ -393,7 +392,7 @@ void ScanWindow::refreshAddressValuesForRevision(uint64_t expectedProcessRevisio
 
     // 第二步：使用批量读取优化内存访问（大幅提升性能）
     // 准备批量读取的地址列表
-    std::vector<std::pair<uint64_t, int32_t>> batchAddrs;
+    std::vector<Mem::MemoryReadRequest> batchAddrs;
     batchAddrs.reserve(refreshData.size());
 
     for (auto& data : refreshData) {
@@ -407,12 +406,17 @@ void ScanWindow::refreshAddressValuesForRevision(uint64_t expectedProcessRevisio
             case 5: size = 8; break;
             default: size = 4; break;
         }
-        batchAddrs.push_back({data.address, size});
+        Mem::MemoryReadRequest request;
+        request.address = data.address;
+        request.size = size;
+        request.channel = Mem::MemoryReadChannel::Background;
+        batchAddrs.push_back(request);
     }
 
     // 批量读取所有地址（使用调试端口进行自动刷新）
-    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> batchResults;
-    bool batchSuccess = ReadBratchAddr(batchAddrs, batchResults, PORT_DEBUG);
+    std::vector<Mem::MemoryBlock> batchResults;
+    bool batchSuccess = readTargetMemoryBatch(
+        batchAddrs, batchResults, Mem::MemoryReadChannel::Background);
     if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
         return;
     }
@@ -423,8 +427,8 @@ void ScanWindow::refreshAddressValuesForRevision(uint64_t expectedProcessRevisio
             auto& data = refreshData[i];
             auto& result = batchResults[i];
 
-            if (result.second.size() >= batchAddrs[i].second) {
-                data.newValue = formatValueOutput(result.second.data(), data.valueType);
+            if (result.bytes.size() >= batchAddrs[i].size) {
+                data.newValue = formatValueOutput(result.bytes.data(), data.valueType);
                 data.success = true;
             } else {
                 data.newValue = "读取失败";
@@ -448,7 +452,10 @@ void ScanWindow::refreshAddressValuesForRevision(uint64_t expectedProcessRevisio
                 default: size = 4; break;
             }
 
-            if (ReadProcessMemoryBytes(data.address, size, buffer, PORT_DEBUG) && buffer.size() >= size) {
+            if (readTargetMemory(
+                    data.address, size, buffer,
+                    Mem::MemoryReadChannel::Background) &&
+                buffer.size() >= size) {
                 data.newValue = formatValueOutput(buffer.data(), data.valueType);
                 data.success = true;
             } else {
@@ -515,7 +522,10 @@ std::string ScanWindow::readAddressValue(uint64_t address, int valueType)
     std::vector<unsigned char> buffer;
     uint32_t size = GetAddressValueSize(valueType);
 
-    if (ReadProcessMemoryBytes(address, size, buffer, PORT_DEBUG) && buffer.size() >= size) {
+    if (readTargetMemory(
+            address, size, buffer,
+            Mem::MemoryReadChannel::Background) &&
+        buffer.size() >= size) {
         return formatValueOutput(buffer.data(), valueType);
     }
 
@@ -602,10 +612,13 @@ bool ScanWindow::writeAddressValue(uint64_t address, int valueType, const std::s
         }
 
         // 写入内存
-        if (WriteProcessMemoryBytes(address, data.size(), data)) {
+        Mem::Error error;
+        if (writeTargetMemory(address, data, &error)) {
             return true;
         } else {
-            Gui::log("错误：写入内存失败 - 地址 0x%llX", (unsigned long long)address);
+            Gui::log("错误：写入内存失败 - 地址 0x%llX [%s]: %s",
+                     (unsigned long long)address,
+                     Mem::errorCodeName(error.code), error.message.c_str());
             return false;
         }
     } catch (const std::exception& e) {

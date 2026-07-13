@@ -118,13 +118,23 @@ std::optional<Error> findResolvedModule(
         return Error{ErrorCode::InvalidArgument,
                      "module_name did not match a loaded module", false};
     }
-    if (matches->size() != 1) {
-        return Error{
-            ErrorCode::InvalidArgument,
-            "module_name is ambiguous; use module_list with a narrower filter",
-            false};
+
+    // Android reports one row per mapping. Multiple rows with the same full
+    // path are segments of one module; use its lowest mapping as the base.
+    const ModuleInfo* canonical = matches->front();
+    const std::string canonicalName = lowerAscii(canonical->name);
+    for (const ModuleInfo* candidate : *matches) {
+        if (lowerAscii(candidate->name) != canonicalName) {
+            return Error{
+                ErrorCode::InvalidArgument,
+                "module_name is ambiguous; use module_list with a narrower filter",
+                false};
+        }
+        if (candidate->base < canonical->base) {
+            canonical = candidate;
+        }
     }
-    resolved = matches->front();
+    resolved = canonical;
     return std::nullopt;
 }
 
@@ -143,6 +153,16 @@ const char* breakpointActionName(BreakpointAction action) {
         case BreakpointAction::Suspend: return "suspend";
         case BreakpointAction::Resume:  return "resume";
         default:                        return "mutate";
+    }
+}
+
+const char* freezeActionName(FreezeAction action) {
+    switch (action) {
+        case FreezeAction::Add:    return "add";
+        case FreezeAction::Update: return "update";
+        case FreezeAction::Remove: return "remove";
+        case FreezeAction::Clear:  return "clear";
+        default:                   return "mutate";
     }
 }
 
@@ -331,6 +351,14 @@ OperationContext MemService::captureContext(bool includeTarget) const {
     return context;
 }
 
+ConnectionSnapshot MemService::connectionSnapshot() const {
+    ConnectionSnapshot snapshot;
+    snapshot.connected = backend_.isConnected();
+    snapshot.connectionPoisoned = backend_.isConnectionPoisoned();
+    snapshot.connectionGeneration = backend_.connectionGeneration();
+    return snapshot;
+}
+
 std::optional<Error> MemService::validateContext(
     const OperationContext& context,
     bool requireConnected,
@@ -436,6 +464,73 @@ Result<Status> MemService::status(const OperationContext& context) {
     return Result<Status>::success(std::move(value), elapsedMilliseconds(start));
 }
 
+Result<ConnectionReceipt> MemService::connect(
+    const OperationContext& context,
+    const ConnectRequest& request) {
+    const auto start = Clock::now();
+    if (request.host.empty() || request.host.size() > 255) {
+        return Result<ConnectionReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "connection host must contain between 1 and 255 bytes",
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (request.port == 0 || request.port > 65533) {
+        return Result<ConnectionReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "connection base port must be between 1 and 65533",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> connectionLock(connectionMutex_);
+    if (const auto error = validateContext(context, false, false, true)) {
+        return failureFrom<ConnectionReceipt>(*error, start);
+    }
+    if (!backend_.connect(request.host, request.port)) {
+        return Result<ConnectionReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "failed to connect all three Android server ports",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (!backend_.isConnected() || backend_.isConnectionPoisoned()) {
+        return Result<ConnectionReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "connection backend did not enter a usable connected state",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    ConnectionReceipt receipt;
+    receipt.connected = true;
+    receipt.connectionGeneration = backend_.connectionGeneration();
+    return Result<ConnectionReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
+Result<DisconnectReceipt> MemService::disconnect(
+    const OperationContext& context) {
+    const auto start = Clock::now();
+    std::lock_guard<std::mutex> connectionLock(connectionMutex_);
+    if (const auto error = validateContext(context, false, false, true)) {
+        return failureFrom<DisconnectReceipt>(*error, start);
+    }
+
+    DisconnectReceipt receipt;
+    receipt.wasConnected = backend_.disconnect();
+    receipt.connectionGeneration = backend_.connectionGeneration();
+    if (backend_.isConnected()) {
+        return Result<DisconnectReceipt>::failure(
+            ErrorCode::InternalError,
+            "connection backend remained connected after disconnect",
+            false,
+            elapsedMilliseconds(start));
+    }
+    return Result<DisconnectReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
 Result<DriverInitializationReceipt> MemService::initializeDriver(
     const OperationContext& context,
     const DriverInitializeRequest& request) {
@@ -524,7 +619,7 @@ Result<ProcessPage> MemService::listProcesses(
     }
 
     std::vector<ProcessInfo> allProcesses;
-    if (!backend_.fetchProcesses(allProcesses)) {
+    if (!backend_.fetchProcesses(context, allProcesses)) {
         if (const auto error = validateContext(context, true, false, true)) {
             return failureFrom<ProcessPage>(*error, start);
         }
@@ -613,7 +708,7 @@ Result<OpenProcessResult> MemService::openProcess(
     std::string resolvedName = request.name;
     if (resolvedName.empty()) {
         std::vector<ProcessInfo> processes;
-        if (backend_.fetchProcesses(processes)) {
+        if (backend_.fetchProcesses(context, processes)) {
             for (const auto& process : processes) {
                 if (process.pid == request.pid) {
                     resolvedName = process.name;
@@ -629,7 +724,14 @@ Result<OpenProcessResult> MemService::openProcess(
     if (const auto error = validateSelectionTarget()) {
         return failureFrom<OpenProcessResult>(*error, start);
     }
-    if (!backend_.openProcess(request.pid, resolvedName)) {
+    std::lock_guard<std::mutex> processLock(processMutex_);
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<OpenProcessResult>(*error, start);
+    }
+    if (const auto error = validateSelectionTarget()) {
+        return failureFrom<OpenProcessResult>(*error, start);
+    }
+    if (!backend_.openProcess(context, request.pid, resolvedName)) {
         if (const auto error = validateContext(context, true, false, false)) {
             return failureFrom<OpenProcessResult>(*error, start);
         }
@@ -689,7 +791,7 @@ Result<ModulePage> MemService::listModules(
     }
 
     std::vector<ModuleInfo> allModules;
-    if (!backend_.fetchModules(allModules)) {
+    if (!backend_.fetchModules(context, allModules)) {
         if (const auto error = validateContext(context, true, true, true)) {
             return failureFrom<ModulePage>(*error, start);
         }
@@ -757,7 +859,7 @@ Result<ResolvedModule> MemService::resolveModule(
     }
 
     std::vector<ModuleInfo> modules;
-    if (!backend_.fetchModules(modules)) {
+    if (!backend_.fetchModules(context, modules)) {
         if (const auto error = validateContext(context, true, true, true)) {
             return failureFrom<ResolvedModule>(*error, start);
         }
@@ -1516,7 +1618,7 @@ Result<BreakpointMutationReceipt> MemService::setBreakpoint(
         BreakpointAction::Set,
         [&] {
             return backend_.setBreakpoint(
-                request.address, request.access, request.size);
+                context, request.address, request.access, request.size);
         },
         request.access,
         request.size);
@@ -1529,7 +1631,7 @@ Result<BreakpointMutationReceipt> MemService::removeBreakpoint(
         context,
         request.address,
         BreakpointAction::Remove,
-        [&] { return backend_.removeBreakpoint(request.address); });
+        [&] { return backend_.removeBreakpoint(context, request.address); });
 }
 
 Result<BreakpointMutationReceipt> MemService::suspendBreakpoint(
@@ -1539,7 +1641,7 @@ Result<BreakpointMutationReceipt> MemService::suspendBreakpoint(
         context,
         request.address,
         BreakpointAction::Suspend,
-        [&] { return backend_.suspendBreakpoint(request.address); });
+        [&] { return backend_.suspendBreakpoint(context, request.address); });
 }
 
 Result<BreakpointMutationReceipt> MemService::resumeBreakpoint(
@@ -1549,7 +1651,7 @@ Result<BreakpointMutationReceipt> MemService::resumeBreakpoint(
         context,
         request.address,
         BreakpointAction::Resume,
-        [&] { return backend_.resumeBreakpoint(request.address); });
+        [&] { return backend_.resumeBreakpoint(context, request.address); });
 }
 
 Result<BreakpointHitBatch> MemService::breakpointHitBatch(
@@ -1580,7 +1682,7 @@ Result<BreakpointHitBatch> MemService::breakpointHitBatch(
     std::vector<BreakpointHit> hits;
     size_t total = 0;
     if (!backend_.fetchBreakpointHitBatch(
-            request.address, request.limit, hits, total)) {
+            context, request.address, request.limit, hits, total)) {
         if (const auto error = validateContext(context, true, true, true)) {
             return failureFrom<BreakpointHitBatch>(*error, start);
         }
@@ -2165,10 +2267,10 @@ Result<MemoryBlock> MemService::readMemory(
     const OperationContext& context,
     const MemoryReadRequest& request) {
     const auto start = Clock::now();
-    if (request.size == 0 || request.size > kMaxAgentMemoryReadBytes) {
+    if (request.size == 0 || request.size > kMaxServiceMemoryReadBytes) {
         return Result<MemoryBlock>::failure(
             ErrorCode::InvalidArgument,
-            "memory read size must be between 1 and 65536 bytes",
+            "memory read size must be between 1 and 16777216 bytes",
             false,
             elapsedMilliseconds(start));
     }
@@ -2185,7 +2287,8 @@ Result<MemoryBlock> MemService::readMemory(
     }
 
     std::vector<unsigned char> bytes;
-    if (!backend_.readMemory(request.address, request.size, bytes)) {
+    if (!backend_.readMemory(
+            context, request.channel, request.address, request.size, bytes)) {
         if (const auto error = validateContext(context, true, true, true)) {
             return failureFrom<MemoryBlock>(*error, start);
         }
@@ -2213,6 +2316,106 @@ Result<MemoryBlock> MemService::readMemory(
     block.target = *context.target;
     return Result<MemoryBlock>::success(std::move(block),
                                         elapsedMilliseconds(start));
+}
+
+Result<MemoryBatch> MemService::readMemoryBatch(
+    const OperationContext& context,
+    const MemoryBatchReadRequest& request) {
+    const auto start = Clock::now();
+    if (request.items.empty() ||
+        request.items.size() > kMaxMemoryBatchReadCount) {
+        return Result<MemoryBatch>::failure(
+            ErrorCode::InvalidArgument,
+            "memory batch must contain between 1 and 4096 reads",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    size_t totalBytes = 0;
+    std::vector<MemoryReadRequest> normalized = request.items;
+    for (auto& item : normalized) {
+        item.channel = request.channel;
+        if (item.size == 0 || item.size > kMaxServiceMemoryReadBytes) {
+            return Result<MemoryBatch>::failure(
+                ErrorCode::InvalidArgument,
+                "memory batch item size is outside the service limit",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (item.address >
+            (std::numeric_limits<uint64_t>::max)() - (item.size - 1u)) {
+            return Result<MemoryBatch>::failure(
+                ErrorCode::InvalidArgument,
+                "memory batch item range overflows the uint64 address space",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (totalBytes > kMaxMemoryBatchReadBytes - item.size) {
+            return Result<MemoryBatch>::failure(
+                ErrorCode::InvalidArgument,
+                "memory batch exceeds the 16 MiB aggregate limit",
+                false,
+                elapsedMilliseconds(start));
+        }
+        totalBytes += item.size;
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<MemoryBatch>(*error, start);
+    }
+
+    auto transaction = backend_.beginReadTransaction(
+        context, request.channel);
+    if (!transaction) {
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<MemoryBatch>(*error, start);
+        }
+        return Result<MemoryBatch>::failure(
+            ErrorCode::ProtocolError,
+            "failed to acquire the memory batch transaction",
+            true,
+            elapsedMilliseconds(start));
+    }
+
+    std::vector<MemoryBlock> blocks;
+    if (!transaction->readMemoryBatch(normalized, blocks)) {
+        transaction.reset();
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<MemoryBatch>(*error, start);
+        }
+        return Result<MemoryBatch>::failure(
+            ErrorCode::ProtocolError,
+            "failed to read the requested memory batch",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (blocks.size() != normalized.size()) {
+        return Result<MemoryBatch>::failure(
+            ErrorCode::ProtocolError,
+            "memory batch returned an incomplete result set",
+            false,
+            elapsedMilliseconds(start));
+    }
+    for (size_t index = 0; index < blocks.size(); ++index) {
+        if (blocks[index].address != normalized[index].address ||
+            blocks[index].bytes.size() != normalized[index].size) {
+            return Result<MemoryBatch>::failure(
+                ErrorCode::ProtocolError,
+                "memory batch result does not match its request",
+                false,
+                elapsedMilliseconds(start));
+        }
+        blocks[index].target = *context.target;
+    }
+
+    transaction.reset();
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<MemoryBatch>(*error, start);
+    }
+    MemoryBatch batch;
+    batch.items = std::move(blocks);
+    batch.target = *context.target;
+    return Result<MemoryBatch>::success(
+        std::move(batch), elapsedMilliseconds(start));
 }
 
 Result<ScalarValue> MemService::readValue(
@@ -2258,10 +2461,10 @@ Result<WriteReceipt> MemService::writeMemory(
     const MemoryWriteRequest& request) {
     const auto start = Clock::now();
     if (request.bytes.empty() ||
-        request.bytes.size() > kMaxAgentMemoryWriteBytes) {
+        request.bytes.size() > kMaxServiceMemoryWriteBytes) {
         return Result<WriteReceipt>::failure(
             ErrorCode::InvalidArgument,
-            "memory write size must be between 1 and 4096 bytes",
+            "memory write size must be between 1 and 1048576 bytes",
             false,
             elapsedMilliseconds(start));
     }
@@ -2279,7 +2482,7 @@ Result<WriteReceipt> MemService::writeMemory(
     }
 
     const MemoryWriteBackendResult backendResult =
-        backend_.writeMemory(request.address, request.bytes);
+        backend_.writeMemory(context, request.address, request.bytes);
     if (!backendResult.responseReceived) {
         if (backendResult.requestStarted) {
             return Result<WriteReceipt>::failure(
@@ -2365,6 +2568,125 @@ Result<WriteReceipt> MemService::writeValue(
     }
     return Result<WriteReceipt>::success(
         std::move(raw.value()), elapsedMilliseconds(start));
+}
+
+Result<FreezeMutationReceipt> MemService::mutateFreeze(
+    const OperationContext& context,
+    uint64_t address,
+    FreezeAction action,
+    uint32_t valueSize,
+    const std::function<FreezeMutationBackendResult()>& operation) {
+    const auto start = Clock::now();
+    if (action != FreezeAction::Clear && address == 0) {
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "freeze address must not be zero",
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    std::lock_guard<std::mutex> freezeLock(freezeMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<FreezeMutationReceipt>(*error, start);
+    }
+
+    const FreezeMutationBackendResult backendResult = operation();
+    if (!backendResult.responseReceived) {
+        if (backendResult.requestStarted) {
+            return Result<FreezeMutationReceipt>::failure(
+                ErrorCode::CompletionUnknown,
+                std::string("freeze ") + freezeActionName(action) +
+                    " was sent but its completion could not be confirmed; reconnect before continuing and do not retry automatically",
+                false,
+                elapsedMilliseconds(start));
+        }
+        if (const auto error = validateContext(context, true, true, true)) {
+            return failureFrom<FreezeMutationReceipt>(*error, start);
+        }
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            std::string("freeze ") + freezeActionName(action) +
+                " could not be sent",
+            true,
+            elapsedMilliseconds(start));
+    }
+    if (!backendResult.applied) {
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            std::string("Android server rejected freeze ") +
+                freezeActionName(action),
+            false,
+            elapsedMilliseconds(start));
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            std::string("server confirmed freeze ") +
+                freezeActionName(action) +
+                ", but the original target context is no longer current: " +
+                error->message,
+            false,
+            elapsedMilliseconds(start));
+    }
+
+    FreezeMutationReceipt receipt;
+    receipt.address = address;
+    receipt.action = action;
+    receipt.valueSize = valueSize;
+    receipt.completedAfterCancelRequest =
+        context.cancellation &&
+        context.cancellation->load(std::memory_order_acquire);
+    receipt.completedAfterDeadline = Clock::now() >= context.deadline;
+    receipt.target = *context.target;
+    return Result<FreezeMutationReceipt>::success(
+        std::move(receipt), elapsedMilliseconds(start));
+}
+
+Result<FreezeMutationReceipt> MemService::freezeAdd(
+    const OperationContext& context,
+    const FreezeValueRequest& request) {
+    if (request.bytes.empty() ||
+        request.bytes.size() > kMaxFreezeValueBytes) {
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "freeze value must contain between 1 and 8 bytes");
+    }
+    return mutateFreeze(
+        context, request.address, FreezeAction::Add,
+        static_cast<uint32_t>(request.bytes.size()),
+        [&] { return backend_.freezeAdd(
+            context, request.address, request.bytes); });
+}
+
+Result<FreezeMutationReceipt> MemService::freezeUpdate(
+    const OperationContext& context,
+    const FreezeValueRequest& request) {
+    if (request.bytes.empty() ||
+        request.bytes.size() > kMaxFreezeValueBytes) {
+        return Result<FreezeMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "freeze value must contain between 1 and 8 bytes");
+    }
+    return mutateFreeze(
+        context, request.address, FreezeAction::Update,
+        static_cast<uint32_t>(request.bytes.size()),
+        [&] { return backend_.freezeUpdate(
+            context, request.address, request.bytes); });
+}
+
+Result<FreezeMutationReceipt> MemService::freezeRemove(
+    const OperationContext& context,
+    const FreezeAddressRequest& request) {
+    return mutateFreeze(
+        context, request.address, FreezeAction::Remove, 0,
+        [&] { return backend_.freezeRemove(context, request.address); });
+}
+
+Result<FreezeMutationReceipt> MemService::freezeClear(
+    const OperationContext& context) {
+    return mutateFreeze(
+        context, 0, FreezeAction::Clear, 0,
+        [&] { return backend_.freezeClear(context); });
 }
 
 } // namespace Mem

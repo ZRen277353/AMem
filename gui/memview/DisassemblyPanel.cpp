@@ -4,7 +4,6 @@
 #include "../Gui.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -129,7 +128,10 @@ void MemoryViewerWindow::drawDisassemblyPanel()
         }
 
         disassemblyBuffer.resize(DISASSEMBLY_BUFFER_SIZE);
-        if (!ReadProcessMemoryBytes(disassemblyAddress, DISASSEMBLY_BUFFER_SIZE, disassemblyBuffer)) {
+        if (!readTargetMemory(
+                disassemblyAddress,
+                static_cast<uint32_t>(DISASSEMBLY_BUFFER_SIZE),
+                disassemblyBuffer)) {
             disassemblyBuffer.clear();
             cachedDisassemblyResult.success = false;
             char msg[128];

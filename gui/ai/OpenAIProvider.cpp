@@ -116,8 +116,9 @@ ProviderError classifyHttpError(const HttpResponse& resp) {
     std::string providerMessage;
     std::string providerCode;
     if (!resp.body.empty()) {
-        try {
-            auto j = json::parse(resp.body);
+        json j;
+        std::string parseError;
+        if (parseProviderResponseJson(resp.body, j, parseError)) {
             if (j.is_object()) {
                 if (j.contains("error") && j["error"].is_object()) {
                     const auto& e = j["error"];
@@ -135,8 +136,6 @@ ProviderError classifyHttpError(const HttpResponse& resp) {
                     providerMessage = j["message"].get<std::string>();
                 }
             }
-        } catch (const json::exception&) {
-            // Fall through; keep raw status code message.
         }
     }
 
@@ -261,6 +260,7 @@ std::string OpenAIProvider::buildRequestBody(const CompletionRequest& request) c
     // Prefer request model, fall back to provider-configured model.
     body["model"] = !request.model.empty() ? request.model : config_.model;
     body["stream"] = request.stream;
+    body["max_completion_tokens"] = request.maxOutputTokens;
 
     json messages = json::array();
     for (const auto& m : request.messages) {
@@ -327,8 +327,9 @@ CompletionResponse OpenAIProvider::parseSSEChunk(const std::string& chunk) const
     CompletionResponse out;
     out.message.role = Role::Assistant;
 
-    try {
-        auto j = json::parse(chunk);
+    json j;
+    std::string parseError;
+    if (parseProviderEventJson(chunk, j, parseError)) {
         if (!j.is_object() || !j.contains("choices") || !j["choices"].is_array() ||
             j["choices"].empty()) {
             // Non-fatal: some keep-alive / status-only chunks have no choices.
@@ -373,9 +374,9 @@ CompletionResponse OpenAIProvider::parseSSEChunk(const std::string& chunk) const
                 }
             }
         }
-    } catch (const json::exception& e) {
+    } else {
         out.error.category = ErrorCategory::InvalidResponse;
-        out.error.message = std::string("failed to parse SSE chunk: ") + e.what();
+        out.error.message = "failed to parse SSE chunk: " + parseError;
     }
 
     if (!out.error) {
@@ -402,8 +403,9 @@ CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) co
         return out;
     }
 
-    try {
-        auto j = json::parse(body);
+    json j;
+    std::string parseError;
+    if (parseProviderResponseJson(body, j, parseError)) {
         if (!j.is_object() || !j.contains("choices") || !j["choices"].is_array() ||
             j["choices"].empty()) {
             out.error.category = ErrorCategory::InvalidResponse;
@@ -485,9 +487,9 @@ CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) co
                 out.message.toolCalls.push_back(std::move(call));
             }
         }
-    } catch (const json::exception& e) {
+    } else {
         out.error.category = ErrorCategory::InvalidResponse;
-        out.error.message = std::string("failed to parse OpenAI response: ") + e.what();
+        out.error.message = "failed to parse OpenAI response: " + parseError;
     }
 
     if (!out.error) {

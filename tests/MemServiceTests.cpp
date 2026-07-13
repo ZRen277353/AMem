@@ -69,6 +69,11 @@ class FakeBackend final : public Mem::IMemBackend {
 public:
     bool connected = true;
     bool poisoned = false;
+    bool connectSucceeds = true;
+    int connectCalls = 0;
+    int disconnectCalls = 0;
+    std::string lastConnectHost;
+    uint16_t lastConnectPort = 0;
     uint64_t generation = 1;
     Mem::TargetSnapshot target{42, 420, 2, 1};
     std::string selectedName = "com.example.game";
@@ -89,6 +94,11 @@ public:
     bool readMemorySucceeds = true;
     bool changeTargetAfterRead = false;
     bool changeGenerationAfterRead = false;
+    bool batchReadSucceeds = true;
+    bool batchReturnPartialSet = false;
+    bool batchReturnShortBlock = false;
+    bool changeTargetAfterBatch = false;
+    bool changeGenerationAfterBatch = false;
     bool changeGenerationDuringOpen = false;
     bool changeTargetAfterModuleFetch = false;
     bool changeGenerationAfterModuleFetch = false;
@@ -111,6 +121,11 @@ public:
     std::string driverMessage = "2026-07-12 12:00:00";
     std::string lastDriverCard;
     int readCalls = 0;
+    int batchReadCalls = 0;
+    Mem::MemoryReadChannel lastReadChannel =
+        Mem::MemoryReadChannel::Foreground;
+    Mem::MemoryReadChannel lastTransactionChannel =
+        Mem::MemoryReadChannel::Foreground;
     int fetchModuleCalls = 0;
     int beginReadTransactionCalls = 0;
     int transactionFetchCalls = 0;
@@ -214,6 +229,20 @@ public:
     uint32_t lastReadSize = 0;
     uint64_t lastWriteAddress = 0;
     std::vector<unsigned char> lastWriteBytes;
+    bool freezeRequestStarted = true;
+    bool freezeResponseReceived = true;
+    bool freezeApplied = true;
+    bool changeTargetAfterFreeze = false;
+    bool changeGenerationAfterFreeze = false;
+    int freezeDelayMs = 0;
+    Mem::CancellationToken cancelDuringFreeze;
+    int freezeAddCalls = 0;
+    int freezeUpdateCalls = 0;
+    int freezeRemoveCalls = 0;
+    int freezeClearCalls = 0;
+    uint64_t lastFreezeAddress = 0;
+    std::vector<unsigned char> lastFreezeBytes;
+    Mem::FreezeAction lastFreezeAction = Mem::FreezeAction::Add;
 
     bool isConnected() const override {
         return connected;
@@ -235,6 +264,33 @@ public:
 
     std::string processName() const override {
         return selectedName;
+    }
+
+    bool connect(const std::string& host, uint16_t port) override {
+        ++connectCalls;
+        lastConnectHost = host;
+        lastConnectPort = port;
+        ++generation;
+        target = Mem::TargetSnapshot{0, 0, target.processRevision + 2,
+                                     generation};
+        selectedName.clear();
+        poisoned = false;
+        connected = connectSucceeds;
+        return connected;
+    }
+
+    bool disconnect() override {
+        ++disconnectCalls;
+        const bool wasConnected = connected || poisoned;
+        if (wasConnected) {
+            ++generation;
+        }
+        connected = false;
+        poisoned = false;
+        target = Mem::TargetSnapshot{0, 0, target.processRevision + 2,
+                                     generation};
+        selectedName.clear();
+        return wasConnected;
     }
 
     bool fetchServerVersion(int& version,
@@ -274,7 +330,8 @@ public:
         return result;
     }
 
-    bool fetchProcesses(std::vector<Mem::ProcessInfo>& output) override {
+    bool fetchProcesses(const Mem::OperationContext&,
+                        std::vector<Mem::ProcessInfo>& output) override {
         if (!fetchProcessesSucceeds) {
             return false;
         }
@@ -282,7 +339,9 @@ public:
         return true;
     }
 
-    bool openProcess(int pid, const std::string& name) override {
+    bool openProcess(const Mem::OperationContext&,
+                     int pid,
+                     const std::string& name) override {
         if (!openProcessSucceeds) {
             return false;
         }
@@ -297,7 +356,8 @@ public:
         return true;
     }
 
-    bool fetchModules(std::vector<Mem::ModuleInfo>& output) override {
+    bool fetchModules(const Mem::OperationContext&,
+                      std::vector<Mem::ModuleInfo>& output) override {
         ++fetchModuleCalls;
         if (!fetchModulesSucceeds) {
             return false;
@@ -314,9 +374,12 @@ public:
 
     class ReadTransaction final : public Mem::IMemReadTransaction {
     public:
-        explicit ReadTransaction(FakeBackend& backend)
-            : backend_(backend), lock_(backend.transactionMutex) {
+        ReadTransaction(FakeBackend& backend,
+                        Mem::MemoryReadChannel channel)
+            : backend_(backend), channel_(channel),
+              lock_(backend.transactionMutex) {
             backend_.transactionActive = true;
+            backend_.lastTransactionChannel = channel;
         }
 
         ~ReadTransaction() override {
@@ -328,7 +391,7 @@ public:
             backend_.allTransactionOperationsGuarded =
                 backend_.allTransactionOperationsGuarded &&
                 backend_.transactionActive;
-            return backend_.fetchModules(output);
+            return backend_.fetchModules({}, output);
         }
 
         bool readMemory(uint64_t address,
@@ -352,7 +415,9 @@ public:
                 backend_.transactionBlockedCompetitor =
                     !competitorAcquired;
             }
-            const bool result = backend_.readMemory(address, size, output);
+            const bool result = backend_.readMemory(
+                {}, channel_,
+                address, size, output);
             if (backend_.cancelAfterTransactionReads > 0 &&
                 backend_.transactionReadCalls >=
                     backend_.cancelAfterTransactionReads &&
@@ -363,20 +428,57 @@ public:
             return result;
         }
 
+        bool readMemoryBatch(
+            const std::vector<Mem::MemoryReadRequest>& requests,
+            std::vector<Mem::MemoryBlock>& blocks) override {
+            ++backend_.batchReadCalls;
+            blocks.clear();
+            if (!backend_.batchReadSucceeds) {
+                return false;
+            }
+            blocks.reserve(requests.size());
+            for (size_t index = 0; index < requests.size(); ++index) {
+                const auto& request = requests[index];
+                if (backend_.batchReturnPartialSet &&
+                    index + 1 == requests.size()) {
+                    break;
+                }
+                Mem::MemoryBlock block;
+                block.address = request.address;
+                if (!readMemory(request.address, request.size, block.bytes)) {
+                    return false;
+                }
+                if (backend_.batchReturnShortBlock && index == 0 &&
+                    !block.bytes.empty()) {
+                    block.bytes.pop_back();
+                }
+                blocks.push_back(std::move(block));
+            }
+            if (backend_.changeTargetAfterBatch) {
+                backend_.target.processRevision += 2;
+            }
+            if (backend_.changeGenerationAfterBatch) {
+                ++backend_.generation;
+            }
+            return true;
+        }
+
     private:
         FakeBackend& backend_;
+        Mem::MemoryReadChannel channel_;
         std::unique_lock<std::timed_mutex> lock_;
     };
 
     std::unique_ptr<Mem::IMemReadTransaction> beginReadTransaction(
-        const Mem::OperationContext& context) override {
+        const Mem::OperationContext& context,
+        Mem::MemoryReadChannel channel) override {
         ++beginReadTransactionCalls;
         if (!beginReadTransactionSucceeds || !context.target ||
             context.connectionGeneration != generation ||
             targetSnapshot() != *context.target) {
             return nullptr;
         }
-        return std::make_unique<ReadTransaction>(*this);
+        return std::make_unique<ReadTransaction>(*this, channel);
     }
 
     class ScanTransaction final : public Mem::IMemScanTransaction {
@@ -542,7 +644,7 @@ public:
             backend_.allTransactionOperationsGuarded =
                 backend_.allTransactionOperationsGuarded &&
                 backend_.transactionActive;
-            return backend_.fetchModules(output);
+            return backend_.fetchModules({}, output);
         }
 
         bool initializeSymbols(uint64_t moduleBase,
@@ -650,6 +752,7 @@ public:
     }
 
     Mem::BreakpointMutationBackendResult setBreakpoint(
+        const Mem::OperationContext&,
         uint64_t address,
         Mem::BreakpointAccess access,
         uint32_t size) override {
@@ -660,24 +763,25 @@ public:
     }
 
     Mem::BreakpointMutationBackendResult removeBreakpoint(
-        uint64_t address) override {
+        const Mem::OperationContext&, uint64_t address) override {
         ++breakpointRemoveCalls;
         return breakpointMutation(address);
     }
 
     Mem::BreakpointMutationBackendResult suspendBreakpoint(
-        uint64_t address) override {
+        const Mem::OperationContext&, uint64_t address) override {
         ++breakpointSuspendCalls;
         return breakpointMutation(address);
     }
 
     Mem::BreakpointMutationBackendResult resumeBreakpoint(
-        uint64_t address) override {
+        const Mem::OperationContext&, uint64_t address) override {
         ++breakpointResumeCalls;
         return breakpointMutation(address);
     }
 
     bool fetchBreakpointHitBatch(
+        const Mem::OperationContext&,
         uint64_t address,
         size_t limit,
         std::vector<Mem::BreakpointHit>& hits,
@@ -700,10 +804,13 @@ public:
         return true;
     }
 
-    bool readMemory(uint64_t address,
+    bool readMemory(const Mem::OperationContext&,
+                    Mem::MemoryReadChannel channel,
+                    uint64_t address,
                     uint32_t size,
                     std::vector<unsigned char>& output) override {
         ++readCalls;
+        lastReadChannel = channel;
         lastReadAddress = address;
         lastReadSize = size;
         if (!readMemorySucceeds) {
@@ -731,6 +838,7 @@ public:
     }
 
     Mem::MemoryWriteBackendResult writeMemory(
+        const Mem::OperationContext&,
         uint64_t address,
         const std::vector<unsigned char>& bytes) override {
         ++writeCalls;
@@ -757,6 +865,57 @@ public:
             ? writeReportedBytes
             : static_cast<int32_t>(bytes.size());
         return result;
+    }
+
+    Mem::FreezeMutationBackendResult freezeMutation(
+        Mem::FreezeAction action,
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) {
+        lastFreezeAction = action;
+        lastFreezeAddress = address;
+        lastFreezeBytes = bytes;
+        if (freezeDelayMs > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(freezeDelayMs));
+        }
+        if (cancelDuringFreeze) {
+            cancelDuringFreeze->store(true, std::memory_order_release);
+        }
+        if (changeTargetAfterFreeze) {
+            target.processRevision += 2;
+        }
+        if (changeGenerationAfterFreeze) {
+            ++generation;
+        }
+        return {freezeRequestStarted, freezeResponseReceived, freezeApplied};
+    }
+
+    Mem::FreezeMutationBackendResult freezeAdd(
+        const Mem::OperationContext&,
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        ++freezeAddCalls;
+        return freezeMutation(Mem::FreezeAction::Add, address, bytes);
+    }
+
+    Mem::FreezeMutationBackendResult freezeUpdate(
+        const Mem::OperationContext&,
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        ++freezeUpdateCalls;
+        return freezeMutation(Mem::FreezeAction::Update, address, bytes);
+    }
+
+    Mem::FreezeMutationBackendResult freezeRemove(
+        const Mem::OperationContext&, uint64_t address) override {
+        ++freezeRemoveCalls;
+        return freezeMutation(Mem::FreezeAction::Remove, address, {});
+    }
+
+    Mem::FreezeMutationBackendResult freezeClear(
+        const Mem::OperationContext&) override {
+        ++freezeClearCalls;
+        return freezeMutation(Mem::FreezeAction::Clear, 0, {});
     }
 };
 
@@ -979,6 +1138,77 @@ void testStatusAndConnectionGeneration() {
            "stale connection generation must be rejected");
 }
 
+void testConnectionLifecycleService() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+
+    Mem::ConnectRequest request;
+    request.host = "127.0.0.1";
+    request.port = 52736;
+    const Mem::OperationContext initial = service.captureContext(false);
+
+    Mem::ConnectRequest invalid = request;
+    invalid.host.clear();
+    const auto emptyHost = service.connect(initial, invalid);
+    expect(!emptyHost.ok() &&
+               emptyHost.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.connectCalls == 0,
+           "empty connection host must fail before backend access");
+
+    invalid = request;
+    invalid.port = 65534;
+    const auto invalidPort = service.connect(initial, invalid);
+    expect(!invalidPort.ok() &&
+               invalidPort.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.connectCalls == 0,
+           "base port must leave room for all three Android ports");
+
+    const auto connected = service.connect(initial, request);
+    expect(connected.ok() && connected.value().connected &&
+               connected.value().connectionGeneration == 2 &&
+               backend.connectCalls == 1 &&
+               backend.lastConnectHost == request.host &&
+               backend.lastConnectPort == request.port,
+           "connect should return the new connection generation");
+    const auto connectedSnapshot = service.connectionSnapshot();
+    expect(connectedSnapshot.connected &&
+               !connectedSnapshot.connectionPoisoned &&
+               connectedSnapshot.connectionGeneration == 2 &&
+               !backend.targetSnapshot().isAttached(),
+           "connect should publish a usable detached connection snapshot");
+
+    const auto staleDisconnect = service.disconnect(initial);
+    expect(!staleDisconnect.ok() &&
+               staleDisconnect.error().code ==
+                   Mem::ErrorCode::ConnectionChanged &&
+               backend.disconnectCalls == 0,
+           "disconnect must reject a stale connection generation");
+
+    const auto disconnected = service.disconnect(
+        service.captureContext(false));
+    expect(disconnected.ok() && disconnected.value().wasConnected &&
+               disconnected.value().connectionGeneration == 3 &&
+               backend.disconnectCalls == 1 && !backend.connected,
+           "disconnect should invalidate the active connection generation");
+
+    const auto disconnectedAgain = service.disconnect(
+        service.captureContext(false));
+    expect(disconnectedAgain.ok() &&
+               !disconnectedAgain.value().wasConnected &&
+               disconnectedAgain.value().connectionGeneration == 3,
+           "disconnect should be idempotent while already disconnected");
+
+    backend.connectSucceeds = false;
+    const auto failedConnect = service.connect(
+        service.captureContext(false), request);
+    expect(!failedConnect.ok() &&
+               failedConnect.error().code == Mem::ErrorCode::ProtocolError &&
+               failedConnect.error().retryable &&
+               backend.connectCalls == 2 && !backend.connected &&
+               backend.generation == 4,
+           "failed three-port connect should remain detached on a new generation");
+}
+
 void testProcessPaginationAndOpen() {
     FakeBackend backend;
     Mem::MemService service(backend);
@@ -1078,6 +1308,86 @@ void testMemoryReadTargetValidation() {
     expect(!expiredRead.ok() &&
                expiredRead.error().code == Mem::ErrorCode::Timeout,
            "expired operation deadline must fail before backend access");
+}
+
+void testMemoryBatchService() {
+    FakeBackend backend;
+    backend.memory = {0x10, 0x20, 0x30, 0x40};
+    Mem::MemService service(backend);
+
+    Mem::MemoryBatchReadRequest request;
+    request.channel = Mem::MemoryReadChannel::Background;
+    request.items = {
+        Mem::MemoryReadRequest{0x1000, 2},
+        Mem::MemoryReadRequest{0x2000, 4},
+    };
+    const auto batch = service.readMemoryBatch(
+        service.captureContext(true), request);
+    expect(batch.ok() && batch.value().items.size() == 2 &&
+               batch.value().items[0].address == 0x1000 &&
+               batch.value().items[0].bytes ==
+                   std::vector<unsigned char>({0x10, 0x20}) &&
+               batch.value().items[1].address == 0x2000 &&
+               batch.value().items[1].bytes == backend.memory &&
+               batch.value().target == backend.targetSnapshot(),
+           "memory batch should preserve request order, sizes and target");
+    expect(backend.batchReadCalls == 1 &&
+               backend.lastTransactionChannel ==
+                   Mem::MemoryReadChannel::Background &&
+               backend.lastReadChannel ==
+                   Mem::MemoryReadChannel::Background,
+           "memory batch should use the requested read channel in one transaction");
+
+    const int transactionsAfterSuccess = backend.beginReadTransactionCalls;
+    Mem::MemoryBatchReadRequest invalid;
+    const auto empty = service.readMemoryBatch(
+        service.captureContext(true), invalid);
+    expect(!empty.ok() &&
+               empty.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.beginReadTransactionCalls == transactionsAfterSuccess,
+           "empty memory batch must fail before transaction acquisition");
+
+    invalid.items = {Mem::MemoryReadRequest{0x1000, 0}};
+    const auto zeroSize = service.readMemoryBatch(
+        service.captureContext(true), invalid);
+    expect(!zeroSize.ok() &&
+               zeroSize.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.beginReadTransactionCalls == transactionsAfterSuccess,
+           "zero-sized memory batch item must fail validation");
+
+    backend.batchReturnPartialSet = true;
+    const auto partialSet = service.readMemoryBatch(
+        service.captureContext(true), request);
+    expect(!partialSet.ok() &&
+               partialSet.error().code == Mem::ErrorCode::ProtocolError &&
+               !partialSet.error().retryable,
+           "incomplete memory batch result set must be rejected");
+    backend.batchReturnPartialSet = false;
+
+    backend.batchReturnShortBlock = true;
+    const auto shortBlock = service.readMemoryBatch(
+        service.captureContext(true), request);
+    expect(!shortBlock.ok() &&
+               shortBlock.error().code == Mem::ErrorCode::ProtocolError &&
+               !shortBlock.error().retryable,
+           "short memory batch block must be rejected");
+    backend.batchReturnShortBlock = false;
+
+    backend.batchReadSucceeds = false;
+    const auto failed = service.readMemoryBatch(
+        service.captureContext(true), request);
+    expect(!failed.ok() &&
+               failed.error().code == Mem::ErrorCode::ProtocolError &&
+               failed.error().retryable,
+           "batch transport failure may be retried only while context is current");
+    backend.batchReadSucceeds = true;
+
+    backend.changeTargetAfterBatch = true;
+    const auto targetChanged = service.readMemoryBatch(
+        service.captureContext(true), request);
+    expect(!targetChanged.ok() &&
+               targetChanged.error().code == Mem::ErrorCode::TargetChanged,
+           "memory batch must discard results after an in-flight target change");
 }
 
 void testMemoryWriteCompletionContract() {
@@ -1184,6 +1494,139 @@ void testMemoryWriteCompletionContract() {
            "overflowing memory write range must fail validation");
 }
 
+void testFreezeMutationContract() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    Mem::FreezeValueRequest valueRequest;
+    valueRequest.address = 0x4000;
+    valueRequest.bytes = {0x78, 0x56, 0x34, 0x12};
+
+    const auto added = service.freezeAdd(
+        service.captureContext(true), valueRequest);
+    expect(added.ok() && added.value().action == Mem::FreezeAction::Add &&
+               added.value().address == valueRequest.address &&
+               added.value().valueSize == valueRequest.bytes.size() &&
+               added.value().target == backend.targetSnapshot() &&
+               backend.freezeAddCalls == 1 &&
+               backend.lastFreezeBytes == valueRequest.bytes,
+           "confirmed freeze add should return an exact target-bound receipt");
+
+    valueRequest.bytes = {0xAA, 0xBB};
+    const auto updated = service.freezeUpdate(
+        service.captureContext(true), valueRequest);
+    expect(updated.ok() &&
+               updated.value().action == Mem::FreezeAction::Update &&
+               updated.value().valueSize == 2 &&
+               backend.freezeUpdateCalls == 1 &&
+               backend.lastFreezeAction == Mem::FreezeAction::Update,
+           "confirmed freeze update should preserve its action and value size");
+
+    const auto removed = service.freezeRemove(
+        service.captureContext(true),
+        Mem::FreezeAddressRequest{valueRequest.address});
+    expect(removed.ok() &&
+               removed.value().action == Mem::FreezeAction::Remove &&
+               removed.value().valueSize == 0 &&
+               backend.freezeRemoveCalls == 1,
+           "confirmed freeze remove should return a zero-sized receipt");
+
+    const auto cleared = service.freezeClear(service.captureContext(true));
+    expect(cleared.ok() &&
+               cleared.value().action == Mem::FreezeAction::Clear &&
+               cleared.value().address == 0 &&
+               backend.freezeClearCalls == 1,
+           "confirmed freeze clear should use the target-bound clear action");
+
+    const int callsBeforeInvalid = backend.freezeAddCalls;
+    Mem::FreezeValueRequest invalidValue{0x4000, {}};
+    const auto empty = service.freezeAdd(
+        service.captureContext(true), invalidValue);
+    expect(!empty.ok() &&
+               empty.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.freezeAddCalls == callsBeforeInvalid,
+           "empty freeze value must fail before backend access");
+
+    invalidValue.bytes.assign(Mem::kMaxFreezeValueBytes + 1, 0x11);
+    const auto oversized = service.freezeAdd(
+        service.captureContext(true), invalidValue);
+    expect(!oversized.ok() &&
+               oversized.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.freezeAddCalls == callsBeforeInvalid,
+           "oversized freeze value must fail before backend access");
+
+    const int removesBeforeInvalid = backend.freezeRemoveCalls;
+    const auto zeroAddress = service.freezeRemove(
+        service.captureContext(true), Mem::FreezeAddressRequest{});
+    expect(!zeroAddress.ok() &&
+               zeroAddress.error().code == Mem::ErrorCode::InvalidArgument &&
+               backend.freezeRemoveCalls == removesBeforeInvalid,
+           "zero freeze address must fail before backend access");
+
+    backend.freezeResponseReceived = false;
+    backend.freezeRequestStarted = true;
+    const auto unknown = service.freezeAdd(
+        service.captureContext(true), valueRequest);
+    expect(!unknown.ok() &&
+               unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
+               !unknown.error().retryable,
+           "sent freeze mutation without response must be completion_unknown");
+
+    backend.freezeRequestStarted = false;
+    const auto unsent = service.freezeAdd(
+        service.captureContext(true), valueRequest);
+    expect(!unsent.ok() &&
+               unsent.error().code == Mem::ErrorCode::ProtocolError &&
+               unsent.error().retryable,
+           "freeze mutation known not to be sent may be retried");
+
+    backend.freezeRequestStarted = true;
+    backend.freezeResponseReceived = true;
+    backend.freezeApplied = false;
+    const auto rejected = service.freezeAdd(
+        service.captureContext(true), valueRequest);
+    expect(!rejected.ok() &&
+               rejected.error().code == Mem::ErrorCode::ProtocolError &&
+               !rejected.error().retryable,
+           "server-rejected freeze mutation must not be retried automatically");
+
+    backend.freezeApplied = true;
+    Mem::OperationContext cancelled = service.captureContext(true);
+    cancelled.cancellation = std::make_shared<std::atomic<bool>>(false);
+    backend.cancelDuringFreeze = cancelled.cancellation;
+    const auto completedAfterCancel = service.freezeAdd(cancelled, valueRequest);
+    expect(completedAfterCancel.ok() &&
+               completedAfterCancel.value().completedAfterCancelRequest,
+           "confirmed freeze mutation should report a late cancel request");
+    backend.cancelDuringFreeze.reset();
+
+    Mem::OperationContext deadline = service.captureContext(true);
+    deadline.deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(20);
+    backend.freezeDelayMs = 40;
+    const auto completedAfterDeadline = service.freezeAdd(deadline, valueRequest);
+    expect(completedAfterDeadline.ok() &&
+               completedAfterDeadline.value().completedAfterDeadline,
+           "confirmed freeze mutation should report completion after deadline");
+    backend.freezeDelayMs = 0;
+
+    backend.changeTargetAfterFreeze = true;
+    const auto targetChanged = service.freezeAdd(
+        service.captureContext(true), valueRequest);
+    expect(!targetChanged.ok() &&
+               targetChanged.error().code == Mem::ErrorCode::CompletionUnknown,
+           "confirmed freeze mutation on a replaced target is completion_unknown");
+
+    FakeBackend generationBackend;
+    Mem::MemService generationService(generationBackend);
+    generationBackend.changeGenerationAfterFreeze = true;
+    const auto generationChanged = generationService.freezeClear(
+        generationService.captureContext(true));
+    expect(!generationChanged.ok() &&
+               generationChanged.error().code ==
+                   Mem::ErrorCode::CompletionUnknown,
+           "confirmed freeze mutation on a replaced connection is completion_unknown");
+}
+
 void testTypedMemoryService() {
     FakeBackend backend;
     Mem::MemService service(backend);
@@ -1267,6 +1710,10 @@ void testModuleListAndResolve() {
                page.value().target.pid == backend.target.pid,
            "module list should filter case-insensitively and paginate");
 
+    backend.modules.insert(
+        backend.modules.begin(),
+        {0x8000, 0x1000, 2, 1, "/data/app/libgame.so"});
+
     Mem::ModuleResolveRequest resolveRequest;
     resolveRequest.name = "libgame.so";
     const auto resolved = service.resolveModule(
@@ -1274,7 +1721,27 @@ void testModuleListAndResolve() {
     expect(resolved.ok() && resolved.value().module.base == 0x5000 &&
                resolved.value().module.size == 0x3000 &&
                resolved.value().module.name == "/data/app/libgame.so",
-           "module resolve should prefer a unique basename match");
+           "module resolve should collapse same-path mappings and use the lowest base");
+
+    resolveRequest.name = "/DATA/APP/LIBGAME.SO";
+    const auto segmentedFullName = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(segmentedFullName.ok() &&
+               segmentedFullName.value().module.base == 0x5000,
+           "module resolve should collapse same-path mappings for exact full names");
+
+    backend.modules.push_back(
+        {0xA000, 0x1000, 2, 1, "/vendor/lib64/libgame.so"});
+    resolveRequest.name = "libgame.so";
+    const auto duplicateBaseName = service.resolveModule(
+        service.captureContext(true), resolveRequest);
+    expect(!duplicateBaseName.ok() &&
+               duplicateBaseName.error().code ==
+                   Mem::ErrorCode::InvalidArgument &&
+               duplicateBaseName.error().message.find("ambiguous") !=
+                   std::string::npos,
+           "module resolve must preserve ambiguity across distinct full paths");
+    backend.modules.pop_back();
 
     resolveRequest.name = "/SYSTEM/LIB64/LIBC.SO";
     const auto fullName = service.resolveModule(
@@ -1314,7 +1781,7 @@ void testModuleListAndResolve() {
     expect(!invalidModule.ok() &&
                invalidModule.error().code == Mem::ErrorCode::ProtocolError,
            "module service must reject invalid backend ranges");
-    backend.modules.front().size = 0x2000;
+    backend.modules.front().size = 0x1000;
 
     backend.changeTargetAfterModuleFetch = true;
     const auto changed = service.listModules(
@@ -2060,6 +2527,376 @@ void testHiddenToolRegistration() {
            "structured completion_unknown must survive result normalization");
 }
 
+void testToolSchemaValidationMatrix() {
+    auto& registry = AI::ToolExecutor::getInstance();
+    int executionCount = 0;
+    const std::string schema = R"JSON({
+      "type": "object",
+      "required": ["address", "mode", "count", "offsets", "choice"],
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "type": "string",
+          "pattern": "^0[xX][0-9A-Fa-f]+$",
+          "minLength": 3,
+          "maxLength": 18
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["read", "write"]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "offsets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^0[xX][0-9A-Fa-f]+$"
+          }
+        },
+        "choice": {
+          "anyOf": [
+            {"type": "string", "enum": ["auto"]},
+            {"type": "integer", "minimum": 1, "maximum": 2}
+          ]
+        },
+        "exclusive": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "integer", "minimum": 1}
+          ]
+        }
+      }
+    })JSON";
+    registry.registerTool(
+        "test_schema_matrix", "schema matrix", schema,
+        AI::ToolSafety::ReadOnly,
+        [&executionCount](const std::string&) {
+            ++executionCount;
+            return std::string(R"({"success":true})");
+        });
+
+    const auto execute = [&](const std::string& arguments) {
+        return registry.execute(
+            toolCall("schema-matrix", "test_schema_matrix", arguments));
+    };
+    const auto expectRejected = [&](const std::string& arguments,
+                                    const std::string& marker) {
+        const int before = executionCount;
+        const AI::ToolResult result = execute(arguments);
+        expect(!result.success && executionCount == before &&
+                   result.errorMessage.find(marker) != std::string::npos,
+               "schema validation should reject before execution: " + marker);
+    };
+
+    const AI::ToolResult valid = execute(
+        R"({"address":"0x1234","mode":"read","count":2,"offsets":["0x4"],"choice":"auto","exclusive":1})");
+    expect(valid.success && executionCount == 1,
+           "a value satisfying the complete schema subset should execute once");
+
+    expectRejected(R"({"mode":"read","count":2,"offsets":["0x4"],"choice":"auto"})",
+                   "missing required property");
+    expectRejected(R"({"address":1234,"mode":"read","count":2,"offsets":["0x4"],"choice":"auto"})",
+                   "expected string");
+    expectRejected(R"({"address":"1234","mode":"read","count":2,"offsets":["0x4"],"choice":"auto"})",
+                   "required pattern");
+    expectRejected(R"({"address":"0x1234","mode":"execute","count":2,"offsets":["0x4"],"choice":"auto"})",
+                   "enum values");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":0,"offsets":["0x4"],"choice":"auto"})",
+                   "below minimum");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":9,"offsets":["0x4"],"choice":"auto"})",
+                   "above maximum");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":[],"choice":"auto"})",
+                   "fewer items");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":["0x1","0x2","0x3"],"choice":"auto"})",
+                   "more items");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":["4"],"choice":"auto"})",
+                   "required pattern");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":["0x4"],"choice":false})",
+                   "did not match any");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":["0x4"],"choice":"auto","exclusive":false})",
+                   "exactly one");
+    expectRejected(R"({"address":"0x1234","mode":"read","count":2,"offsets":["0x4"],"choice":"auto","unknown":1})",
+                   "unexpected property");
+
+    int malformedExecutions = 0;
+    registry.registerTool(
+        "test_invalid_schema", "invalid schema",
+        R"({"type":"object","properties":{},"unsupported":true})",
+        AI::ToolSafety::ReadOnly,
+        [&malformedExecutions](const std::string&) {
+            ++malformedExecutions;
+            return std::string("{}");
+        });
+    const AI::ToolResult invalidSchema = registry.execute(
+        toolCall("invalid-schema", "test_invalid_schema", "{}"));
+    const auto definitions = registry.getToolDefinitions();
+    const bool invalidAdvertised = std::any_of(
+        definitions.begin(), definitions.end(),
+        [](const AI::ToolDefinition& definition) {
+            return definition.name == "test_invalid_schema";
+        });
+    expect(!invalidSchema.success && malformedExecutions == 0 &&
+               invalidSchema.errorMessage.find("unsupported keyword") !=
+                   std::string::npos &&
+               !invalidAdvertised,
+           "unsupported schema keywords must fail closed before advertisement and execution");
+}
+
+void testAgentRunnerApprovalMatrix() {
+    auto& registry = AI::ToolExecutor::getInstance();
+    registry.registerTool(
+        "test_runner_read", "runner read", "{}", AI::ToolSafety::ReadOnly,
+        [](const std::string&) { return std::string(R"({"success":true})"); });
+    registry.registerTool(
+        "test_runner_write", "runner write", "{}", AI::ToolSafety::Write,
+        [](const std::string&) { return std::string(R"({"success":true})"); });
+
+    const auto hasTrace = [](const AI::AgentRunner::Outcome& outcome,
+                             AI::AgentTraceType type,
+                             const std::string& tool = {}) {
+        return std::any_of(
+            outcome.traceEvents.begin(), outcome.traceEvents.end(),
+            [&](const AI::AgentTraceEvent& event) {
+                return event.type == type &&
+                       (tool.empty() || event.tool == tool);
+            });
+    };
+    const auto successfulResult = [] {
+        AI::ToolResult result;
+        result.success = true;
+        result.resultJson = R"({"success":true})";
+        return result;
+    };
+    const auto messagePayload = [](const AI::ChatMessage& message) {
+        return json::parse(message.content);
+    };
+
+    const AI::ToolCall firstRead =
+        toolCall("runner-read-1", "test_runner_read");
+    const AI::ToolCall write =
+        toolCall("runner-write", "test_runner_write");
+    const AI::ToolCall secondRead =
+        toolCall("runner-read-2", "test_runner_read");
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        auto readReady = runner.beginToolCalls(
+            {firstRead, write, secondRead}, config);
+        expect(readReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   readReady.toolCallToExecute &&
+                   readReady.toolCallToExecute->id == firstRead.id &&
+                   !runner.hasPendingConfirmation(),
+               "read-only tools must execute without approval");
+
+        auto waiting = runner.completeToolExecution(
+            firstRead, successfulResult(), 2, config);
+        expect(waiting.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsConfirmation &&
+                   waiting.pendingToolCall &&
+                   waiting.pendingToolCall->id == write.id &&
+                   runner.hasPendingConfirmation() &&
+                   waiting.messages.size() == 1 &&
+                   waiting.messages.front().toolCallId == firstRead.id,
+               "a successful read must advance to manual write approval with a paired result");
+
+        auto denied = runner.resumeDenied(config);
+        expect(denied.kind ==
+                   AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   !runner.hasPendingConfirmation() &&
+                   denied.messages.size() == 2 &&
+                   denied.messages[0].toolCallId == write.id &&
+                   denied.messages[1].toolCallId == secondRead.id &&
+                   !messagePayload(denied.messages[0]).at("success").get<bool>() &&
+                   messagePayload(denied.messages[1]).at("skipped").get<bool>() &&
+                   hasTrace(denied, AI::AgentTraceType::Denied,
+                            "test_runner_write") &&
+                   hasTrace(denied, AI::AgentTraceType::ToolSkipped,
+                            "test_runner_read") &&
+                   hasTrace(denied, AI::AgentTraceType::ToolBatchComplete),
+               "manual denial must pair the denied result and skip every later call");
+    }
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        auto waiting = runner.beginToolCalls({write, firstRead}, config);
+        expect(waiting.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsConfirmation,
+               "manual mode must block a write before execution");
+        auto approved = runner.resumeApproved(config);
+        expect(approved.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   approved.toolCallToExecute &&
+                   approved.toolCallToExecute->id == write.id &&
+                   hasTrace(approved, AI::AgentTraceType::Approved,
+                            "test_runner_write"),
+               "manual approval must release exactly the pending write");
+        auto readReady = runner.completeToolExecution(
+            write, successfulResult(), 3, config);
+        expect(readReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   readReady.toolCallToExecute &&
+                   readReady.toolCallToExecute->id == firstRead.id,
+               "a successful approved write must advance to the next read");
+        auto complete = runner.completeToolExecution(
+            firstRead, successfulResult(), 1, config);
+        expect(complete.kind ==
+                   AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   hasTrace(complete, AI::AgentTraceType::ToolBatchComplete),
+               "an approved write/read batch must finish normally");
+    }
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        config.autoApproveWrites = true;
+        auto writeReady = runner.beginToolCalls({write, firstRead}, config);
+        expect(writeReady.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   writeReady.toolCallToExecute &&
+                   writeReady.toolCallToExecute->id == write.id &&
+                   !runner.hasPendingConfirmation() &&
+                   hasTrace(writeReady, AI::AgentTraceType::AutoApproved,
+                            "test_runner_write") &&
+                   hasTrace(writeReady, AI::AgentTraceType::ToolStarted,
+                            "test_runner_write"),
+               "auto-approve must skip only the dialog and still expose an execution step");
+
+        auto readReady = runner.completeToolExecution(
+            write, successfulResult(), 4, config);
+        expect(readReady.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   readReady.toolCallToExecute &&
+                   readReady.toolCallToExecute->id == firstRead.id &&
+                   readReady.messages.size() == 1 &&
+                   readReady.messages.front().toolCallId == write.id,
+               "an auto-approved write must still produce a paired result before the next call");
+        auto complete = runner.completeToolExecution(
+            firstRead, successfulResult(), 1, config);
+        expect(complete.kind ==
+                   AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   complete.messages.size() == 1 &&
+                   complete.messages.front().toolCallId == firstRead.id,
+               "auto-approved batches must preserve normal result ordering");
+    }
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        config.autoApproveWrites = true;
+        auto writeReady = runner.beginToolCalls({write, firstRead}, config);
+        expect(writeReady.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsExecution,
+               "auto-approved failure case must release the write for execution");
+
+        AI::ToolResult failure;
+        failure.success = false;
+        failure.errorMessage = "simulated write failure";
+        failure.resultJson =
+            R"({"success":false,"error":{"code":"failed","message":"simulated write failure"}})";
+        failure.completion = AI::ToolCompletionState::RejectedBeforeStart;
+        auto failed = runner.completeToolExecution(write, failure, 5, config);
+        expect(failed.kind ==
+                   AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+                   failed.messages.size() == 2 &&
+                   failed.messages[0].toolCallId == write.id &&
+                   failed.messages[1].toolCallId == firstRead.id &&
+                   !messagePayload(failed.messages[0]).at("success").get<bool>() &&
+                   messagePayload(failed.messages[1]).at("skipped").get<bool>() &&
+                   hasTrace(failed, AI::AgentTraceType::ToolFailed,
+                            "test_runner_write") &&
+                   hasTrace(failed, AI::AgentTraceType::ToolSkipped,
+                            "test_runner_read"),
+               "auto-approval must not suppress failure propagation or execute later calls");
+    }
+}
+
+void testToolJsonComplexityLimits() {
+    auto denseNestedArrays = [](size_t arrayCount, size_t itemsPerArray) {
+        std::string serialized;
+        serialized.reserve(arrayCount * (itemsPerArray * 2u + 3u) + 2u);
+        serialized.push_back('[');
+        for (size_t arrayIndex = 0; arrayIndex < arrayCount; ++arrayIndex) {
+            if (arrayIndex != 0) {
+                serialized.push_back(',');
+            }
+            serialized.push_back('[');
+            for (size_t item = 0; item < itemsPerArray; ++item) {
+                if (item != 0) {
+                    serialized.push_back(',');
+                }
+                serialized.push_back('0');
+            }
+            serialized.push_back(']');
+        }
+        serialized.push_back(']');
+        return serialized;
+    };
+
+    auto& registry = AI::ToolExecutor::getInstance();
+    int argumentExecutions = 0;
+    registry.registerTool(
+        "test_dense_arguments", "dense arguments",
+        R"({"type":"object","additionalProperties":true})",
+        AI::ToolSafety::ReadOnly,
+        [&argumentExecutions](const std::string&) {
+            ++argumentExecutions;
+            return std::string(R"({"success":true})");
+        });
+    const std::string denseArguments =
+        std::string("{\"items\":") +
+        denseNestedArrays(3u, 3000u) + "}";
+    const AI::ToolResult rejectedArguments = registry.execute(
+        toolCall("dense-arguments", "test_dense_arguments", denseArguments));
+    expect(!rejectedArguments.success && argumentExecutions == 0 &&
+               rejectedArguments.errorMessage.find("node limit") !=
+                   std::string::npos,
+           "dense tool arguments must be rejected before executor invocation");
+
+    const std::string denseResult =
+        std::string("{\"success\":true,\"items\":") +
+        denseNestedArrays(17u, 4000u) + "}";
+    registry.registerTool(
+        "test_dense_read_result", "dense read result", "{}",
+        AI::ToolSafety::ReadOnly,
+        [denseResult](const std::string&) { return denseResult; });
+    const AI::ToolResult rejectedRead = registry.execute(
+        toolCall("dense-read", "test_dense_read_result"));
+    expect(!rejectedRead.success &&
+               rejectedRead.errorMessage.find("node limit") !=
+                   std::string::npos &&
+               rejectedRead.completion == AI::ToolCompletionState::Completed,
+           "dense read results must fail without inventing mutation completion semantics");
+
+    registry.registerTool(
+        "test_dense_write_result", "dense write result", "{}",
+        AI::ToolSafety::Write,
+        [denseResult](const std::string&) { return denseResult; });
+    const AI::ToolResult rejectedWrite = registry.execute(
+        toolCall("dense-write", "test_dense_write_result"));
+    expect(!rejectedWrite.success &&
+               rejectedWrite.errorMessage.find("node limit") !=
+                   std::string::npos &&
+               rejectedWrite.completion ==
+                   AI::ToolCompletionState::CompletionUnknown,
+           "dense write results must retain completion_unknown after execution");
+
+    registry.registerTool(
+        "test_invalid_result_json", "invalid result", "{}",
+        AI::ToolSafety::ReadOnly,
+        [](const std::string&) { return std::string("not-json"); });
+    const AI::ToolResult invalidResult = registry.execute(
+        toolCall("invalid-result", "test_invalid_result_json"));
+    expect(!invalidResult.success &&
+               invalidResult.errorMessage.find("invalid JSON syntax") !=
+                   std::string::npos,
+           "invalid executor JSON must never be normalized as success");
+}
+
 void testToolResultLimit() {
     auto& registry = AI::ToolExecutor::getInstance();
     registry.registerTool(
@@ -2187,6 +3024,111 @@ void testRetiredToolHistoryDowngrade() {
                canonicalOutgoing.front().toolCalls.size() == 1 &&
                canonicalOutgoing.back().role == AI::Role::Tool,
            "canonical tool history must retain provider tool-call structure");
+}
+
+void testToolHistoryPairing() {
+    const auto makeMessage = [](AI::Role role, std::string content) {
+        AI::ChatMessage message;
+        message.role = role;
+        message.content = std::move(content);
+        return message;
+    };
+
+    AI::ChatSession complete;
+    complete.setSystemPrompt("system prompt");
+    complete.addMessage(makeMessage(AI::Role::Tool, "orphan-before"));
+    complete.addMessage(makeMessage(AI::Role::User, "first turn"));
+
+    AI::ChatMessage assistant;
+    assistant.role = AI::Role::Assistant;
+    assistant.content = "calling tools";
+    assistant.toolCalls.push_back(toolCall("call-a", "status", "{}"));
+    assistant.toolCalls.push_back(
+        toolCall("call-b", "memory_read",
+                 R"({"address":"0x1000","size":4})"));
+    complete.addMessage(std::move(assistant));
+
+    AI::ChatMessage resultB = makeMessage(AI::Role::Tool, "result-b");
+    resultB.toolCallId = "call-b";
+    complete.addMessage(std::move(resultB));
+    complete.addMessage(makeMessage(AI::Role::System, "runtime notice"));
+    AI::ChatMessage unknown = makeMessage(AI::Role::Tool, "unknown-result");
+    unknown.toolCallId = "unknown";
+    complete.addMessage(std::move(unknown));
+    AI::ChatMessage resultA = makeMessage(AI::Role::Tool, "result-a");
+    resultA.toolCallId = "call-a";
+    complete.addMessage(std::move(resultA));
+    AI::ChatMessage duplicateResult =
+        makeMessage(AI::Role::Tool, "duplicate-result");
+    duplicateResult.toolCallId = "call-a";
+    complete.addMessage(std::move(duplicateResult));
+    complete.addMessage(makeMessage(AI::Role::User, "second turn"));
+
+    const auto paired = complete.getMessagesForRequest();
+    expect(paired.size() == 6 &&
+               paired[0].role == AI::Role::System &&
+               paired[1].role == AI::Role::User &&
+               paired[2].role == AI::Role::Assistant &&
+               paired[2].toolCalls.size() == 2 &&
+               paired[3].role == AI::Role::Tool &&
+               paired[3].toolCallId == "call-b" &&
+               paired[4].role == AI::Role::Tool &&
+               paired[4].toolCallId == "call-a" &&
+               paired[5].role == AI::Role::User &&
+               paired[5].content == "second turn",
+           "complete tool groups must retain only matched results and notices must stay local");
+
+    AI::ChatSession duplicateIds;
+    AI::ChatMessage duplicateCalls;
+    duplicateCalls.role = AI::Role::Assistant;
+    duplicateCalls.content = "duplicate fallback";
+    duplicateCalls.toolCalls.push_back(toolCall("same", "status", "{}"));
+    duplicateCalls.toolCalls.push_back(
+        toolCall("same", "module_list", R"({"offset":0,"limit":1})"));
+    duplicateIds.addMessage(std::move(duplicateCalls));
+    AI::ChatMessage duplicateTool = makeMessage(AI::Role::Tool, "ignored");
+    duplicateTool.toolCallId = "same";
+    duplicateIds.addMessage(std::move(duplicateTool));
+    const auto duplicateOutgoing = duplicateIds.getMessagesForRequest();
+    expect(duplicateOutgoing.size() == 1 &&
+               duplicateOutgoing.front().role == AI::Role::Assistant &&
+               duplicateOutgoing.front().toolCalls.empty() &&
+               duplicateOutgoing.front().content == "duplicate fallback",
+           "duplicate tool-call ids must downgrade to assistant text");
+
+    AI::ChatSession incomplete;
+    AI::ChatMessage interrupted;
+    interrupted.role = AI::Role::Assistant;
+    interrupted.content = "interrupted fallback";
+    interrupted.toolCalls.push_back(toolCall("done", "status", "{}"));
+    interrupted.toolCalls.push_back(
+        toolCall("missing", "memory_read",
+                 R"({"address":"0x2000","size":4})"));
+    incomplete.addMessage(std::move(interrupted));
+    AI::ChatMessage onlyResult = makeMessage(AI::Role::Tool, "done-result");
+    onlyResult.toolCallId = "done";
+    incomplete.addMessage(std::move(onlyResult));
+    const auto incompleteOutgoing = incomplete.getMessagesForRequest();
+    expect(incompleteOutgoing.size() == 1 &&
+               incompleteOutgoing.front().toolCalls.empty() &&
+               incompleteOutgoing.front().content == "interrupted fallback",
+           "incomplete canonical groups must not emit partial tool protocol");
+
+    AI::ChatSession invalidCall;
+    AI::ChatMessage partiallyInvalid;
+    partiallyInvalid.role = AI::Role::Assistant;
+    partiallyInvalid.toolCalls.push_back(toolCall({}, "status", "{}"));
+    partiallyInvalid.toolCalls.push_back(toolCall("valid", {}, "{}"));
+    partiallyInvalid.toolCalls.push_back(toolCall("valid", "status", "{}"));
+    invalidCall.addMessage(std::move(partiallyInvalid));
+    AI::ChatMessage validResult = makeMessage(AI::Role::Tool, "valid-result");
+    validResult.toolCallId = "valid";
+    invalidCall.addMessage(std::move(validResult));
+    const auto cleaned = invalidCall.getMessagesForRequest();
+    expect(cleaned.size() == 2 && cleaned.front().toolCalls.size() == 1 &&
+               cleaned.front().toolCalls.front().id == "valid" &&
+               cleaned.back().toolCallId == "valid",
+           "invalid call fields must be removed without discarding a valid pair");
 }
 
 void testDeviceSessionLifecycle() {
@@ -2608,6 +3550,25 @@ void testMutationAuditPersistence() {
     expect(!reloaded.recent().empty() && reloaded.recent().size() <= 3,
            "mutation audit should reload bounded valid JSONL records");
 
+    const std::filesystem::path hostilePath =
+        directory / "hostile_mutations.jsonl";
+    {
+        std::ofstream hostile(hostilePath, std::ios::binary);
+        hostile << std::string(80u * 1024u, 'x') << '\n';
+        hostile << "{\"schema_version\":1,\"dense\":[";
+        for (size_t item = 0; item < 3000u; ++item) {
+            if (item != 0) hostile << ',';
+            hostile << '0';
+        }
+        hostile << "]}\n" << firstLine << '\n';
+    }
+    AI::AgentMutationAuditLog hostileReload(
+        hostilePath.string(), 256u * 1024u, 3);
+    expect(hostileReload.recent().size() == 1 &&
+               hostileReload.recent().front().runId ==
+                   "audit-driver-run",
+           "mutation audit reload must skip oversized/dense lines and retain later valid records");
+
     auto& registry = AI::ToolExecutor::getInstance();
     std::mutex stateMutex;
     std::condition_variable stateCv;
@@ -2837,6 +3798,10 @@ void testAgentAdapter() {
                modulePage.at("modules").at(0).at("base") == "0x5000",
            "module_list adapter should expose structured pagination");
 
+    backend.modules.insert(
+        backend.modules.begin(),
+        {0x8000, 0x1000, 2, 1, "/data/app/libgame.so"});
+
     const json module = json::parse(
         tools.moduleResolve(
             R"({"module_name":"libgame.so"})",
@@ -2845,7 +3810,7 @@ void testAgentAdapter() {
                module.at("module") == "/data/app/libgame.so" &&
                module.at("base") == "0x5000" &&
                module.at("size") == 0x3000,
-           "module_resolve adapter should return canonical module metadata");
+           "module_resolve adapter should collapse same-path mappings and return the lowest base");
 
     const json legacyShapeModule = json::parse(
         tools.moduleResolve(
@@ -3428,11 +4393,14 @@ int main() {
         {"address contract", &testAddressContract},
         {"scalar value codec", &testScalarValueCodec},
         {"status and generation", &testStatusAndConnectionGeneration},
+        {"connection lifecycle service", &testConnectionLifecycleService},
         {"driver initialization and secret redaction",
          &testDriverInitializationAndSecretRedaction},
         {"process pagination and open", &testProcessPaginationAndOpen},
         {"memory target validation", &testMemoryReadTargetValidation},
+        {"memory batch service", &testMemoryBatchService},
         {"memory write completion contract", &testMemoryWriteCompletionContract},
+        {"freeze mutation contract", &testFreezeMutationContract},
         {"typed memory service", &testTypedMemoryService},
         {"module list and resolve", &testModuleListAndResolve},
         {"pointer resolve transaction", &testPointerResolveTransaction},
@@ -3442,8 +4410,12 @@ int main() {
         {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
+        {"tool schema validation matrix", &testToolSchemaValidationMatrix},
+        {"agent runner approval matrix", &testAgentRunnerApprovalMatrix},
+        {"tool JSON complexity limits", &testToolJsonComplexityLimits},
         {"tool result output limit", &testToolResultLimit},
         {"retired tool history downgrade", &testRetiredToolHistoryDowngrade},
+        {"tool history pairing", &testToolHistoryPairing},
         {"device session lifecycle", &testDeviceSessionLifecycle},
         {"agent task executor lifecycle", &testAgentTaskExecutorLifecycle},
         {"mutation audit persistence", &testMutationAuditPersistence},

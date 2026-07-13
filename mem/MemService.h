@@ -14,7 +14,13 @@ public:
     explicit MemService(IMemBackend& backend);
 
     OperationContext captureContext(bool includeTarget) const override;
+    ConnectionSnapshot connectionSnapshot() const override;
     Result<Status> status(const OperationContext& context) override;
+    Result<ConnectionReceipt> connect(
+        const OperationContext& context,
+        const ConnectRequest& request) override;
+    Result<DisconnectReceipt> disconnect(
+        const OperationContext& context) override;
     Result<DriverInitializationReceipt> initializeDriver(
         const OperationContext& context,
         const DriverInitializeRequest& request) override;
@@ -80,6 +86,9 @@ public:
     Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) override;
+    Result<MemoryBatch> readMemoryBatch(
+        const OperationContext& context,
+        const MemoryBatchReadRequest& request) override;
     Result<ScalarValue> readValue(
         const OperationContext& context,
         const ValueReadRequest& request) override;
@@ -89,6 +98,17 @@ public:
     Result<WriteReceipt> writeValue(
         const OperationContext& context,
         const ValueWriteRequest& request) override;
+    Result<FreezeMutationReceipt> freezeAdd(
+        const OperationContext& context,
+        const FreezeValueRequest& request) override;
+    Result<FreezeMutationReceipt> freezeUpdate(
+        const OperationContext& context,
+        const FreezeValueRequest& request) override;
+    Result<FreezeMutationReceipt> freezeRemove(
+        const OperationContext& context,
+        const FreezeAddressRequest& request) override;
+    Result<FreezeMutationReceipt> freezeClear(
+        const OperationContext& context) override;
 
 private:
     std::optional<Error> validateContext(const OperationContext& context,
@@ -102,9 +122,18 @@ private:
         const std::function<BreakpointMutationBackendResult()>& operation,
         std::optional<BreakpointAccess> access = std::nullopt,
         std::optional<uint32_t> size = std::nullopt);
+    Result<FreezeMutationReceipt> mutateFreeze(
+        const OperationContext& context,
+        uint64_t address,
+        FreezeAction action,
+        uint32_t valueSize,
+        const std::function<FreezeMutationBackendResult()>& operation);
 
     IMemBackend& backend_;
+    std::mutex connectionMutex_;
+    std::mutex processMutex_;
     std::mutex breakpointMutex_;
+    std::mutex freezeMutex_;
     std::mutex symbolMutex_;
     std::mutex scanMutex_;
     std::optional<ScanSessionSnapshot> scanSession_;

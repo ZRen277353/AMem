@@ -6,8 +6,6 @@
 #include "ColorScheme.h"
 #include "../imgui/imgui.h"
 #include "../mem/IMemService.h"
-#include "../socket/client_singleton.h"
-#include "../socket/client.hpp"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -33,6 +31,26 @@ BreakpointWindow::BreakpointWindow(Mem::IMemService& memService)
     } else {
         Gui::log("警告: Capstone 库不可用，反汇编功能已禁用");
     }
+}
+
+bool BreakpointWindow::readTargetMemory(
+    uint64_t address, uint32_t size,
+    std::vector<unsigned char>& bytes,
+    Mem::MemoryReadChannel channel,
+    Mem::Error* error) {
+    Mem::MemoryReadRequest request;
+    request.address = address;
+    request.size = size;
+    request.channel = channel;
+    auto response = memService_.readMemory(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        bytes.clear();
+        if (error) *error = response.error();
+        return false;
+    }
+    bytes = std::move(response.value().bytes);
+    return true;
 }
 
 unsigned int BreakpointWindow::getWindowFlags() const
@@ -70,7 +88,7 @@ void BreakpointWindow::draw()
     if (AppContext::Get().hasProcess() && !breakpoints.empty()) {
         float currentTime = ImGui::GetTime();
         if (!AppContext::Get().moduleCache.valid || (currentTime - AppContext::Get().moduleCache.lastRefreshTime >= 5.0f)) {
-            AppContext::Get().moduleCache.refresh();
+            AppContext::Get().moduleCache.refresh(memService_);
         }
     } else {
         // 如果没有断点或未附加进程，清除模块列表有效性标记（但不立即清空列表，保留作为缓存）

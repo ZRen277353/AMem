@@ -2,6 +2,7 @@
 
 #include "ProviderResponseLimits.h"
 
+#include "AiJsonLimits.h"
 #include "AiLimits.h"
 
 namespace AI {
@@ -127,6 +128,34 @@ ProviderError providerLimitError(const std::string& error) {
     result.category = ErrorCategory::InvalidResponse;
     result.message = error;
     return result;
+}
+
+bool parseProviderResponseJson(const std::string& serialized,
+                               nlohmann::json& document,
+                               std::string& error) {
+    return utils::parseBoundedJson(
+        serialized, kProviderResponseJsonLimits, document, error);
+}
+
+bool parseProviderEventJson(const std::string& serialized,
+                            nlohmann::json& document,
+                            std::string& error) {
+    return utils::parseBoundedJson(
+        serialized, kProviderEventJsonLimits, document, error);
+}
+
+bool parseToolArgumentJson(const std::string& serialized,
+                           nlohmann::json& document,
+                           std::string& error) {
+    return utils::parseBoundedJson(
+        serialized, kToolArgumentJsonLimits, document, error);
+}
+
+bool parseToolResultJson(const std::string& serialized,
+                         nlohmann::json& document,
+                         std::string& error) {
+    return utils::parseBoundedJson(
+        serialized, kToolResultJsonLimits, document, error);
 }
 
 } // namespace AI

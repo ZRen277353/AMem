@@ -5,6 +5,61 @@
 
 namespace utils {
 
+namespace detail {
+
+struct FilesystemAtomicFileOps {
+    bool rename(const std::filesystem::path& from,
+                const std::filesystem::path& to) {
+        std::error_code ec;
+        std::filesystem::rename(from, to, ec);
+        return !ec;
+    }
+
+    bool exists(const std::filesystem::path& path) {
+        std::error_code ec;
+        const bool present = std::filesystem::exists(path, ec);
+        return !ec && present;
+    }
+
+    void remove(const std::filesystem::path& path) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+};
+
+template <typename Operations>
+bool installTempFileWithOps(const std::filesystem::path& tmpPath,
+                            const std::filesystem::path& targetPath,
+                            Operations& operations) {
+    if (operations.rename(tmpPath, targetPath)) {
+        return true;
+    }
+
+    std::filesystem::path bakPath = targetPath;
+    bakPath += ".bak";
+    operations.remove(bakPath);
+
+    bool movedAside = false;
+    if (operations.exists(targetPath)) {
+        movedAside = operations.rename(targetPath, bakPath);
+    }
+
+    if (!operations.rename(tmpPath, targetPath)) {
+        if (movedAside) {
+            (void)operations.rename(bakPath, targetPath);
+        }
+        operations.remove(tmpPath);
+        return false;
+    }
+
+    if (movedAside) {
+        operations.remove(bakPath);
+    }
+    return true;
+}
+
+} // namespace detail
+
 // Install a freshly-written temp file over `targetPath` as atomically as the
 // platform allows, WITHOUT ever leaving the caller with neither file.
 //
@@ -23,47 +78,8 @@ namespace utils {
 // Returns true only when `targetPath` now holds the new content.
 inline bool installTempFile(const std::filesystem::path& tmpPath,
                             const std::filesystem::path& targetPath) {
-    std::error_code ec;
-    std::filesystem::rename(tmpPath, targetPath, ec);
-    if (!ec) {
-        return true;
-    }
-
-    // Direct replace failed. Preserve the current target by moving it aside
-    // before retrying, so a second failure can't destroy the only good copy.
-    std::filesystem::path bakPath = targetPath;
-    bakPath += ".bak";
-
-    std::error_code bakEc;
-    std::filesystem::remove(bakPath, bakEc); // clear any stale backup
-
-    bool movedAside = false;
-    bakEc.clear();
-    if (std::filesystem::exists(targetPath, bakEc)) {
-        bakEc.clear();
-        std::filesystem::rename(targetPath, bakPath, bakEc);
-        movedAside = !bakEc;
-    }
-
-    ec.clear();
-    std::filesystem::rename(tmpPath, targetPath, ec);
-    if (ec) {
-        // Could not install the new file. Restore the original if we moved it
-        // aside, and drop the temp. The previous target survives either way.
-        if (movedAside) {
-            std::error_code restoreEc;
-            std::filesystem::rename(bakPath, targetPath, restoreEc);
-        }
-        std::error_code rmEc;
-        std::filesystem::remove(tmpPath, rmEc);
-        return false;
-    }
-
-    if (movedAside) {
-        std::error_code rmEc;
-        std::filesystem::remove(bakPath, rmEc); // success — drop the backup
-    }
-    return true;
+    detail::FilesystemAtomicFileOps operations;
+    return detail::installTempFileWithOps(tmpPath, targetPath, operations);
 }
 
 } // namespace utils

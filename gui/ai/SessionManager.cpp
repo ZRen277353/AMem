@@ -1,9 +1,10 @@
 #ifdef HAVE_AI_CHAT
 
 #include "SessionManager.h"
+#include "ChatSession.h"
+#include "ProtectedPersistence.h"
 
 #include "../../third_party/nlohmann/json.hpp"
-#include "../../utils/AtomicFileWrite.h"
 
 #include <algorithm>
 #include <cctype>
@@ -67,8 +68,18 @@ bool recoverSessionInfo(const std::filesystem::path& path,
         return false;
     }
 
-    JsonDocumentLoadResult document = loadJsonDocument(path);
-    if (document.result.status != PersistenceLoadStatus::Loaded ||
+    ChatSession validationSession;
+    const PersistenceLoadResult validation = validationSession.load(
+        path.string());
+    if (!validation.usable() ||
+        validation.status == PersistenceLoadStatus::Missing) {
+        return false;
+    }
+
+    ProtectedJsonDocumentLoadResult document = loadProtectedJsonDocument(
+        path, ProtectedPersistenceKind::Session);
+    if (!document.result.usable() ||
+        document.result.status == PersistenceLoadStatus::Missing ||
         !document.document.is_object()) {
         return false;
     }
@@ -112,6 +123,47 @@ bool recoverSessionInfo(const std::filesystem::path& path,
     return true;
 }
 
+PersistenceLoadResult migrateSessionArtifacts(
+    const std::filesystem::path& directory) {
+    std::error_code ec;
+    std::filesystem::directory_iterator iterator(directory, ec);
+    if (ec) {
+        return {PersistenceLoadStatus::IoError,
+                "could not scan session persistence: " + ec.message()};
+    }
+
+    for (const auto& entry : iterator) {
+        ec.clear();
+        if (!entry.is_regular_file(ec) || ec) {
+            continue;
+        }
+        const std::string filename = entry.path().filename().string();
+        const size_t jsonMarker = filename.find(".json");
+        if (jsonMarker == std::string::npos ||
+            (jsonMarker + 5u != filename.size() &&
+             filename[jsonMarker + 5u] != '.')) {
+            continue;
+        }
+
+        const bool indexArtifact =
+            filename == "index.json" || filename.rfind("index.json.", 0) == 0;
+        if (indexArtifact) {
+            continue;
+        }
+
+        ChatSession validationSession;
+        const PersistenceLoadResult loaded = validationSession.load(
+            entry.path().string());
+        if (loaded.status == PersistenceLoadStatus::IoError) {
+            return {
+                PersistenceLoadStatus::IoError,
+                "could not migrate session artifact '" + filename +
+                    "': " + loaded.message};
+        }
+    }
+    return {PersistenceLoadStatus::Loaded, {}};
+}
+
 } // namespace
 
 PersistenceLoadResult SessionManager::init(
@@ -130,6 +182,15 @@ PersistenceLoadResult SessionManager::init(
         lastLoadResult_ = {
             PersistenceLoadStatus::IoError,
             "could not create sessions directory: " + ec.message()};
+        initialized_ = true;
+        return lastLoadResult_;
+    }
+
+    const PersistenceLoadResult artifactProtection =
+        migrateSessionArtifacts(dir_);
+    if (artifactProtection.failed()) {
+        indexWritesEnabled_ = false;
+        lastLoadResult_ = artifactProtection;
         initialized_ = true;
         return lastLoadResult_;
     }
@@ -159,9 +220,23 @@ PersistenceLoadResult SessionManager::init(
 
             // Try to peek at the message count so the sidebar shows a
             // meaningful badge immediately; non-fatal on parse failure.
-            JsonDocumentLoadResult legacyDocument =
-                loadJsonDocument(legacySessionFile);
-            if (legacyDocument.result.status == PersistenceLoadStatus::Loaded &&
+            ChatSession legacyValidation;
+            const PersistenceLoadResult legacyValidationResult =
+                legacyValidation.load(legacySessionFile);
+            if (legacyValidationResult.failed()) {
+                lastLoadResult_ = {
+                    legacyValidationResult.status,
+                    "legacy session migration failed: " +
+                        legacyValidationResult.message};
+                initialized_ = true;
+                return lastLoadResult_;
+            }
+            ProtectedJsonDocumentLoadResult legacyDocument =
+                loadProtectedJsonDocument(
+                    legacySessionFile,
+                    ProtectedPersistenceKind::Session);
+            if (legacyDocument.result.usable() &&
+                legacyDocument.result.status != PersistenceLoadStatus::Missing &&
                 legacyDocument.document.is_object() &&
                 legacyDocument.document.contains("messages") &&
                 legacyDocument.document["messages"].is_array()) {
@@ -347,8 +422,10 @@ std::string SessionManager::deriveTitle(const std::string& firstUserMessage) {
 // ---------------------------------------------------------------------------
 
 PersistenceLoadResult SessionManager::loadIndexUnlocked() {
-    JsonDocumentLoadResult document = loadJsonDocument(indexPath_);
-    if (document.result.status != PersistenceLoadStatus::Loaded) {
+    ProtectedJsonDocumentLoadResult document = loadProtectedJsonDocument(
+        indexPath_, ProtectedPersistenceKind::SessionIndex);
+    if (document.result.status == PersistenceLoadStatus::Missing ||
+        document.result.failed()) {
         return document.result;
     }
 
@@ -451,10 +528,28 @@ PersistenceLoadResult SessionManager::loadIndexUnlocked() {
         }
     }
 
+    PersistenceLoadResult finalResult = document.result;
+    if (document.legacyPlaintext) {
+        std::string migrationError;
+        if (!saveProtectedJsonDocument(
+                indexPath_,
+                ProtectedPersistenceKind::SessionIndex,
+                document.document,
+                migrationError)) {
+            return {
+                PersistenceLoadStatus::IoError,
+                "session index validation succeeded but protection failed: " +
+                    migrationError};
+        }
+        finalResult = {
+            PersistenceLoadStatus::Recovered,
+            "migrated legacy plaintext session index to Windows user protection"};
+    }
+
     sessions_ = std::move(loadedSessions);
     activeId_ = std::move(loadedActiveId);
     legacyMigrated_ = loadedLegacyMigrated;
-    return {PersistenceLoadStatus::Loaded, {}};
+    return finalResult;
 }
 
 PersistenceLoadResult SessionManager::recoverIndexUnlocked(
@@ -541,28 +636,9 @@ bool SessionManager::saveIndexUnlocked() const {
     }
     root["sessions"] = std::move(arr);
 
-    // Atomic write via .tmp rename so a crash mid-save can't truncate the
-    // index — same pattern used by ApiKeyStore / AiSettings.
-    std::filesystem::path target(indexPath_);
-    std::filesystem::path tmp = target;
-    tmp += ".tmp";
-
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) return false;
-        try {
-            out << root.dump(2);
-        } catch (const nlohmann::json::exception&) {
-            return false;
-        }
-        out.flush();
-        if (!out.good()) return false;
-    }
-
-    // Install the temp over the index without risking the only good copy —
-    // a held-open index.json no longer leads to the whole session list being
-    // deleted (see utils::installTempFile).
-    return utils::installTempFile(tmp, target);
+    std::string error;
+    return saveProtectedJsonDocument(
+        indexPath_, ProtectedPersistenceKind::SessionIndex, root, error);
 }
 
 std::string SessionManager::allocIdUnlocked() const {

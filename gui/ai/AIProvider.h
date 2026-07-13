@@ -1,11 +1,14 @@
 #pragma once
 #ifdef HAVE_AI_CHAT
 
+#include "SecureMemory.h"
+
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace AI {
@@ -90,6 +93,7 @@ struct ProviderCapabilities {
     bool supportsStreaming = false;
     bool supportsToolCalling = false;
     int maxContextTokens = 4096;
+    int maxOutputTokens = 4096;
 };
 
 // 完成响应
@@ -109,6 +113,7 @@ struct CompletionRequest {
     std::vector<ChatMessage> messages;
     std::vector<ToolDefinition> tools;
     std::string model;
+    int maxOutputTokens = 4096;
     bool stream = true;
     StreamCallback onToken;
     CompletionCallback onComplete;
@@ -120,6 +125,50 @@ struct ProviderConfig {
     std::string baseUrl;
     std::string model;
     std::string apiVersion; // For Anthropic
+    std::string trustedBaseUrl; // exact custom endpoint approved by the user
+    int contextWindowTokens = 0; // 0 uses the provider/model default
+
+    ProviderConfig() = default;
+    ProviderConfig(const ProviderConfig&) = default;
+    ProviderConfig(ProviderConfig&& other) noexcept
+        : apiKey(std::move(other.apiKey)),
+          baseUrl(std::move(other.baseUrl)),
+          model(std::move(other.model)),
+          apiVersion(std::move(other.apiVersion)),
+          trustedBaseUrl(std::move(other.trustedBaseUrl)),
+          contextWindowTokens(other.contextWindowTokens) {
+        secureClearString(other.apiKey);
+        other.contextWindowTokens = 0;
+    }
+    ProviderConfig& operator=(const ProviderConfig& other) {
+        if (this != &other) {
+            secureClearString(apiKey);
+            apiKey = other.apiKey;
+            baseUrl = other.baseUrl;
+            model = other.model;
+            apiVersion = other.apiVersion;
+            trustedBaseUrl = other.trustedBaseUrl;
+            contextWindowTokens = other.contextWindowTokens;
+        }
+        return *this;
+    }
+    ProviderConfig& operator=(ProviderConfig&& other) noexcept {
+        if (this != &other) {
+            secureClearString(apiKey);
+            apiKey = std::move(other.apiKey);
+            baseUrl = std::move(other.baseUrl);
+            model = std::move(other.model);
+            apiVersion = std::move(other.apiVersion);
+            trustedBaseUrl = std::move(other.trustedBaseUrl);
+            contextWindowTokens = other.contextWindowTokens;
+            secureClearString(other.apiKey);
+            other.contextWindowTokens = 0;
+        }
+        return *this;
+    }
+    ~ProviderConfig() {
+        secureClearString(apiKey);
+    }
 };
 
 // AI Provider 抽象接口

@@ -59,6 +59,22 @@ if(NOT actual_names STREQUAL expected_names)
 endif()
 
 string(REGEX MATCHALL
+    "constexpr const char\\* kSchema[A-Za-z0-9_]+"
+    schema_declarations
+    "${source}")
+string(REGEX MATCHALL
+    "\"additionalProperties\"[ \t\r\n]*:[ \t\r\n]*false"
+    closed_schema_markers
+    "${source}")
+list(LENGTH schema_declarations schema_count)
+list(LENGTH closed_schema_markers closed_schema_count)
+if(NOT schema_count EQUAL 22 OR NOT closed_schema_count EQUAL schema_count)
+    message(FATAL_ERROR
+        "Every canonical tool schema must be a closed root object. "
+        "Schemas: ${schema_count}; closed markers: ${closed_schema_count}")
+endif()
+
+string(REGEX MATCHALL
     "\\{\"[a-z_]+\", IpcCapability::"
     ipc_registrations
     "${ipc_source}")

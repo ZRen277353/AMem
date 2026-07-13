@@ -2,17 +2,25 @@
 
 #include "ToolExecutor.h"
 
+#include "AiJsonLimits.h"
 #include "AiLimits.h"
 #include "../../socket/socket_io_timeout.h"
 #include "../../third_party/nlohmann/json.hpp"
 
 #include <chrono>
 #include <exception>
+#include <regex>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace AI {
+
+struct CompiledToolSchema {
+    nlohmann::json document;
+    std::string error;
+};
 
 namespace {
 
@@ -58,12 +66,189 @@ bool matchesType(const json& value, const std::string& expected) {
     if (expected == "array")   return value.is_array();
     if (expected == "integer") return value.is_number_integer() || value.is_number_unsigned();
     if (expected == "number")  return value.is_number();
-    // Unknown type keyword — be permissive rather than rejecting real data.
-    return true;
+    return false;
 }
 
-// Minimal JSON-Schema validator. Supports: type, required, properties,
-// anyOf, items, minimum, maximum, minLength, maxLength, minItems, maxItems.
+bool isSupportedSchemaType(const std::string& type) {
+    return type == "object" || type == "string" || type == "boolean" ||
+           type == "array" || type == "integer" || type == "number";
+}
+
+bool readNonNegativeSize(const json& value, std::size_t& output) {
+    if (value.type() == json::value_t::number_integer) {
+        const auto signedValue = value.get<long long>();
+        if (signedValue < 0) {
+            return false;
+        }
+        output = static_cast<std::size_t>(signedValue);
+        return static_cast<unsigned long long>(signedValue) == output;
+    }
+    if (value.type() != json::value_t::number_unsigned) {
+        return false;
+    }
+    const auto unsignedValue = value.get<unsigned long long>();
+    output = static_cast<std::size_t>(unsignedValue);
+    return static_cast<unsigned long long>(output) == unsignedValue;
+}
+
+std::string validateSchemaDefinition(const json& schema,
+                                     const std::string& path,
+                                     std::size_t depth = 0) {
+    constexpr std::size_t kMaxSchemaDepth = 32;
+    if (!schema.is_object()) {
+        return "invalid tool parameter schema: " + path +
+               " must be an object";
+    }
+    if (depth > kMaxSchemaDepth) {
+        return "invalid tool parameter schema: nesting exceeds 32 levels at " +
+               path;
+    }
+
+    static const std::unordered_set<std::string> kSupportedKeywords = {
+        "type", "description", "required", "properties",
+        "additionalProperties", "enum", "pattern", "anyOf", "oneOf",
+        "items", "minimum", "maximum", "minLength", "maxLength",
+        "minItems", "maxItems",
+    };
+    for (auto it = schema.begin(); it != schema.end(); ++it) {
+        if (kSupportedKeywords.find(it.key()) == kSupportedKeywords.end()) {
+            return "invalid tool parameter schema: unsupported keyword '" +
+                   it.key() + "' at " + path;
+        }
+    }
+
+    if (schema.contains("type") &&
+        (!schema["type"].is_string() ||
+         !isSupportedSchemaType(schema["type"].get<std::string>()))) {
+        return "invalid tool parameter schema: unsupported type at " + path;
+    }
+    if (schema.contains("description") &&
+        !schema["description"].is_string()) {
+        return "invalid tool parameter schema: description must be a string at " +
+               path;
+    }
+    if (schema.contains("required")) {
+        if (!schema["required"].is_array()) {
+            return "invalid tool parameter schema: required must be an array at " +
+                   path;
+        }
+        for (const auto& required : schema["required"]) {
+            if (!required.is_string()) {
+                return "invalid tool parameter schema: required entries must be strings at " +
+                       path;
+            }
+        }
+    }
+    if (schema.contains("properties")) {
+        if (!schema["properties"].is_object()) {
+            return "invalid tool parameter schema: properties must be an object at " +
+                   path;
+        }
+        for (auto it = schema["properties"].begin();
+             it != schema["properties"].end(); ++it) {
+            const std::string error = validateSchemaDefinition(
+                it.value(), path + ".properties." + it.key(), depth + 1);
+            if (!error.empty()) {
+                return error;
+            }
+        }
+    }
+    if (schema.contains("additionalProperties")) {
+        const json& additional = schema["additionalProperties"];
+        if (!additional.is_boolean() && !additional.is_object()) {
+            return "invalid tool parameter schema: additionalProperties must be boolean or object at " +
+                   path;
+        }
+        if (additional.is_object()) {
+            const std::string error = validateSchemaDefinition(
+                additional, path + ".additionalProperties", depth + 1);
+            if (!error.empty()) {
+                return error;
+            }
+        }
+    }
+    if (schema.contains("enum") &&
+        (!schema["enum"].is_array() || schema["enum"].empty())) {
+        return "invalid tool parameter schema: enum must be a non-empty array at " +
+               path;
+    }
+    if (schema.contains("pattern")) {
+        if (!schema["pattern"].is_string()) {
+            return "invalid tool parameter schema: pattern must be a string at " +
+                   path;
+        }
+        try {
+            (void)std::regex(schema["pattern"].get<std::string>(),
+                             std::regex::ECMAScript);
+        } catch (const std::regex_error&) {
+            return "invalid tool parameter schema: malformed pattern at " + path;
+        }
+    }
+
+    for (const char* keyword : {"anyOf", "oneOf"}) {
+        if (!schema.contains(keyword)) {
+            continue;
+        }
+        const json& alternatives = schema[keyword];
+        if (!alternatives.is_array() || alternatives.empty()) {
+            return std::string("invalid tool parameter schema: ") + keyword +
+                   " must be a non-empty array at " + path;
+        }
+        for (std::size_t i = 0; i < alternatives.size(); ++i) {
+            const std::string error = validateSchemaDefinition(
+                alternatives[i], path + "." + keyword + "[" +
+                                     std::to_string(i) + "]",
+                depth + 1);
+            if (!error.empty()) {
+                return error;
+            }
+        }
+    }
+    if (schema.contains("items")) {
+        const std::string error = validateSchemaDefinition(
+            schema["items"], path + ".items", depth + 1);
+        if (!error.empty()) {
+            return error;
+        }
+    }
+    for (const char* keyword : {"minimum", "maximum"}) {
+        if (schema.contains(keyword) && !schema[keyword].is_number()) {
+            return std::string("invalid tool parameter schema: ") + keyword +
+                   " must be numeric at " + path;
+        }
+    }
+    if (schema.contains("minimum") && schema.contains("maximum") &&
+        schema["minimum"].get<double>() > schema["maximum"].get<double>()) {
+        return "invalid tool parameter schema: minimum exceeds maximum at " +
+               path;
+    }
+
+    for (const auto& pair : {
+             std::pair<const char*, const char*>{"minLength", "maxLength"},
+             std::pair<const char*, const char*>{"minItems", "maxItems"}}) {
+        std::size_t minimum = 0;
+        std::size_t maximum = 0;
+        if (schema.contains(pair.first) &&
+            !readNonNegativeSize(schema[pair.first], minimum)) {
+            return std::string("invalid tool parameter schema: ") + pair.first +
+                   " must be a non-negative size at " + path;
+        }
+        if (schema.contains(pair.second) &&
+            !readNonNegativeSize(schema[pair.second], maximum)) {
+            return std::string("invalid tool parameter schema: ") + pair.second +
+                   " must be a non-negative size at " + path;
+        }
+        if (schema.contains(pair.first) && schema.contains(pair.second) &&
+            minimum > maximum) {
+            return std::string("invalid tool parameter schema: ") + pair.first +
+                   " exceeds " + pair.second + " at " + path;
+        }
+    }
+    return {};
+}
+
+// Bounded JSON-Schema subset used by every built-in tool. Unsupported or
+// malformed schema keywords fail closed before an executor can run.
 // Returns an empty string on
 // success, otherwise a human-readable description of the first violation
 // encountered (AC 5.6). The path argument is used to build
@@ -84,6 +269,19 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
         }
     }
 
+    if (schema.contains("enum")) {
+        bool matched = false;
+        for (const auto& accepted : schema["enum"]) {
+            if (args == accepted) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            return path + " is not one of the allowed enum values";
+        }
+    }
+
     // string constraints
     if (args.is_string()) {
         const auto& s = args.get_ref<const std::string&>();
@@ -101,6 +299,13 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
                 std::ostringstream oss;
                 oss << path << " longer than maxLength " << maxLen;
                 return oss.str();
+            }
+        }
+        if (schema.contains("pattern")) {
+            const std::regex expression(schema["pattern"].get<std::string>(),
+                                        std::regex::ECMAScript);
+            if (!std::regex_search(s, expression)) {
+                return path + " does not match the required pattern";
             }
         }
     }
@@ -178,6 +383,27 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
                 if (!err.empty()) return err;
             }
         }
+        if (schema.contains("additionalProperties")) {
+            const json& additional = schema["additionalProperties"];
+            const json* properties = schema.contains("properties")
+                                         ? &schema["properties"]
+                                         : nullptr;
+            for (auto it = args.begin(); it != args.end(); ++it) {
+                if (properties && properties->contains(it.key())) {
+                    continue;
+                }
+                if (additional.is_boolean() && !additional.get<bool>()) {
+                    return "unexpected property '" + it.key() + "' at " + path;
+                }
+                if (additional.is_object()) {
+                    const std::string error = validateAgainstSchema(
+                        it.value(), additional, path + "." + it.key());
+                    if (!error.empty()) {
+                        return error;
+                    }
+                }
+            }
+        }
     }
 
     // composite constraints
@@ -210,23 +436,54 @@ std::string validateAgainstSchema(const json& args, const json& schema, const st
         }
     }
 
+    if (schema.contains("oneOf")) {
+        int matches = 0;
+        for (const auto& alternative : schema["oneOf"]) {
+            if (validateAgainstSchema(args, alternative, path).empty()) {
+                ++matches;
+            }
+        }
+        if (matches != 1) {
+            return path + " must match exactly one accepted argument form";
+        }
+    }
+
     return "";
 }
 
-// Entry point used by ToolExecutor::execute(). Parses the schema string from
-// the ToolDefinition and dispatches to the recursive validator.
-std::string validateAgainstSchema(const json& args, const std::string& schemaStr) {
-    if (schemaStr.empty()) return "";
-    json schema;
-    try {
-        schema = json::parse(schemaStr);
-    } catch (const std::exception& e) {
-        return std::string("invalid tool parameter schema: ") + e.what();
+std::shared_ptr<const CompiledToolSchema> compileToolSchema(
+    const std::string& schemaText) {
+    auto compiled = std::make_shared<CompiledToolSchema>();
+    if (schemaText.empty()) {
+        compiled->document = json::object();
+        return compiled;
     }
-    if (!schema.is_object()) {
-        return "invalid tool parameter schema: root schema must be an object";
+    std::string parseError;
+    if (!utils::parseBoundedJson(
+            schemaText, kToolSchemaJsonLimits, compiled->document,
+            parseError)) {
+        compiled->error = "invalid tool parameter schema: " + parseError;
+        return compiled;
     }
-    return validateAgainstSchema(args, schema, "root");
+    if (!compiled->document.is_object()) {
+        compiled->error =
+            "invalid tool parameter schema: root schema must be an object";
+        return compiled;
+    }
+    compiled->error = validateSchemaDefinition(compiled->document, "root");
+    return compiled;
+}
+
+std::string validateAgainstSchema(
+    const json& args,
+    const std::shared_ptr<const CompiledToolSchema>& compiled) {
+    if (!compiled) {
+        return "invalid tool parameter schema: schema was not compiled";
+    }
+    if (!compiled->error.empty()) {
+        return compiled->error;
+    }
+    return validateAgainstSchema(args, compiled->document, "root");
 }
 
 std::string jsonValueToErrorString(const json& value) {
@@ -242,86 +499,74 @@ std::string jsonValueToErrorString(const json& value) {
     return value.dump();
 }
 
-std::string extractToolError(const std::string& resultJson) {
-    if (resultJson.empty()) return "";
-
-    try {
-        const json result = json::parse(resultJson);
-        if (!result.is_object()) {
-            return "";
-        }
-
-        if (result.contains("success") && result["success"].is_boolean() &&
-            !result["success"].get<bool>()) {
-            if (result.contains("error")) {
-                const std::string err = jsonValueToErrorString(result["error"]);
-                if (!err.empty()) {
-                    return err;
-                }
-            }
-            return "tool returned success=false";
-        }
-
-        if (!result.contains("error")) {
-            return "";
-        }
-        return jsonValueToErrorString(result["error"]);
-    } catch (const std::exception& e) {
-        return std::string("tool returned invalid JSON: ") + e.what();
+std::string extractToolError(const json& result) {
+    if (!result.is_object()) {
+        return "tool result must be a JSON object";
     }
+
+    if (result.contains("success") && result["success"].is_boolean() &&
+        !result["success"].get<bool>()) {
+        if (result.contains("error")) {
+            const std::string err = jsonValueToErrorString(result["error"]);
+            if (!err.empty()) {
+                return err;
+            }
+        }
+        return "tool returned success=false";
+    }
+
+    if (!result.contains("error")) {
+        return "";
+    }
+    return jsonValueToErrorString(result["error"]);
 }
 
-ToolCompletionState extractCompletionState(const std::string& resultJson) {
-    try {
-        const json result = json::parse(resultJson);
-        if (!result.is_object()) {
-            return ToolCompletionState::Completed;
-        }
+ToolCompletionState extractCompletionState(const json& result) {
+    if (!result.is_object()) {
+        return ToolCompletionState::Completed;
+    }
 
-        if (result.contains("completion") &&
-            result["completion"].is_string()) {
-            const std::string completion =
-                result["completion"].get<std::string>();
-            if (completion == "rejected_before_start")
-                return ToolCompletionState::RejectedBeforeStart;
-            if (completion == "cancelled_before_start")
-                return ToolCompletionState::CancelledBeforeStart;
-            if (completion == "timed_out_before_start")
-                return ToolCompletionState::TimedOutBeforeStart;
-            if (completion == "timed_out")
-                return ToolCompletionState::TimedOut;
-            if (completion == "cancel_requested")
-                return ToolCompletionState::CancelRequested;
-            if (completion == "completion_unknown")
-                return ToolCompletionState::CompletionUnknown;
-            if (completion == "completed_after_cancel_request")
-                return ToolCompletionState::CompletedAfterCancelRequest;
-            if (completion == "completed_after_deadline")
-                return ToolCompletionState::CompletedAfterDeadline;
-        }
+    if (result.contains("completion") &&
+        result["completion"].is_string()) {
+        const std::string completion =
+            result["completion"].get<std::string>();
+        if (completion == "rejected_before_start")
+            return ToolCompletionState::RejectedBeforeStart;
+        if (completion == "cancelled_before_start")
+            return ToolCompletionState::CancelledBeforeStart;
+        if (completion == "timed_out_before_start")
+            return ToolCompletionState::TimedOutBeforeStart;
+        if (completion == "timed_out")
+            return ToolCompletionState::TimedOut;
+        if (completion == "cancel_requested")
+            return ToolCompletionState::CancelRequested;
+        if (completion == "completion_unknown")
+            return ToolCompletionState::CompletionUnknown;
+        if (completion == "completed_after_cancel_request")
+            return ToolCompletionState::CompletedAfterCancelRequest;
+        if (completion == "completed_after_deadline")
+            return ToolCompletionState::CompletedAfterDeadline;
+    }
 
-        if (result.contains("error") && result["error"].is_object() &&
-            result["error"].contains("code") &&
-            result["error"]["code"].is_string()) {
-            const std::string code =
-                result["error"]["code"].get<std::string>();
-            if (code == "cancel_requested")
-                return ToolCompletionState::CancelRequested;
-            if (code == "timeout")
-                return ToolCompletionState::TimedOut;
-            if (code == "completion_unknown")
-                return ToolCompletionState::CompletionUnknown;
-        }
-    } catch (const std::exception&) {
+    if (result.contains("error") && result["error"].is_object() &&
+        result["error"].contains("code") &&
+        result["error"]["code"].is_string()) {
+        const std::string code =
+            result["error"]["code"].get<std::string>();
+        if (code == "cancel_requested")
+            return ToolCompletionState::CancelRequested;
+        if (code == "timeout")
+            return ToolCompletionState::TimedOut;
+        if (code == "completion_unknown")
+            return ToolCompletionState::CompletionUnknown;
     }
     return ToolCompletionState::Completed;
 }
 
 std::optional<Mem::TargetSnapshot> extractSelectedTarget(
-    const std::string& resultJson,
+    const json& result,
     std::string& error) {
     try {
-        const json result = json::parse(resultJson);
         if (!result.is_object() ||
             !result.contains("pid") ||
             !result.contains("handle") ||
@@ -363,6 +608,7 @@ void ToolExecutor::registerTool(const std::string& name,
     reg.definition.name = name.size() > 64 ? name.substr(0, 64) : name;
     reg.definition.description = description.size() > 256 ? description.substr(0, 256) : description;
     reg.definition.parametersSchema = parametersSchema;
+    reg.compiledSchema = compileToolSchema(parametersSchema);
     reg.safety = safety;
     reg.targetPolicy = targetPolicy;
     if (executor) {
@@ -372,7 +618,7 @@ void ToolExecutor::registerTool(const std::string& name,
             return executor(argsJson);
         };
     }
-    reg.advertised = advertised;
+    reg.advertised = advertised && reg.compiledSchema->error.empty();
 
     std::lock_guard<std::mutex> lock(mutex_);
     tools_[reg.definition.name] = std::move(reg);
@@ -392,10 +638,11 @@ void ToolExecutor::registerTool(
     reg.definition.description =
         description.size() > 256 ? description.substr(0, 256) : description;
     reg.definition.parametersSchema = parametersSchema;
+    reg.compiledSchema = compileToolSchema(parametersSchema);
     reg.safety = safety;
     reg.targetPolicy = targetPolicy;
     reg.executor = std::move(executor);
-    reg.advertised = advertised;
+    reg.advertised = advertised && reg.compiledSchema->error.empty();
 
     std::lock_guard<std::mutex> lock(mutex_);
     tools_[reg.definition.name] = std::move(reg);
@@ -440,19 +687,20 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
     if (call.arguments.empty()) {
         args = json::object();
     } else {
-        try {
-            args = json::parse(call.arguments);
-        } catch (const std::exception& e) {
+        std::string parseError;
+        if (!utils::parseBoundedJson(
+                call.arguments, kToolArgumentJsonLimits, args, parseError)) {
             ToolResult result;
             result.success = false;
             result.errorMessage = std::string("Invalid JSON in arguments for tool '") +
-                                  call.name + "': " + e.what();
+                                  call.name + "': " + parseError;
             return result;
         }
     }
 
     // Schema validation (AC 5.6).
-    const std::string validationError = validateAgainstSchema(args, registration.definition.parametersSchema);
+    const std::string validationError =
+        validateAgainstSchema(args, registration.compiledSchema);
     if (!validationError.empty()) {
         ToolResult result;
         result.success = false;
@@ -503,14 +751,29 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
             result.completion = ToolCompletionState::CompletionUnknown;
             return result;
         }
-        result.errorMessage = extractToolError(result.resultJson);
+        json resultDocument;
+        std::string resultParseError;
+        if (!utils::parseBoundedJson(result.resultJson,
+                                     kToolResultJsonLimits,
+                                     resultDocument,
+                                     resultParseError)) {
+            result.success = false;
+            result.errorMessage =
+                "Tool returned invalid or over-complex JSON: " +
+                resultParseError;
+            result.completion = registration.safety == ToolSafety::Write
+                ? ToolCompletionState::CompletionUnknown
+                : ToolCompletionState::Completed;
+            return result;
+        }
+        result.errorMessage = extractToolError(resultDocument);
         result.success = result.errorMessage.empty();
-        result.completion = extractCompletionState(result.resultJson);
+        result.completion = extractCompletionState(resultDocument);
         if (result.success &&
             registration.targetPolicy == ToolTargetPolicy::Selection) {
             std::string targetError;
             result.selectedTarget =
-                extractSelectedTarget(result.resultJson, targetError);
+                extractSelectedTarget(resultDocument, targetError);
             if (!result.selectedTarget) {
                 result.success = false;
                 result.errorMessage = std::move(targetError);

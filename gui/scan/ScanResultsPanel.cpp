@@ -4,7 +4,6 @@
 #include "../Gui.h"
 #include "../../mem/IMemService.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -411,7 +410,7 @@ void ScanWindow::drawResultsPanel()
                         // 临时释放锁，避免死锁
                         lock.unlock();
 
-                        navigateToAddress(resultContextMenuAddress);
+                        navigateToAddress(resultContextMenuAddress, memService_);
 
                         // 重新获取锁
                         lock.lock();
@@ -624,15 +623,20 @@ void ScanWindow::refreshScanResultsValuesForRevision(int refreshValueType, bool 
     }
 
     // 准备批量读取的地址列表（所有地址大小相同）
-    std::vector<std::pair<uint64_t, int32_t>> batchAddrs;
+    std::vector<Mem::MemoryReadRequest> batchAddrs;
     batchAddrs.reserve(results.size());
     for (auto& r : results) {
-        batchAddrs.push_back({r.address, size});
+        Mem::MemoryReadRequest request;
+        request.address = r.address;
+        request.size = size;
+        request.channel = Mem::MemoryReadChannel::Background;
+        batchAddrs.push_back(request);
     }
 
     // 批量读取所有地址（使用调试端口进行自动刷新）
-    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> batchResults;
-    bool batchSuccess = ReadBratchAddr(batchAddrs, batchResults, PORT_DEBUG);
+    std::vector<Mem::MemoryBlock> batchResults;
+    bool batchSuccess = readTargetMemoryBatch(
+        batchAddrs, batchResults, Mem::MemoryReadChannel::Background);
     if (AppContext::Get().processRevision.load(std::memory_order_acquire) != expectedProcessRevision) {
         return;
     }
@@ -643,11 +647,11 @@ void ScanWindow::refreshScanResultsValuesForRevision(int refreshValueType, bool 
             auto& r = results[i];
             auto& batch = batchResults[i];
 
-            if (batch.second.size() >= size) {
+            if (batch.bytes.size() >= size) {
                 uint64_t newValue = 0;
-                memcpy(&newValue, batch.second.data(), size);
+                memcpy(&newValue, batch.bytes.data(), size);
                 r.newValue = newValue;
-                r.newValueStr = formatValueOutput(batch.second.data(), refreshValueType);
+                r.newValueStr = formatValueOutput(batch.bytes.data(), refreshValueType);
                 r.success = true;
                 refreshCount++;
             } else {
@@ -661,7 +665,10 @@ void ScanWindow::refreshScanResultsValuesForRevision(int refreshValueType, bool 
         // 批量读取失败，回退到逐个读取（使用调试端口）
         for (auto& r : results) {
             std::vector<unsigned char> buffer;
-            if (ReadProcessMemoryBytes(r.address, size, buffer, PORT_DEBUG) && buffer.size() >= size) {
+            if (readTargetMemory(
+                    r.address, size, buffer,
+                    Mem::MemoryReadChannel::Background) &&
+                buffer.size() >= size) {
                 uint64_t newValue = 0;
                 memcpy(&newValue, buffer.data(), size);
                 r.newValue = newValue;

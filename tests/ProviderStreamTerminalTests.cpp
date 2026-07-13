@@ -2,6 +2,7 @@
 #include "gui/ai/ProviderStreamTerminal.h"
 #include "gui/ai/ProviderResponseLimits.h"
 #include "gui/ai/SSEParser.h"
+#include "nlohmann/json.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -157,6 +158,68 @@ void testProviderMessageValidationLimits() {
            "provider message should reject a 65th tool call");
 }
 
+std::string nestedArrays(size_t depth) {
+    std::string value(depth, '[');
+    value += "null";
+    value.append(depth, ']');
+    return value;
+}
+
+std::string denseArrays(size_t arrayCount, size_t itemsPerArray) {
+    std::string value;
+    value.reserve(arrayCount * (itemsPerArray * 2u + 3u) + 2u);
+    value.push_back('[');
+    for (size_t arrayIndex = 0; arrayIndex < arrayCount; ++arrayIndex) {
+        if (arrayIndex != 0) value.push_back(',');
+        value.push_back('[');
+        for (size_t item = 0; item < itemsPerArray; ++item) {
+            if (item != 0) value.push_back(',');
+            value.push_back('0');
+        }
+        value.push_back(']');
+    }
+    value.push_back(']');
+    return value;
+}
+
+void testProviderJsonComplexityLimits() {
+    nlohmann::json parsed;
+    std::string error;
+    const std::string deepEvent = nestedArrays(
+        AI::Limits::kMaxToolJsonDepth + 1u);
+    expect(!AI::parseProviderEventJson(deepEvent, parsed, error) &&
+               error.find("nesting") != std::string::npos,
+           "provider event parser must reject excessive nesting");
+
+    const std::string denseEvent = denseArrays(6u, 4000u);
+    error.clear();
+    expect(denseEvent.size() < AI::Limits::kMaxSseEventBytes &&
+               !AI::parseProviderEventJson(denseEvent, parsed, error) &&
+               error.find("node limit") != std::string::npos,
+           "provider event parser must reject dense JSON below the byte limit");
+
+    const std::string denseResponse = denseArrays(26u, 4000u);
+    error.clear();
+    expect(denseResponse.size() < AI::Limits::kMaxHttpResponseBytes &&
+               !AI::parseProviderResponseJson(
+                   denseResponse, parsed, error) &&
+               error.find("node limit") != std::string::npos,
+           "provider response parser must reject dense JSON below the byte limit");
+
+    const std::string denseArguments = denseArrays(3u, 3000u);
+    error.clear();
+    expect(denseArguments.size() <
+                   AI::Limits::kMaxToolArgumentsPerCallBytes &&
+               !AI::parseToolArgumentJson(
+                   denseArguments, parsed, error) &&
+               error.find("node limit") != std::string::npos,
+           "provider tool arguments must use the Agent execution budget");
+
+    const AI::ProviderError terminalError =
+        InspectOpenAICompatibleStreamEvent(denseEvent, "OpenAI").error;
+    expectInvalid(terminalError, "node limit");
+}
+
 void testClaudeCompleteStream() {
     StreamTerminalTracker tracker;
     tracker.observe(InspectClaudeStreamEvent(R"({"type":"message_start"})"));
@@ -273,6 +336,7 @@ int main() {
         {"provider accumulation limits", testProviderAccumulationLimits},
         {"provider message validation limits",
          testProviderMessageValidationLimits},
+        {"provider JSON complexity limits", testProviderJsonComplexityLimits},
         {"Claude complete stream", testClaudeCompleteStream},
         {"Claude missing terminal", testClaudeMissingTerminal},
         {"Claude malformed event", testClaudeMalformedEventWins},

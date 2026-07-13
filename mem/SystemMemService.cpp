@@ -6,6 +6,7 @@
 #include "../socket/client_singleton.h"
 #include "../socket/SocketCommand.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -25,9 +26,10 @@ const char* architectureName(int type) {
     }
 }
 
-bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
+bool fetchSystemModules(std::vector<ModuleInfo>& modules,
+                        PortType port = PORT_MAIN) {
     std::vector<ModuleInfoItem> items;
-    if (!FetchModuleList(items, PORT_MAIN)) {
+    if (!FetchModuleList(items, port)) {
         return false;
     }
 
@@ -49,8 +51,12 @@ bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
 
 class SystemReadTransaction final : public IMemReadTransaction {
 public:
-    explicit SystemReadTransaction(const OperationContext& context)
-        : lease_(PORT_MAIN) {
+    SystemReadTransaction(const OperationContext& context,
+                          MemoryReadChannel channel)
+        : port_(channel == MemoryReadChannel::Background
+                    ? PORT_DEBUG
+                    : PORT_MAIN),
+          lease_(port_) {
         valid_ = static_cast<bool>(lease_) && context.target &&
                  lease_.generation() == context.connectionGeneration &&
                  AppContext::Get().matchesStableTarget(
@@ -62,17 +68,50 @@ public:
     }
 
     bool fetchModules(std::vector<ModuleInfo>& modules) override {
-        return valid() && fetchSystemModules(modules);
+        return valid() && fetchSystemModules(modules, port_);
     }
 
     bool readMemory(uint64_t address,
                     uint32_t size,
                     std::vector<unsigned char>& bytes) override {
         return valid() &&
-               ReadProcessMemoryBytes(address, size, bytes, PORT_MAIN);
+               ReadProcessMemoryBytes(address, size, bytes, port_);
+    }
+
+    bool readMemoryBatch(
+        const std::vector<MemoryReadRequest>& requests,
+        std::vector<MemoryBlock>& blocks) override {
+        if (!valid()) {
+            return false;
+        }
+        std::vector<std::pair<uint64_t, int32_t>> rawRequests;
+        rawRequests.reserve(requests.size());
+        for (const auto& request : requests) {
+            if (request.size == 0 ||
+                request.size > static_cast<uint32_t>(
+                    (std::numeric_limits<int32_t>::max)())) {
+                return false;
+            }
+            rawRequests.emplace_back(
+                request.address, static_cast<int32_t>(request.size));
+        }
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> rawBlocks;
+        if (!ReadBratchAddr(rawRequests, rawBlocks, port_)) {
+            return false;
+        }
+        blocks.clear();
+        blocks.reserve(rawBlocks.size());
+        for (auto& raw : rawBlocks) {
+            MemoryBlock block;
+            block.address = raw.first;
+            block.bytes.assign(raw.second.begin(), raw.second.end());
+            blocks.push_back(std::move(block));
+        }
+        return true;
     }
 
 private:
+    PortType port_;
     SocketCommand::TransactionLease lease_;
     bool valid_ = false;
 };
@@ -147,6 +186,15 @@ ScanExecutionBackendResult toBackendScanResult(
 BreakpointMutationBackendResult toBreakpointBackendResult(
     const BreakpointMutationIoResult& io) {
     BreakpointMutationBackendResult result;
+    result.requestStarted = io.requestStarted;
+    result.responseReceived = io.responseReceived;
+    result.applied = io.applied;
+    return result;
+}
+
+FreezeMutationBackendResult toFreezeBackendResult(
+    const FreezeMutationIoResult& io) {
+    FreezeMutationBackendResult result;
     result.requestStarted = io.requestStarted;
     result.responseReceived = io.responseReceived;
     result.applied = io.applied;
@@ -387,6 +435,18 @@ public:
         return AppContext::Get().getSelectedName();
     }
 
+    bool connect(const std::string& host, uint16_t port) override {
+        return GetSocketMgr().ConnectMultiPort(host, port);
+    }
+
+    bool disconnect() override {
+        const bool wasConnected =
+            DeviceSession::GetInstance().GetState() !=
+            DeviceSession::State::Disconnected;
+        GetSocketMgr().DisconnectMultiPort();
+        return wasConnected;
+    }
+
     bool fetchServerVersion(int& version,
                             std::string& versionString) override {
         ServerVersionInfo info;
@@ -425,7 +485,13 @@ public:
         return result;
     }
 
-    bool fetchProcesses(std::vector<ProcessInfo>& processes) override {
+    bool fetchProcesses(const OperationContext& context,
+                        std::vector<ProcessInfo>& processes) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction ||
+            transaction.generation() != context.connectionGeneration) {
+            return false;
+        }
         std::vector<ProcessInfoItem> items;
         if (!FetchProcessList(items, PORT_MAIN)) {
             return false;
@@ -439,19 +505,86 @@ public:
         return true;
     }
 
-    bool openProcess(int pid, const std::string& name) override {
-        AppContext::Get().selectProcess(pid, name);
-        const TargetSnapshot target = targetSnapshot();
-        return target.isAttached() && target.pid == pid;
+    bool openProcess(const OperationContext& context,
+                     int pid,
+                     const std::string& name) override {
+        auto requestLease = GetSocketMgr().AcquireRequestLease();
+        if (!requestLease || !requestLease.isCurrent() ||
+            requestLease.generation() != context.connectionGeneration) {
+            return false;
+        }
+
+        auto mutation = AppContext::Get().beginTargetMutation(
+            context.target, requestLease.generation());
+        if (!mutation) {
+            return false;
+        }
+
+        const TargetSnapshot previous = mutation->previousTarget();
+        if (previous.isAttached()) {
+            {
+                SocketCommand::TransactionLease debugTransaction(PORT_DEBUG);
+                if (!debugTransaction ||
+                    debugTransaction.generation() != requestLease.generation()) {
+                    mutation->clear();
+                    return false;
+                }
+                (void)StopSearchScan(PORT_DEBUG);
+            }
+
+            SocketCommand::TransactionLease mainTransaction(PORT_MAIN);
+            if (!mainTransaction ||
+                mainTransaction.generation() != requestLease.generation()) {
+                mutation->clear();
+                return false;
+            }
+            (void)ClearTrackedKernelBreakpoints(PORT_MAIN);
+            (void)FreezeClear(PORT_MAIN);
+            (void)ClearScanResult(PORT_MAIN);
+            (void)CloseProcessHandle(previous.processHandle, PORT_MAIN);
+
+            if (!requestLease.isCurrent()) {
+                mutation->clear();
+                return false;
+            }
+
+            int handle = 0;
+            if (!OpenProcessHandle(pid, handle, PORT_MAIN) || handle == 0 ||
+                !requestLease.isCurrent()) {
+                mutation->clear();
+                return false;
+            }
+            mutation->publish(pid, handle, name);
+            return true;
+        }
+
+        SocketCommand::TransactionLease mainTransaction(PORT_MAIN);
+        if (!mainTransaction ||
+            mainTransaction.generation() != requestLease.generation()) {
+            return false;
+        }
+        int handle = 0;
+        if (!OpenProcessHandle(pid, handle, PORT_MAIN) || handle == 0 ||
+            !requestLease.isCurrent()) {
+            mutation->clear();
+            return false;
+        }
+        mutation->publish(pid, handle, name);
+        return true;
     }
 
-    bool fetchModules(std::vector<ModuleInfo>& modules) override {
-        return fetchSystemModules(modules);
+    bool fetchModules(const OperationContext& context,
+                      std::vector<ModuleInfo>& modules) override {
+        SystemReadTransaction transaction(
+            context, MemoryReadChannel::Foreground);
+        return transaction.valid() && transaction.fetchModules(modules);
     }
 
     std::unique_ptr<IMemReadTransaction> beginReadTransaction(
-        const OperationContext& context) override {
-        auto transaction = std::make_unique<SystemReadTransaction>(context);
+        const OperationContext& context,
+        MemoryReadChannel channel) override {
+        auto transaction =
+            std::make_unique<SystemReadTransaction>(context, channel);
         if (!transaction->valid()) {
             return nullptr;
         }
@@ -485,36 +618,73 @@ public:
     }
 
     BreakpointMutationBackendResult setBreakpoint(
+        const OperationContext& context,
         uint64_t address,
         BreakpointAccess access,
         uint32_t size) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return {};
+        }
         return toBreakpointBackendResult(SetKernelBreakpointTracked(
             address, static_cast<uint32_t>(access), size, PORT_MAIN));
     }
 
     BreakpointMutationBackendResult removeBreakpoint(
-        uint64_t address) override {
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return {};
+        }
         return toBreakpointBackendResult(
             RemoveKernelBreakpointTracked(address, PORT_MAIN));
     }
 
     BreakpointMutationBackendResult suspendBreakpoint(
-        uint64_t address) override {
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return {};
+        }
         return toBreakpointBackendResult(
             SuspendKernelBreakpointTracked(address, PORT_MAIN));
     }
 
     BreakpointMutationBackendResult resumeBreakpoint(
-        uint64_t address) override {
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return {};
+        }
         return toBreakpointBackendResult(
             ResumeKernelBreakpointTracked(address, PORT_MAIN));
     }
 
     bool fetchBreakpointHitBatch(
+        const OperationContext& context,
         uint64_t address,
         size_t limit,
         std::vector<BreakpointHit>& hits,
         size_t& total) override {
+        SocketCommand::TransactionLease transaction(PORT_DEBUG);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return false;
+        }
         std::vector<HW_HIT_INFO> raw;
         if (!ReadKernelBreakpointInfoTail(
                 address, limit, raw, total, PORT_DEBUG)) {
@@ -528,15 +698,27 @@ public:
         return true;
     }
 
-    bool readMemory(uint64_t address,
+    bool readMemory(const OperationContext& context,
+                    MemoryReadChannel channel,
+                    uint64_t address,
                     uint32_t size,
                     std::vector<unsigned char>& bytes) override {
-        return ReadProcessMemoryBytes(address, size, bytes, PORT_MAIN);
+        SystemReadTransaction transaction(context, channel);
+        return transaction.valid() &&
+               transaction.readMemory(address, size, bytes);
     }
 
     MemoryWriteBackendResult writeMemory(
+        const OperationContext& context,
         uint64_t address,
         const std::vector<unsigned char>& bytes) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction || !context.target ||
+            transaction.generation() != context.connectionGeneration ||
+            !AppContext::Get().matchesStableTarget(
+                *context.target, transaction.generation())) {
+            return {};
+        }
         const MemoryWriteIoResult io = WriteProcessMemoryBytesTracked(
             address,
             static_cast<uint32_t>(bytes.size()),
@@ -547,6 +729,63 @@ public:
         result.responseReceived = io.responseReceived;
         result.writtenBytes = io.writtenBytes;
         return result;
+    }
+
+    FreezeMutationBackendResult freezeAdd(
+        const OperationContext& context,
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!validTargetTransaction(context, transaction)) {
+            return {};
+        }
+        uint8_t data[8]{};
+        std::copy(bytes.begin(), bytes.end(), data);
+        return toFreezeBackendResult(FreezeAddTracked(
+            address, static_cast<uint8_t>(bytes.size()), data, PORT_MAIN));
+    }
+
+    FreezeMutationBackendResult freezeUpdate(
+        const OperationContext& context,
+        uint64_t address,
+        const std::vector<unsigned char>& bytes) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!validTargetTransaction(context, transaction)) {
+            return {};
+        }
+        uint8_t data[8]{};
+        std::copy(bytes.begin(), bytes.end(), data);
+        return toFreezeBackendResult(
+            FreezeUpdateTracked(address, data, PORT_MAIN));
+    }
+
+    FreezeMutationBackendResult freezeRemove(
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!validTargetTransaction(context, transaction)) {
+            return {};
+        }
+        return toFreezeBackendResult(
+            FreezeRemoveTracked(address, PORT_MAIN));
+    }
+
+    FreezeMutationBackendResult freezeClear(
+        const OperationContext& context) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!validTargetTransaction(context, transaction)) {
+            return {};
+        }
+        return toFreezeBackendResult(FreezeClearTracked(PORT_MAIN));
+    }
+
+private:
+    static bool validTargetTransaction(
+        const OperationContext& context,
+        const SocketCommand::TransactionLease& transaction) {
+        return transaction && context.target &&
+               transaction.generation() == context.connectionGeneration &&
+               AppContext::Get().matchesStableTarget(
+                   *context.target, transaction.generation());
     }
 };
 

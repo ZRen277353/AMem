@@ -1,101 +1,81 @@
 #include "AppContext.h"
-#include "Gui.h"
 #include "../mem/IMemService.h"
-#include "../socket/client_singleton.h"
 #include "../imgui/imgui.h"
 #include <algorithm>
 
-namespace {
+AppContext::TargetMutation::TargetMutation(
+    AppContext& owner,
+    std::unique_lock<std::mutex> stateLock,
+    Mem::TargetSnapshot previousTarget)
+    : owner_(&owner),
+      stateLock_(std::move(stateLock)),
+      previousTarget_(previousTarget) {}
 
-class ProcessRevisionGuard {
-public:
-    explicit ProcessRevisionGuard(std::atomic<uint64_t>& revision)
-        : revision_(revision) {
-        revision_.fetch_add(1, std::memory_order_acq_rel);
-    }
+AppContext::TargetMutation::TargetMutation(TargetMutation&& other) noexcept
+    : owner_(other.owner_),
+      stateLock_(std::move(other.stateLock_)),
+      previousTarget_(other.previousTarget_) {
+    other.owner_ = nullptr;
+}
 
-    ~ProcessRevisionGuard() {
-        revision_.fetch_add(1, std::memory_order_release);
-    }
+AppContext::TargetMutation::~TargetMutation() {
+    finish();
+}
 
-private:
-    std::atomic<uint64_t>& revision_;
-};
-
-} // namespace
-
-void AppContext::cleanupCurrentProcessServices() {
-    if (!hasProcess()) {
+void AppContext::TargetMutation::publish(
+    int pid, int handle, const std::string& name) {
+    if (!owner_) {
         return;
     }
-
-    const int handle = processHandle.load(std::memory_order_relaxed);
-    StopSearchScan(PORT_DEBUG);
-    ClearTrackedKernelBreakpoints(PORT_MAIN);
-    FreezeClear(PORT_MAIN);
-    ClearScanResult(PORT_MAIN);
-    CloseProcessHandle(handle, PORT_MAIN);
+    owner_->selectedPid.store(pid, std::memory_order_relaxed);
+    owner_->processHandle.store(handle, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(owner_->nameMutex_);
+        owner_->selectedName_ = name;
+    }
+    owner_->moduleCache.invalidate();
 }
 
-void AppContext::selectProcess(int pid, const std::string& name) {
-    // Keep the connection generation stable across cleanup, open, and local
-    // state publication. Nested socket commands reuse this thread's lease.
-    auto connectionLease = GetSocketMgr().AcquireRequestLease();
-    std::lock_guard<std::mutex> stateLock(processStateMutex_);
-    ProcessRevisionGuard revisionGuard(processRevision);
-
-    if (connectionLease) {
-        cleanupCurrentProcessServices();
-    }
-    selectedPid.store(0, std::memory_order_relaxed);
-    processHandle.store(0, std::memory_order_relaxed);
-    int handle = 0;
-    if (connectionLease.isCurrent() && OpenProcessHandle(pid, handle)) {
-        SetCurrentPid(pid);
-        processHandle.store(handle, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lock(nameMutex_);
-            selectedName_ = name;
-        }
-        Gui::log("进程已打开，句柄=%d", handle);
-    } else {
-        SetCurrentPid(0);
-        processHandle.store(0, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lock(nameMutex_);
-            selectedName_.clear();
-        }
-        Gui::log("无法打开进程句柄 %d", pid);
-    }
-
-    moduleCache.invalidate();
+void AppContext::TargetMutation::clear() {
+    publish(0, 0, {});
 }
 
-void AppContext::clearProcess() {
-    auto connectionLease = GetSocketMgr().AcquireRequestLease();
-    clearProcessInternal(static_cast<bool>(connectionLease));
+void AppContext::TargetMutation::finish() {
+    if (!owner_) {
+        return;
+    }
+    owner_->processRevision.fetch_add(1, std::memory_order_release);
+    owner_ = nullptr;
+}
+
+std::optional<AppContext::TargetMutation> AppContext::beginTargetMutation(
+    const std::optional<Mem::TargetSnapshot>& expected,
+    uint64_t connectionGeneration) {
+    std::unique_lock<std::mutex> stateLock(processStateMutex_);
+    const uint64_t revision =
+        processRevision.load(std::memory_order_acquire);
+    if ((revision & 1u) != 0u) {
+        return std::nullopt;
+    }
+
+    Mem::TargetSnapshot current;
+    current.pid = selectedPid.load(std::memory_order_relaxed);
+    current.processHandle = processHandle.load(std::memory_order_relaxed);
+    current.processRevision = revision;
+    current.connectionGeneration = connectionGeneration;
+    if (expected && current != *expected) {
+        return std::nullopt;
+    }
+
+    processRevision.fetch_add(1, std::memory_order_acq_rel);
+    return TargetMutation(*this, std::move(stateLock), current);
 }
 
 void AppContext::clearProcessForDisconnect() {
-    clearProcessInternal(false);
-}
-
-void AppContext::clearProcessInternal(bool cleanupRemote) {
-    std::lock_guard<std::mutex> stateLock(processStateMutex_);
-    ProcessRevisionGuard revisionGuard(processRevision);
-
-    if (cleanupRemote) {
-        cleanupCurrentProcessServices();
-    } else {
-        ResetTrackedKernelBreakpoints();
+    auto mutation = beginTargetMutation(std::nullopt, 0);
+    if (mutation) {
+        mutation->clear();
     }
-    selectedPid.store(0, std::memory_order_relaxed);
-    processHandle.store(0, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lock(nameMutex_);
-        selectedName_.clear();
-    }
-    moduleCache.invalidate();
 }
 
 Mem::TargetSnapshot AppContext::snapshotTarget(
@@ -132,25 +112,50 @@ bool AppContext::matchesStableTarget(
            handle == expected.processHandle;
 }
 
-void AppContext::ModuleCache::refresh() {
-    std::lock_guard<std::mutex> lock(mutex);
+void AppContext::ModuleCache::refresh(Mem::IMemService& service) {
+    const double now = ImGui::GetTime();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (valid && (now - lastRefreshTime) < MIN_REFRESH_INTERVAL) {
+            return;
+        }
+    }
 
-    // 节流：如果缓存有效且距上次刷新不足 MIN_REFRESH_INTERVAL 秒，跳过
-    double now = ImGui::GetTime();
-    if (valid && (now - lastRefreshTime) < MIN_REFRESH_INTERVAL) {
+    const Mem::OperationContext context = service.captureContext(true);
+    if (!context.target || !context.target->isAttached()) {
         return;
     }
 
-    std::vector<ModuleInfoItem> newList;
-    if (FetchModuleList(newList)) {
-        modules = std::move(newList);
-        symbolCacheByModuleBase.clear();
-        valid = true;
-        lastRefreshTime = now;
+    std::vector<Mem::ModuleInfo> newList;
+    size_t offset = 0;
+    while (true) {
+        Mem::ModuleListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxModulePageSize;
+        auto response = service.listModules(context, request);
+        if (!response.ok() || response.value().target != *context.target) {
+            return;
+        }
+        const auto& page = response.value();
+        newList.insert(newList.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            break;
+        }
+        offset = *page.nextOffset;
     }
+
+    const Mem::OperationContext current = service.captureContext(true);
+    if (!current.target || *current.target != *context.target) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    modules = std::move(newList);
+    symbolCacheByModuleBase.clear();
+    valid = true;
+    lastRefreshTime = now;
 }
 
-ModuleInfoItem AppContext::ModuleCache::findByAddress(uint64_t addr) {
+Mem::ModuleInfo AppContext::ModuleCache::findByAddress(uint64_t addr) {
     std::lock_guard<std::mutex> lock(mutex);
     for (const auto& m : modules) {
         if (m.size <= 0) {
@@ -164,11 +169,11 @@ ModuleInfoItem AppContext::ModuleCache::findByAddress(uint64_t addr) {
             return m;  // 返回拷贝
         }
     }
-    return ModuleInfoItem{};  // 空对象，name 为空表示未找到
+    return Mem::ModuleInfo{};  // 空对象，name 为空表示未找到
 }
 
 std::string AppContext::ModuleCache::formatWithModule(uint64_t addr) {
-    ModuleInfoItem mod = findByAddress(addr);
+    Mem::ModuleInfo mod = findByAddress(addr);
     if (!mod.name.empty()) {
         char buf[256];
         uint64_t offset = addr - mod.base;
@@ -181,7 +186,7 @@ std::string AppContext::ModuleCache::formatWithModule(uint64_t addr) {
 }
 
 bool AppContext::ModuleCache::ensureSymbolListCached(
-    const ModuleInfoItem& module,
+    const Mem::ModuleInfo& module,
     Mem::IMemService& service,
     std::vector<SymbolInfoItem>& outSymbols) {
     {
@@ -224,7 +229,7 @@ bool AppContext::ModuleCache::ensureSymbolListCached(
         }
         const auto currentModule = std::find_if(
             modules.begin(), modules.end(),
-            [&](const ModuleInfoItem& item) {
+            [&](const Mem::ModuleInfo& item) {
                 return item.base == module.base && item.name == module.name;
             });
         if (currentModule == modules.end()) {
@@ -247,7 +252,7 @@ bool AppContext::ModuleCache::tryFindContainingSymbol(
     outSymbol = SymbolInfoItem{};
     outOffset = 0;
 
-    ModuleInfoItem mod = findByAddress(addr);
+    Mem::ModuleInfo mod = findByAddress(addr);
     if (mod.name.empty() || mod.base == 0) {
         return false;
     }

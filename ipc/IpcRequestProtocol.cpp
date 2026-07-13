@@ -1,4 +1,5 @@
 #include "IpcRequestProtocol.h"
+#include "IpcJsonLimits.h"
 
 #include <nlohmann/json.hpp>
 
@@ -88,9 +89,13 @@ RequestPayloadParseResult ParseRequestPayload(
         return result;
     }
 
-    const json request = json::parse(payload, nullptr, false);
-    if (request.is_discarded() || !request.is_object()) {
-        result.error = "request payload must be a JSON object";
+    json request;
+    if (!utils::parseBoundedJson(
+            payload, kRequestJsonLimits, request, result.error) ||
+        !request.is_object()) {
+        if (result.error.empty()) {
+            result.error = "request payload must be a JSON object";
+        }
         return result;
     }
     constexpr std::array<const char*, 3> allowedFields = {
@@ -149,8 +154,12 @@ RequestPayloadParseResult ParseRequestPayload(
 bool ValidateCancelPayload(const std::string& payload,
                            std::string& error) {
     error.clear();
-    const json cancel = json::parse(payload, nullptr, false);
-    if (cancel.is_discarded() || !cancel.is_object() || !cancel.empty()) {
+    json cancel;
+    if (!utils::parseBoundedJson(
+            payload, kRequestJsonLimits, cancel, error)) {
+        return false;
+    }
+    if (!cancel.is_object() || !cancel.empty()) {
         error = "cancel payload must be an empty JSON object";
         return false;
     }
@@ -203,9 +212,9 @@ bool BuildResponsePayload(const IpcDispatchResult& result,
             error = "result JSON exceeds the response limit";
             return false;
         }
-        json value = json::parse(result.resultJson, nullptr, false);
-        if (value.is_discarded()) {
-            error = "resultJson must contain one valid JSON value";
+        json value;
+        if (!utils::parseBoundedJson(
+                result.resultJson, kResponseJsonLimits, value, error)) {
             return false;
         }
         response["result"] = std::move(value);

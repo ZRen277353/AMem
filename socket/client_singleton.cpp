@@ -12,7 +12,11 @@ WinSocketClientMgr::WinSocketClientMgr()
                    GetSystemWindowsSocketOps(),
                    GetSystemWindowsSocketOps(),
                    GetSystemWindowsSocketOps(),
-                   [] { AppContext::Get().clearProcessForDisconnect(); }) {}
+                   [] {
+                     ResetTrackedKernelBreakpoints();
+                     AppContext::Get().clearProcessForDisconnect();
+                   },
+                   &AmemServerHandshake::Validate) {}
 
 WinSocketClientMgr::~WinSocketClientMgr() = default;
 
@@ -64,6 +68,11 @@ bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port
     std::cerr << "[MultiPort] Failed to connect ERROR port" << std::endl;
     return false;
   }
+  if (failure == MultiPortConnectFailure::Compatibility) {
+    std::cerr << "[MultiPort] Server compatibility handshake failed"
+              << std::endl;
+    return false;
+  }
 
   std::cout << "[MultiPort] All ports connected successfully!" << std::endl;
   return true;
@@ -80,14 +89,6 @@ bool WinSocketClientMgr::IsMultiPortConnected() const {
 
 // ==================== 进程管理 ====================
 
-void SetCurrentPid(int pid) {
-  AppContext::Get().selectedPid.store(pid, std::memory_order_relaxed);
-}
-
-int GetCurrentPid() {
-  return AppContext::Get().selectedPid.load(std::memory_order_relaxed);
-}
-
 bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
   outHandle = 0;
   return SocketCommand::executeNoHandle(
@@ -103,11 +104,9 @@ bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
         if (!client->Receive(&handle, sizeof(handle)))
           return false;
         if (handle == 0) {
-          AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
           return false;
         }
         outHandle = handle;
-        AppContext::Get().processHandle.store(handle, std::memory_order_relaxed);
         return true;
       });
 }

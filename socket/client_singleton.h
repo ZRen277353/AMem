@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "MultiPortClientManager.h"
+#include "ServerHandshake.h"
 
 
 // 端口类型枚举（与服务端保持一致）
@@ -126,11 +127,6 @@ inline bool IsConnectionPoisoned() {
   return GetSocketMgr().IsConnectionPoisoned();
 }
 
-struct ServerVersionInfo {
-  int version = 0;
-  std::string versionString;
-};
-
 struct ProcessInfoItem {
   int pid = 0;
   std::string name;
@@ -173,8 +169,6 @@ bool FetchProcessList(std::vector<ProcessInfoItem> &outList,
                       PortType type = PORT_MAIN);
 
 // Process / Module helpers
-void SetCurrentPid(int pid);
-int GetCurrentPid();
 bool OpenProcessHandle(int pid, int &outHandle, PortType type = PORT_MAIN);
 bool EnsureOpenHandle(int &outHandle, PortType type = PORT_MAIN);
 bool CloseProcessHandle(int handle, PortType type = PORT_MAIN);
@@ -331,6 +325,20 @@ void ResetTrackedKernelBreakpoints();
 bool StopSearchScan(PortType type = PORT_DEBUG);
 
 // 冻结功能
+struct FreezeMutationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool applied = false;
+};
+
+FreezeMutationIoResult FreezeAddTracked(
+    uint64_t address, uint8_t dataSize, const uint8_t data[8],
+    PortType type = PORT_MAIN);
+FreezeMutationIoResult FreezeRemoveTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+FreezeMutationIoResult FreezeClearTracked(PortType type = PORT_MAIN);
+FreezeMutationIoResult FreezeUpdateTracked(
+    uint64_t address, const uint8_t data[8], PortType type = PORT_MAIN);
 bool FreezeAdd(uint64_t address, uint8_t dataSize, const uint8_t data[8],
                PortType type = PORT_MAIN);
 bool FreezeRemove(uint64_t address, PortType type = PORT_MAIN);

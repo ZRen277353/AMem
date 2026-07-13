@@ -11,6 +11,7 @@ inline thread_local DWORD g_threadTimeoutMs = 0;
 inline thread_local std::chrono::steady_clock::time_point g_threadDeadline;
 
 inline constexpr DWORD kMaxTimeoutMs = 300000;
+inline constexpr DWORD kDefaultIoTimeoutMs = 5000;
 
 // 单次 socket I/O 的最小超时下限。
 //
@@ -127,13 +128,16 @@ class SocketOptionTimeoutGuard {
 public:
     SocketOptionTimeoutGuard(SOCKET sock, int option)
         : sock_(sock), option_(option) {
-        if (!HasThreadTimeout() || sock_ == INVALID_SOCKET) {
+        if (sock_ == INVALID_SOCKET) {
             return;
         }
 
-        // 用剩余预算，但不低于单次 I/O 下限：命令一旦发出就要给足时间读回
-        // 响应，避免在途响应被预算耗尽掐断（见 kMinIoTimeoutMs 注释）。
-        const DWORD remainingMs = GetRemainingTimeoutMs();
+        // GUI and other synchronous callers may not install ScopedTimeout.
+        // They still need a finite transport boundary so a silent or
+        // incompatible server cannot block the main thread indefinitely.
+        const DWORD remainingMs = HasThreadTimeout()
+                                      ? GetRemainingTimeoutMs()
+                                      : kDefaultIoTimeoutMs;
         const DWORD timeoutMs =
             remainingMs < kMinIoTimeoutMs ? kMinIoTimeoutMs : remainingMs;
         int optLen = sizeof(previous_);

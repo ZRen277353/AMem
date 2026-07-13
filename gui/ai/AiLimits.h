@@ -21,7 +21,26 @@ inline constexpr size_t kMaxToolArgumentsPerCallBytes = 512u * kKiB;
 inline constexpr size_t kMaxToolArgumentsPerMessageBytes = 4u * kMiB;
 inline constexpr size_t kMaxToolResultBytes = 4u * kMiB;
 
+inline constexpr size_t kMaxToolJsonDepth = 32u;
+inline constexpr size_t kMaxToolArgumentJsonNodes = 8192u;
+inline constexpr size_t kMaxToolResultJsonNodes = 65536u;
+inline constexpr size_t kMaxToolSchemaJsonNodes = 8192u;
+inline constexpr size_t kMaxToolJsonContainerItems = 4096u;
+
+inline constexpr size_t kMaxProviderJsonDepth = 64u;
+inline constexpr size_t kMaxProviderJsonNodes = 100000u;
+inline constexpr size_t kMaxProviderEventJsonNodes = 20000u;
+inline constexpr size_t kMaxProviderJsonContainerItems = 20000u;
+
 inline constexpr size_t kMaxPersistenceFileBytes = 32u * kMiB;
+inline constexpr size_t kMaxPersistenceJsonDepth = 64u;
+inline constexpr size_t kMaxPersistenceJsonNodes = 250000u;
+inline constexpr size_t kMaxPersistenceContainerItems = 20000u;
+inline constexpr size_t kMaxPersistenceStringBytes = 8u * kMiB;
+inline constexpr size_t kMaxPersistenceTotalStringBytes = 24u * kMiB;
+// DPAPI adds a small opaque header to the protected plaintext. Keep a hard
+// outer-file bound while preserving the existing 32 MiB decrypted JSON limit.
+inline constexpr size_t kMaxProtectedPersistenceFileBytes = 33u * kMiB;
 inline constexpr size_t kMaxSessionPayloadBytes = 16u * kMiB;
 inline constexpr size_t kMaxSessionMessagesOnDisk = 10000u;
 

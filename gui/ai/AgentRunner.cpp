@@ -3,6 +3,7 @@
 #include "AgentRunner.h"
 
 #include "AiLimits.h"
+#include "ProviderResponseLimits.h"
 #include "ToolCallSecurity.h"
 
 #include "../../third_party/nlohmann/json.hpp"
@@ -310,28 +311,35 @@ ChatMessage AgentRunner::makeToolMessage(const ToolCall& tc,
     audit["duration_ms"] = durationMs;
     audit["completion"] = toolCompletionStateName(result.completion);
     const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
-    try {
-        audit["arguments"] = auditArguments.empty()
-                                 ? nlohmann::json::object()
-                                 : nlohmann::json::parse(auditArguments);
-    } catch (const nlohmann::json::exception&) {
+    nlohmann::json parsedArguments;
+    std::string parseError;
+    if (auditArguments.empty()) {
+        audit["arguments"] = nlohmann::json::object();
+    } else if (parseToolArgumentJson(
+                   auditArguments, parsedArguments, parseError)) {
+        audit["arguments"] = std::move(parsedArguments);
+    } else {
         audit["arguments_raw"] = auditArguments;
     }
 
     if (result.success) {
-        try {
-            audit["result"] = result.resultJson.empty()
-                                  ? nlohmann::json::object()
-                                  : nlohmann::json::parse(result.resultJson);
-        } catch (const nlohmann::json::exception&) {
+        nlohmann::json parsedResult;
+        if (result.resultJson.empty()) {
+            audit["result"] = nlohmann::json::object();
+        } else if (parseToolResultJson(
+                       result.resultJson, parsedResult, parseError)) {
+            audit["result"] = std::move(parsedResult);
+        } else {
             audit["result_raw"] = result.resultJson;
         }
     } else {
         audit["error"] = result.errorMessage;
         if (!result.resultJson.empty()) {
-            try {
-                audit["details"] = nlohmann::json::parse(result.resultJson);
-            } catch (const nlohmann::json::exception&) {
+            nlohmann::json parsedDetails;
+            if (parseToolResultJson(
+                    result.resultJson, parsedDetails, parseError)) {
+                audit["details"] = std::move(parsedDetails);
+            } else {
                 audit["details_raw"] = result.resultJson;
             }
         }
@@ -369,11 +377,14 @@ ChatMessage AgentRunner::makeDeniedToolMessage(const ToolCall& tc) {
     audit["success"] = false;
     audit["error"] = "tool execution denied by user";
     const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
-    try {
-        audit["arguments"] = auditArguments.empty()
-                                 ? nlohmann::json::object()
-                                 : nlohmann::json::parse(auditArguments);
-    } catch (const nlohmann::json::exception&) {
+    nlohmann::json parsedArguments;
+    std::string parseError;
+    if (auditArguments.empty()) {
+        audit["arguments"] = nlohmann::json::object();
+    } else if (parseToolArgumentJson(
+                   auditArguments, parsedArguments, parseError)) {
+        audit["arguments"] = std::move(parsedArguments);
+    } else {
         audit["arguments_raw"] = auditArguments;
     }
 
@@ -394,11 +405,14 @@ ChatMessage AgentRunner::makeSkippedToolMessage(const ToolCall& tc,
     audit["skipped"] = true;
     audit["error"] = reason;
     const std::string& auditArguments = toolCallArgumentsForDisplay(tc);
-    try {
-        audit["arguments"] = auditArguments.empty()
-                                 ? nlohmann::json::object()
-                                 : nlohmann::json::parse(auditArguments);
-    } catch (const nlohmann::json::exception&) {
+    nlohmann::json parsedArguments;
+    std::string parseError;
+    if (auditArguments.empty()) {
+        audit["arguments"] = nlohmann::json::object();
+    } else if (parseToolArgumentJson(
+                   auditArguments, parsedArguments, parseError)) {
+        audit["arguments"] = std::move(parsedArguments);
+    } else {
         audit["arguments_raw"] = auditArguments;
     }
 

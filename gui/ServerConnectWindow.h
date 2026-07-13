@@ -5,9 +5,13 @@
 #include <string>
 #include <functional>
 
+namespace Mem {
+class IMemService;
+}
+
 class ServerConnectWindow : public Window {
 public:
-	ServerConnectWindow();
+	explicit ServerConnectWindow(Mem::IMemService& memService);
 	~ServerConnectWindow() override = default;
 
 	void onDraw() override;
@@ -16,11 +20,11 @@ public:
 	std::function<void()> onConnected; // callback after successful connect
 
 private:
+	Mem::IMemService& memService_;
 	char hostBuf[128];
 	int port;
 	bool autoReconnect;
 	std::string status;
-	bool lastConnected;
 	
 	// 新增成员变量
 	int currentMemType;
@@ -34,8 +38,9 @@ private:
 	void updateStatus(bool ok, const char* action);
 	void updateMemType();
 	void initializeDriver();
+	bool isConnected() const;
 	
 	// 配置相关方法
 	void loadConfig();
 	void saveConfig();
-}; 
+};

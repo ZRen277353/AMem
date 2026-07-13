@@ -144,6 +144,11 @@ void HttpClient::setProxy(const ProxyConfig& proxy) {
     proxy_ = proxy;
 }
 
+void HttpClient::setCaCertificatePath(const std::string& path) {
+    std::lock_guard<std::mutex> lock(configMutex_);
+    caCertificatePath_ = path;
+}
+
 int HttpClient::getConnectionTimeout() const {
     std::lock_guard<std::mutex> lock(configMutex_);
     return connectionTimeout_;
@@ -157,6 +162,11 @@ int HttpClient::getResponseTimeout() const {
 ProxyConfig HttpClient::getProxy() const {
     std::lock_guard<std::mutex> lock(configMutex_);
     return proxy_;
+}
+
+std::string HttpClient::getCaCertificatePath() const {
+    std::lock_guard<std::mutex> lock(configMutex_);
+    return caCertificatePath_;
 }
 
 HttpClient::~HttpClient() {
@@ -272,11 +282,13 @@ uint64_t HttpClient::postAsync(const std::string& url,
     int connTimeout;
     int readTimeout;
     ProxyConfig proxySnap;
+    std::string caCertificatePath;
     {
         std::lock_guard<std::mutex> lock(configMutex_);
         connTimeout = connectionTimeout_;
         readTimeout = responseTimeout_;
         proxySnap = proxy_;
+        caCertificatePath = caCertificatePath_;
     }
 
     auto workerTask = [this,
@@ -289,7 +301,8 @@ uint64_t HttpClient::postAsync(const std::string& url,
                        cancelToken,
                        connTimeout,
                        readTimeout,
-                       proxySnap]() mutable {
+                       proxySnap,
+                       caCertificatePath]() mutable {
         HttpWorkerThreadMarker workerMarker(this);
         auto completionGuard = makeScopeExit(
             [this, requestId] { markRequestCompleted(requestId); });
@@ -345,6 +358,9 @@ uint64_t HttpClient::postAsync(const std::string& url,
 
         // TLS：交由 cpp-httplib/OpenSSL 使用系统证书存储进行校验
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        if (!caCertificatePath.empty()) {
+            client->set_ca_cert_path(caCertificatePath);
+        }
         client->enable_server_certificate_verification(true);
 #endif
 
@@ -353,27 +369,16 @@ uint64_t HttpClient::postAsync(const std::string& url,
         }
 
         httplib::Headers httplibHeaders;
-        bool hasContentType = false;
+        std::string contentType = "application/json";
         for (const auto& kv : headers) {
-            httplibHeaders.emplace(kv.first, kv.second);
             std::string key = kv.first;
             std::transform(key.begin(), key.end(), key.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (key == "content-type") {
-                hasContentType = true;
+                contentType = kv.second;
+                continue;
             }
-        }
-        std::string contentType = "application/json";
-        if (hasContentType) {
-            for (const auto& kv : headers) {
-                std::string key = kv.first;
-                std::transform(key.begin(), key.end(), key.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (key == "content-type") {
-                    contentType = kv.second;
-                    break;
-                }
-            }
+            httplibHeaders.emplace(kv.first, kv.second);
         }
 
         // SSE 解析器，仅在回调存在时用于分发事件
@@ -392,6 +397,8 @@ uint64_t HttpClient::postAsync(const std::string& url,
         req.path = parsed.path;
         req.headers = httplibHeaders;
         req.body = body;
+        // Request::set_header appends to cpp-httplib's header multimap.
+        // Keep Content-Type out of the copied map so exactly one value is sent.
         req.set_header("Content-Type", contentType);
 
         req.content_receiver = [&](const char* data, size_t dataLen,

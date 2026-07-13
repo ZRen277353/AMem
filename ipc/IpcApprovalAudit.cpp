@@ -1,4 +1,5 @@
 #include "IpcApprovalAudit.h"
+#include "../utils/BoundedJson.h"
 
 #include <nlohmann/json.hpp>
 
@@ -19,6 +20,14 @@ constexpr size_t kMaxRecordBytes = 16u * 1024u;
 constexpr int kCurrentSchemaVersion = 2;
 constexpr const char *kApprovalEvent = "approval_transition";
 constexpr const char *kExecutionEvent = "execution_outcome";
+constexpr utils::JsonComplexityLimits kAuditJsonLimits = {
+    kMaxRecordBytes,
+    12u,
+    1024u,
+    128u,
+    kMaxRecordBytes,
+    kMaxRecordBytes,
+};
 
 int64_t nowUnixMilliseconds() {
   using namespace std::chrono;
@@ -357,8 +366,10 @@ void IpcApprovalAuditLog::loadFileLocked(const std::string &filepath) {
 }
 
 void IpcApprovalAuditLog::loadLineLocked(const std::string &line) {
-  try {
-    const json value = json::parse(line);
+  json value;
+  std::string parseError;
+  if (utils::parseBoundedJson(
+          line, kAuditJsonLimits, value, parseError)) {
     const int schemaVersion = value.value("schema_version", 0);
     if (!value.is_object() || (schemaVersion != 1 && schemaVersion != 2)) {
       return;
@@ -377,8 +388,6 @@ void IpcApprovalAuditLog::loadLineLocked(const std::string &line) {
       return;
     }
     rememberLocked(std::move(entry));
-  } catch (const json::exception &) {
-    // Ignore malformed or type-invalid lines; valid prior records survive.
   }
 }
 

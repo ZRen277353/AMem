@@ -50,10 +50,14 @@ public:
     void setConnectionTimeout(int seconds); // default 30
     void setResponseTimeout(int seconds);   // default 300
     void setProxy(const ProxyConfig& proxy);
+    // Explicit CA bundle override for controlled enterprise/test endpoints.
+    // Empty keeps the default Windows root-store behavior.
+    void setCaCertificatePath(const std::string& path);
 
     int getConnectionTimeout() const;
     int getResponseTimeout() const;
     ProxyConfig getProxy() const;
+    std::string getCaCertificatePath() const;
 
     // 异步 POST 请求（支持 SSE 流式响应）
     // 返回请求 ID，可用于 cancelRequest()
@@ -87,6 +91,7 @@ private:
     int connectionTimeout_ = 30;
     int responseTimeout_ = 300;
     ProxyConfig proxy_;
+    std::string caCertificatePath_;
 
     struct ActiveRequest {
         CancellationToken cancelToken;

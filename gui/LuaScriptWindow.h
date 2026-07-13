@@ -5,15 +5,20 @@
 #include <string>
 #include <filesystem>
 
+namespace Mem {
+class IMemService;
+}
+
 class LuaScriptWindow : public Window {
 public:
-    LuaScriptWindow();
+    explicit LuaScriptWindow(Mem::IMemService& memService);
     ~LuaScriptWindow();
 
     void onDraw() override;
     unsigned int getWindowFlags() const override;
 
 private:
+    Mem::IMemService& memService_;
     void drawScriptList();
     void drawScriptOutput();
     void drawScriptContent();

@@ -2,6 +2,8 @@
 
 #include "ChatSession.h"
 #include "AiLimits.h"
+#include "ContextBudget.h"
+#include "ProtectedPersistence.h"
 #include "ProviderResponseLimits.h"
 #include "ToolCallSecurity.h"
 
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -291,46 +294,6 @@ size_t sessionPayloadBytes(const std::vector<ChatMessage>& messages) {
     return total;
 }
 
-bool eraseOldestConversationGroup(std::vector<ChatMessage>& messages) {
-    if (messages.size() <= 1) {
-        return false;
-    }
-
-    // Prefer trimming at user-turn boundaries. A user turn owns every
-    // assistant/tool/system message until the next user message, so removing
-    // the whole group keeps assistant tool_calls adjacent to their tool
-    // results instead of leaving orphan tool messages in the request.
-    std::size_t eraseEnd = messages.size();
-    const bool startsWithUser = messages.front().role == Role::User;
-    for (std::size_t i = 1; i < messages.size(); ++i) {
-        if (messages[i].role == Role::User) {
-            eraseEnd = i;
-            break;
-        }
-    }
-
-    if (startsWithUser && eraseEnd == messages.size()) {
-        // Only the newest user turn remains. Keep it even if it is still
-        // over budget, matching the existing "preserve latest user input"
-        // contract.
-        return false;
-    }
-
-    if (!startsWithUser && eraseEnd == messages.size()) {
-        // Legacy/corrupt histories may have no user boundary. Drop the
-        // oldest standalone message as a best-effort fallback.
-        eraseEnd = 1;
-    }
-
-    if (eraseEnd == 0 || eraseEnd > messages.size()) {
-        return false;
-    }
-
-    messages.erase(messages.begin(),
-                   messages.begin() + static_cast<std::ptrdiff_t>(eraseEnd));
-    return true;
-}
-
 } // namespace
 
 // ---- ChatSession -----------------------------------------------------------
@@ -506,26 +469,25 @@ int ChatSession::estimateTokenCount() const {
 }
 
 int ChatSession::estimateTokenCountUnlocked() const {
-    // AC 8.8: total character count / 4.
-    // We include the system prompt because it is prepended to every request
-    // and therefore consumes context tokens, and include tool_call fields
-    // because they are serialized into the outgoing payload.
-    std::size_t chars = systemPrompt_.size();
+    uint64_t tokens = static_cast<uint64_t>(
+        estimateTextTokensConservative(systemPrompt_));
+    if (!systemPrompt_.empty()) {
+        tokens += 6u;
+    }
     for (const auto& m : messages_) {
         if (m.role == Role::System) {
             continue;
         }
-        chars += m.content.size();
-        chars += m.toolCallId.size();
-        chars += m.name.size();
-        for (const auto& tc : m.toolCalls) {
-            chars += tc.id.size();
-            chars += tc.name.size();
-            chars += tc.arguments.size();
+        const uint64_t messageTokens = static_cast<uint64_t>(
+            estimateMessageTokensConservative(m));
+        const uint64_t maximum = static_cast<uint64_t>(
+            std::numeric_limits<int>::max());
+        if (messageTokens > maximum - std::min(tokens, maximum)) {
+            return std::numeric_limits<int>::max();
         }
+        tokens += messageTokens;
     }
-    const std::size_t tokens = chars / 4;
-    if (tokens > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    if (tokens > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
         return std::numeric_limits<int>::max();
     }
     return static_cast<int>(tokens);
@@ -681,64 +643,13 @@ bool ChatSession::saveUnlocked(const std::string& filepath) const {
     }
     root["messages"] = std::move(arr);
 
-    std::string serialized;
-    try {
-        serialized = root.dump(2);
-    } catch (const std::exception& e) {
-        Gui::log("[ChatSession] failed to serialize '%s': %s",
-                 filepath.c_str(), e.what());
+    std::string error;
+    if (!saveProtectedJsonDocument(
+            filepath, ProtectedPersistenceKind::Session, root, error)) {
+        Gui::log("[ChatSession] failed to protect/save '%s': %s",
+                 filepath.c_str(), error.c_str());
         return false;
     }
-    if (serialized.size() > Limits::kMaxPersistenceFileBytes) {
-        Gui::log("[ChatSession] refused to save '%s': JSON exceeds 32 MiB limit",
-                 filepath.c_str());
-        return false;
-    }
-
-    // Write atomically: serialize to `<filepath>.tmp`, then rename over the
-    // target. This prevents a crash mid-write from leaving a truncated JSON
-    // file that would later be rejected by load().
-    const std::filesystem::path targetPath(filepath);
-    std::filesystem::path tmpPath = targetPath;
-    tmpPath += ".tmp";
-
-    try {
-        std::error_code mkec;
-        if (targetPath.has_parent_path()) {
-            std::filesystem::create_directories(targetPath.parent_path(), mkec);
-            // create_directories failing is non-fatal here; the subsequent
-            // ofstream open will report the real error if the dir is missing.
-        }
-
-        {
-            std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
-            if (!ofs.is_open()) {
-                Gui::log("[ChatSession] failed to open '%s' for writing",
-                         tmpPath.string().c_str());
-                return false;
-            }
-            ofs.write(serialized.data(),
-                      static_cast<std::streamsize>(serialized.size()));
-            if (!ofs.good()) {
-                Gui::log("[ChatSession] write failed for '%s'",
-                         tmpPath.string().c_str());
-                return false;
-            }
-        }
-
-        if (!utils::installTempFile(tmpPath, targetPath)) {
-            Gui::log("[ChatSession] failed to atomically install '%s'",
-                     targetPath.string().c_str());
-            return false;
-        }
-    } catch (const std::exception& e) {
-        Gui::log("[ChatSession] exception while saving '%s': %s",
-                 filepath.c_str(), e.what());
-        std::error_code rmec;
-        std::filesystem::remove(tmpPath, rmec);
-        return false;
-    }
-
     return true;
 }
 
@@ -748,7 +659,8 @@ PersistenceLoadResult ChatSession::load(const std::string& filepath) {
 }
 
 PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
-    JsonDocumentLoadResult document = loadJsonDocument(filepath);
+    ProtectedJsonDocumentLoadResult document = loadProtectedJsonDocument(
+        filepath, ProtectedPersistenceKind::Session);
     if (document.result.status == PersistenceLoadStatus::Missing) {
         messages_.clear();
         sessionFilePath_ = filepath;
@@ -832,10 +744,30 @@ PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
         return {PersistenceLoadStatus::Invalid, e.what()};
     }
 
+    PersistenceLoadResult finalResult = document.result;
+    if (document.legacyPlaintext) {
+        std::string migrationError;
+        if (!saveProtectedJsonDocument(
+                filepath,
+                ProtectedPersistenceKind::Session,
+                document.document,
+                migrationError)) {
+            Gui::log("[ChatSession] could not migrate legacy session '%s': %s",
+                     filepath.c_str(), migrationError.c_str());
+            return {
+                PersistenceLoadStatus::IoError,
+                "legacy session validation succeeded but protection failed: " +
+                    migrationError};
+        }
+        finalResult = {
+            PersistenceLoadStatus::Recovered,
+            "migrated legacy plaintext session to Windows user protection"};
+    }
+
     messages_ = std::move(loadedMessages);
     truncateIfNeededUnlocked();
     sessionFilePath_ = filepath;
-    return {PersistenceLoadStatus::Loaded, {}};
+    return finalResult;
 }
 
 } // namespace AI

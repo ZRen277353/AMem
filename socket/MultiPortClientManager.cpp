@@ -7,12 +7,14 @@ MultiPortClientManager::MultiPortClientManager(
     IWindowsSocketOps& mainOps,
     IWindowsSocketOps& debugOps,
     IWindowsSocketOps& errorOps,
-    ResetStateCallback resetState)
+    ResetStateCallback resetState,
+    ConnectionValidator validateConnection)
     : session_(session),
       mainClient_(mainOps),
       debugClient_(debugOps),
       errorClient_(errorOps),
-      resetState_(std::move(resetState)) {
+      resetState_(std::move(resetState)),
+      validateConnection_(std::move(validateConnection)) {
     auto poison = [this] { session_.MarkPoisoned(); };
     mainClient_.SetPoisonCallback(poison);
     debugClient_.SetPoisonCallback(poison);
@@ -48,6 +50,11 @@ MultiPortConnectFailure MultiPortClientManager::Connect(
         CloseClients();
         session_.FinishConnect(false);
         return MultiPortConnectFailure::Error;
+    }
+    if (validateConnection_ && !validateConnection_(mainClient_)) {
+        CloseClients();
+        session_.FinishConnect(false);
+        return MultiPortConnectFailure::Compatibility;
     }
 
     session_.FinishConnect(true);

@@ -5,7 +5,6 @@
 #include "Gui.h"
 #include "MemoryViewerWindow.h"
 #include "../imgui/imgui.h"
-#include "../mem/SystemMemService.h"
 
 void Window::draw()
 {
@@ -40,9 +39,9 @@ std::string Window::currentProcessName() const {
     return AppContext::Get().getSelectedName();
 }
 
-void Window::navigateToAddress(uint64_t addr) {
+void Window::navigateToAddress(uint64_t addr, Mem::IMemService& memService) {
     // 确保 MemoryViewerWindow 存在（它在构造时订阅事件）
-    Gui::getOrCreate<MemoryViewerWindow>(Mem::getSystemMemService());
+    Gui::getOrCreate<MemoryViewerWindow>(memService);
     EventBus::Get().publish(NavigateToAddressEvent{addr});
 }
 

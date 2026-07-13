@@ -38,10 +38,59 @@ namespace {
 const wchar_t kDpapiDescription[] = L"AMem AI Key";
 
 // Current on-disk format version. Bumped if the schema changes.
-constexpr int kConfigVersion = 1;
+constexpr int kConfigVersion = 3;
+constexpr int kMaxConfiguredContextTokens = 2000000;
 
 constexpr const char kBase64Alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+bool writeConfigsToFile(
+    const std::map<std::string, StoredProviderConfig>& configs,
+    const std::string& filepath) {
+    nlohmann::json root = nlohmann::json::object();
+    root["version"] = kConfigVersion;
+    nlohmann::json providers = nlohmann::json::object();
+    for (const auto& kv : configs) {
+        nlohmann::json entry = nlohmann::json::object();
+        entry["apiKey"] = kv.second.encryptedApiKey;
+        entry["baseUrl"] = kv.second.baseUrl;
+        entry["model"] = kv.second.model;
+        if (!kv.second.apiVersion.empty()) {
+            entry["apiVersion"] = kv.second.apiVersion;
+        }
+        if (!kv.second.trustedBaseUrl.empty()) {
+            entry["trustedBaseUrl"] = kv.second.trustedBaseUrl;
+        }
+        if (kv.second.contextWindowTokens > 0) {
+            entry["contextWindowTokens"] =
+                kv.second.contextWindowTokens;
+        }
+        providers[kv.first] = std::move(entry);
+    }
+    root["providers"] = std::move(providers);
+
+    std::filesystem::path targetPath(filepath);
+    std::filesystem::path tmpPath = targetPath;
+    tmpPath += ".tmp";
+
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            return false;
+        }
+        try {
+            out << root.dump(2);
+        } catch (const nlohmann::json::exception&) {
+            return false;
+        }
+        out.flush();
+        if (!out.good()) {
+            return false;
+        }
+    }
+
+    return utils::installTempFile(tmpPath, targetPath);
+}
 
 int base64CharToValue(unsigned char c) {
     if (c >= 'A' && c <= 'Z') return static_cast<int>(c - 'A');
@@ -193,7 +242,8 @@ std::string ApiKeyStore::decryptWithDPAPI(const std::string& encrypted, bool& ou
 // --------------------------------------------------------------------------
 
 bool ApiKeyStore::storeConfigLocked(const std::string& providerName, const ProviderConfig& config) {
-    if (providerName.empty()) {
+    if (providerName.empty() || config.contextWindowTokens < 0 ||
+        config.contextWindowTokens > kMaxConfiguredContextTokens) {
         return false;
     }
     std::string encrypted = encryptWithDPAPI(config.apiKey);
@@ -207,6 +257,8 @@ bool ApiKeyStore::storeConfigLocked(const std::string& providerName, const Provi
     stored.baseUrl = config.baseUrl;
     stored.model = config.model;
     stored.apiVersion = config.apiVersion;
+    stored.trustedBaseUrl = config.trustedBaseUrl;
+    stored.contextWindowTokens = config.contextWindowTokens;
     configs_[providerName] = std::move(stored);
     return true;
 }
@@ -244,6 +296,8 @@ bool ApiKeyStore::loadConfig(const std::string& providerName, ProviderConfig& ou
     outConfig.baseUrl = it->second.baseUrl;
     outConfig.model = it->second.model;
     outConfig.apiVersion = it->second.apiVersion;
+    outConfig.trustedBaseUrl = it->second.trustedBaseUrl;
+    outConfig.contextWindowTokens = it->second.contextWindowTokens;
     return true;
 }
 
@@ -345,9 +399,24 @@ PersistenceLoadResult ApiKeyStore::loadFromFile(const std::string& filepath) {
                 if (!readString("apiKey", stored.encryptedApiKey) ||
                     !readString("baseUrl", stored.baseUrl) ||
                     !readString("model", stored.model) ||
-                    !readString("apiVersion", stored.apiVersion)) {
+                    !readString("apiVersion", stored.apiVersion) ||
+                    !readString("trustedBaseUrl", stored.trustedBaseUrl)) {
                     return {PersistenceLoadStatus::Invalid,
                             "provider configuration fields must be strings"};
+                }
+                const auto contextWindow =
+                    it.value().find("contextWindowTokens");
+                if (contextWindow != it.value().end()) {
+                    if (!contextWindow->is_number_integer()) {
+                        return {PersistenceLoadStatus::Invalid,
+                                "provider contextWindowTokens must be an integer"};
+                    }
+                    const long long value = contextWindow->get<long long>();
+                    if (value < 0 || value > kMaxConfiguredContextTokens) {
+                        return {PersistenceLoadStatus::Invalid,
+                                "provider contextWindowTokens is out of range"};
+                    }
+                    stored.contextWindowTokens = static_cast<int>(value);
                 }
                 loadedConfigs.emplace(it.key(), std::move(stored));
             }
@@ -362,55 +431,57 @@ PersistenceLoadResult ApiKeyStore::loadFromFile(const std::string& filepath) {
     return {PersistenceLoadStatus::Loaded, {}};
 }
 
-bool ApiKeyStore::saveToFile(const std::string& filepath) {
+bool ApiKeyStore::applyChangesAndSave(
+    const std::vector<ProviderConfigChange>& changes,
+    const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    nlohmann::json root = nlohmann::json::object();
-    root["version"] = kConfigVersion;
-    nlohmann::json providers = nlohmann::json::object();
-    for (const auto& kv : configs_) {
-        nlohmann::json entry = nlohmann::json::object();
-        entry["apiKey"] = kv.second.encryptedApiKey;
-        entry["baseUrl"] = kv.second.baseUrl;
-        entry["model"] = kv.second.model;
-        // Only emit apiVersion when it carries information so the on-disk
-        // file matches the example in design.md for providers that don't
-        // use it (OpenAI/DeepSeek).
-        if (!kv.second.apiVersion.empty()) {
-            entry["apiVersion"] = kv.second.apiVersion;
+    std::map<std::string, StoredProviderConfig> candidate = configs_;
+    for (const ProviderConfigChange& change : changes) {
+        if (change.providerName.empty()) {
+            return false;
         }
-        providers[kv.first] = std::move(entry);
-    }
-    root["providers"] = std::move(providers);
+        if (change.remove) {
+            candidate.erase(change.providerName);
+            continue;
+        }
+        if (change.config.contextWindowTokens < 0 ||
+            change.config.contextWindowTokens > kMaxConfiguredContextTokens) {
+            return false;
+        }
 
-    // Atomic write: dump to a sibling temp file in the same directory, then
-    // rename over the target. std::filesystem::rename is atomic on NTFS
-    // when both paths sit on the same volume, which is what we guarantee
-    // by keeping the temp next to the target.
-    std::filesystem::path targetPath(filepath);
-    std::filesystem::path tmpPath = targetPath;
-    tmpPath += ".tmp";
-
-    {
-        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
+        std::string encrypted = encryptWithDPAPI(change.config.apiKey);
+        if (encrypted.empty()) {
             return false;
         }
-        try {
-            out << root.dump(2);
-        } catch (const nlohmann::json::exception&) {
-            return false;
-        }
-        out.flush();
-        if (!out.good()) {
-            return false;
-        }
+        StoredProviderConfig stored;
+        stored.encryptedApiKey = std::move(encrypted);
+        stored.baseUrl = change.config.baseUrl;
+        stored.model = change.config.model;
+        stored.apiVersion = change.config.apiVersion;
+        stored.trustedBaseUrl = change.config.trustedBaseUrl;
+        stored.contextWindowTokens = change.config.contextWindowTokens;
+        candidate[change.providerName] = std::move(stored);
     }
 
-    // Install the temp over the target without ever risking the only good
-    // copy (see utils::installTempFile). A held-open target no longer leads
-    // to all encrypted keys being deleted.
-    return utils::installTempFile(tmpPath, targetPath);
+    if (!writeConfigsToFile(candidate, filepath)) {
+        return false;
+    }
+
+    configs_ = std::move(candidate);
+    for (const ProviderConfigChange& change : changes) {
+        decryptionFailures_.erase(
+            std::remove(decryptionFailures_.begin(),
+                        decryptionFailures_.end(),
+                        change.providerName),
+            decryptionFailures_.end());
+    }
+    return true;
+}
+
+bool ApiKeyStore::saveToFile(const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return writeConfigsToFile(configs_, filepath);
 }
 
 } // namespace AI

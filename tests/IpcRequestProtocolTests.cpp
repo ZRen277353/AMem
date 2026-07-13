@@ -28,6 +28,23 @@ NativeIpc::RequestPayloadParseResult parse(
     return NativeIpc::ParseRequestPayload(requestId, payload.dump(), config);
 }
 
+std::string denseArrays(size_t arrayCount, size_t itemsPerArray) {
+    std::string value;
+    value.reserve(arrayCount * (itemsPerArray * 2u + 3u) + 2u);
+    value.push_back('[');
+    for (size_t arrayIndex = 0; arrayIndex < arrayCount; ++arrayIndex) {
+        if (arrayIndex != 0) value.push_back(',');
+        value.push_back('[');
+        for (size_t item = 0; item < itemsPerArray; ++item) {
+            if (item != 0) value.push_back(',');
+            value.push_back('0');
+        }
+        value.push_back(']');
+    }
+    value.push_back(']');
+    return value;
+}
+
 void testValidRequestAndDefaultTimeout() {
     const auto defaulted = parse({{"method", "status"},
                                   {"params", json::object()}});
@@ -183,6 +200,32 @@ void testResponseValidationAndLimits() {
            "protocol errors must honor the configured output limit");
 }
 
+void testRequestAndResponseJsonComplexity() {
+    const std::string denseRequest =
+        std::string("{\"method\":\"status\",\"params\":{\"dense\":") +
+        denseArrays(5u, 4000u) + "}}";
+    expect(denseRequest.size() < IpcProtocol::kMaxRequestPayloadBytes,
+           "dense request fixture must stay below the frame byte limit");
+    const auto request = NativeIpc::ParseRequestPayload(9, denseRequest);
+    expect(!request.valid && request.error.find("node limit") !=
+               std::string::npos,
+           "request JSON must reject allocator amplification below 1 MiB");
+
+    std::string payload;
+    std::string error;
+    NativeIpc::IpcDispatchResult denseResponse;
+    denseResponse.ok = true;
+    denseResponse.completion = NativeIpc::RequestCompletion::Completed;
+    denseResponse.resultJson = denseArrays(17u, 4000u);
+    expect(denseResponse.resultJson.size() <
+                   IpcProtocol::kMaxResponsePayloadBytes &&
+               !NativeIpc::BuildResponsePayload(
+                   denseResponse, payload, error) &&
+               error.find("node limit") != std::string::npos &&
+               payload.empty(),
+           "response JSON must reject allocator amplification before framing");
+}
+
 } // namespace
 
 int main() {
@@ -196,6 +239,8 @@ int main() {
         {"response envelope and completion names",
          &testResponseEnvelopeAndCompletionNames},
         {"response validation and limits", &testResponseValidationAndLimits},
+        {"request and response JSON complexity",
+         &testRequestAndResponseJsonComplexity},
     };
 
     int failures = 0;

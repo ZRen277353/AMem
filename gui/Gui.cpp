@@ -5,11 +5,15 @@
 #include "ModulesWindow.h"
 #include "LogWindow.h"
 #include "../imgui/imgui.h"
+#include "../mem/SystemMemService.h"
 #include <map>
 #include <vector>
 
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
+#endif
+#ifdef HAVE_AI_CHAT
+#include "ai/ChatWindow.h"
 #endif
 
 namespace Gui {
@@ -42,12 +46,17 @@ namespace Gui {
 		static bool bootstrapped = false;
 		if (!bootstrapped) {
 			if (windows.empty()) {
-				Gui::addWindow(new CEWindow());
-				Gui::addWindow(new ServerConnectWindow());
+				auto& memService = Mem::getSystemMemService();
+				Gui::addWindow(new CEWindow(memService));
+				Gui::addWindow(new ServerConnectWindow(memService));
 				Gui::addWindow(new LogWindow());
+
+#ifdef HAVE_AI_CHAT
+				Gui::addWindow(new AI::ChatWindow());
+#endif
 				
 #ifdef HAVE_LUAJIT
-				Gui::addWindow(new LuaScriptWindow());
+				Gui::addWindow(new LuaScriptWindow(memService));
 #endif
 			}
 			Gui::log("欢迎使用 Cheat Turbine！");

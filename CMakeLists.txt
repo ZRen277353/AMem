@@ -32,8 +32,8 @@ option(USE_DX12 "Use DirectX 12 backend" ON)
 
 # NativeAgent 产品固定包含 AI Chat、Capstone 和 Keystone；缺失依赖时配置失败。
 
-# 原生 Named Pipe transport 默认只编译测试。产品入口保持关闭，直到 owned
-# runtime composition、GUI status/control 和 privileged approval broker 完成。
+# 原生 Named Pipe transport 是显式编译能力；即使编入产品，运行时仍默认停止，
+# 只能由用户在 GUI 中启用 Observe + 逐请求审批。
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 
 # 生成版本信息头文件
@@ -57,9 +57,15 @@ configure_file(${CMAKE_SOURCE_DIR}/version.h.in ${CMAKE_BINARY_DIR}/generated/ve
 
 
 # 输出目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+endif()
+if(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+endif()
+if(NOT CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+endif()
 
 # 查找 Capstone 库（完全静态）：优先官方安装器静态版（C:/Program Files/capstone，6.x，/MT），
 # 整体链入 exe，不分发 DLL；也接受 vcpkg 静态三元组 x64-windows-static（5.x，/MT）。
@@ -129,7 +135,10 @@ set(AI_CHAT_SOURCES
     gui/ai/SSEParser.cpp
     gui/ai/ProviderStreamTerminal.cpp
     gui/ai/ProviderResponseLimits.cpp
+    gui/ai/ContextBudget.cpp
+    gui/ai/ProviderTrust.cpp
     gui/ai/Persistence.cpp
+    gui/ai/ProtectedPersistence.cpp
     gui/ai/UIMessageQueue.cpp
     gui/ai/OpenAIProvider.cpp
     gui/ai/ClaudeProvider.cpp
@@ -147,6 +156,7 @@ set(AI_CHAT_SOURCES
     gui/ai/AgentRunContext.cpp
     gui/ai/AgentTaskExecutor.cpp
     gui/ai/AgentMemToolsSystem.cpp
+    gui/ai/ChatSettingsDraft.cpp
     gui/ai/ChatWindow.cpp
     gui/ai/ChatWindowSettings.cpp
 )
@@ -225,6 +235,7 @@ list(APPEND GUI_SOURCES ${AI_CHAT_SOURCES})
 set(SOCKET_SOURCES
     socket/DeviceSession.cpp
     socket/MultiPortClientManager.cpp
+    socket/ServerHandshake.cpp
     socket/client_singleton.cpp
     socket/ProcessCommands.cpp
     socket/MemoryCommands.cpp
@@ -239,6 +250,22 @@ set(MEM_SOURCES
     mem/MemService.cpp
     mem/SystemMemService.cpp
     mem/ValueCodec.cpp
+)
+
+add_library(NativeBoundedJson STATIC
+    utils/BoundedJson.cpp
+)
+target_include_directories(NativeBoundedJson PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+if(MSVC)
+    target_compile_options(NativeBoundedJson PRIVATE /W4)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(NativeBoundedJson PRIVATE -Wall -Wextra)
+endif()
+set_target_properties(NativeBoundedJson PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-json"
 )
 
 add_library(NativeMemJsonTools STATIC
@@ -294,6 +321,7 @@ if(ENABLE_NATIVE_IPC OR BUILD_TESTING)
     )
     target_link_libraries(NativeIpcTransport PUBLIC
         NativeMemJsonTools
+        NativeBoundedJson
         advapi32
     )
     if(MSVC)
@@ -368,7 +396,7 @@ if(ENABLE_NATIVE_IPC)
     target_link_libraries(ImGuiProject NativeIpcTransport NativeIpcGuiControl)
 endif()
 
-target_link_libraries(ImGuiProject NativeMemJsonTools)
+target_link_libraries(ImGuiProject NativeMemJsonTools NativeBoundedJson)
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
@@ -434,9 +462,12 @@ if(BUILD_TESTING)
     add_executable(NativePersistenceTests
         tests/PersistenceTests.cpp
         gui/ai/Persistence.cpp
+        gui/ai/ProtectedPersistence.cpp
         gui/ai/ProviderResponseLimits.cpp
+        gui/ai/ContextBudget.cpp
         gui/ai/ApiKeyStore.cpp
         gui/ai/AiSettings.cpp
+        gui/ai/ChatSettingsDraft.cpp
         gui/ai/SessionManager.cpp
         gui/ai/ChatSession.cpp
         gui/ai/ToolCallSecurity.cpp
@@ -446,7 +477,10 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/third_party
     )
     target_compile_definitions(NativePersistenceTests PRIVATE HAVE_AI_CHAT)
-    target_link_libraries(NativePersistenceTests PRIVATE crypt32)
+    target_link_libraries(NativePersistenceTests PRIVATE
+        NativeBoundedJson
+        crypt32
+    )
     if(MSVC)
         target_compile_options(NativePersistenceTests PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -456,6 +490,42 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_persistence_recovery COMMAND NativePersistenceTests)
+
+    add_executable(NativeContextBudgetTests
+        tests/ContextBudgetTests.cpp
+        gui/ai/ContextBudget.cpp
+    )
+    target_include_directories(NativeContextBudgetTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    target_compile_definitions(NativeContextBudgetTests PRIVATE HAVE_AI_CHAT)
+    if(MSVC)
+        target_compile_options(NativeContextBudgetTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeContextBudgetTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeContextBudgetTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_context_budget COMMAND NativeContextBudgetTests)
+
+    add_executable(NativeProviderTrustTests
+        tests/ProviderTrustTests.cpp
+        gui/ai/ProviderTrust.cpp
+    )
+    target_include_directories(NativeProviderTrustTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    target_compile_definitions(NativeProviderTrustTests PRIVATE HAVE_AI_CHAT)
+    if(MSVC)
+        target_compile_options(NativeProviderTrustTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeProviderTrustTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeProviderTrustTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_provider_trust COMMAND NativeProviderTrustTests)
 
     add_executable(NativeProviderStreamTerminalTests
         tests/ProviderStreamTerminalTests.cpp
@@ -468,6 +538,9 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/third_party
     )
     target_compile_definitions(NativeProviderStreamTerminalTests PRIVATE HAVE_AI_CHAT)
+    target_link_libraries(NativeProviderStreamTerminalTests PRIVATE
+        NativeBoundedJson
+    )
     if(MSVC)
         target_compile_options(NativeProviderStreamTerminalTests PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -480,6 +553,48 @@ if(BUILD_TESTING)
         NAME native_provider_stream_terminal
         COMMAND NativeProviderStreamTerminalTests
     )
+
+    add_executable(NativeProviderHttpIntegrationTests
+        tests/ProviderHttpIntegrationTests.cpp
+        gui/ai/HttpClient.cpp
+        gui/ai/SSEParser.cpp
+        gui/ai/ProviderStreamTerminal.cpp
+        gui/ai/ProviderResponseLimits.cpp
+        gui/ai/OpenAIProvider.cpp
+        gui/ai/ClaudeProvider.cpp
+        gui/ai/DeepSeekProvider.cpp
+        gui/ai/UIMessageQueue.cpp
+    )
+    target_include_directories(NativeProviderHttpIntegrationTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party
+        ${CMAKE_SOURCE_DIR}/third_party/httplib
+    )
+    target_compile_definitions(NativeProviderHttpIntegrationTests PRIVATE
+        HAVE_AI_CHAT
+        CPPHTTPLIB_OPENSSL_SUPPORT
+    )
+    target_link_libraries(NativeProviderHttpIntegrationTests PRIVATE
+        NativeBoundedJson
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        crypt32
+        ws2_32
+    )
+    if(MSVC)
+        target_compile_options(NativeProviderHttpIntegrationTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeProviderHttpIntegrationTests PRIVATE
+            -Wall -Wextra)
+    endif()
+    set_target_properties(NativeProviderHttpIntegrationTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(
+        NAME native_provider_http_integration
+        COMMAND NativeProviderHttpIntegrationTests
+    )
+    set_tests_properties(native_provider_http_integration PROPERTIES TIMEOUT 20)
 
     add_executable(NativeHttpClientLifecycleTests
         tests/HttpClientLifecycleTests.cpp
@@ -718,7 +833,10 @@ if(BUILD_TESTING)
         gui/ai/AgentMutationAudit.cpp
         gui/ai/ToolCallSecurity.cpp
         gui/ai/Persistence.cpp
+        gui/ai/ProtectedPersistence.cpp
         gui/ai/ProviderResponseLimits.cpp
+        gui/ai/ContextBudget.cpp
+        gui/ai/ProviderTrust.cpp
         gui/ai/ChatSession.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp
@@ -728,7 +846,11 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/third_party
     )
     target_compile_definitions(NativeAgentMemTests PRIVATE HAVE_AI_CHAT)
-    target_link_libraries(NativeAgentMemTests PRIVATE NativeMemJsonTools)
+    target_link_libraries(NativeAgentMemTests PRIVATE
+        NativeMemJsonTools
+        NativeBoundedJson
+        crypt32
+    )
     if(MSVC)
         target_compile_options(NativeAgentMemTests PRIVATE /W4)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -738,6 +860,23 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_agent_mem_service COMMAND NativeAgentMemTests)
+
+    add_executable(NativeAppContextStateTests
+        tests/AppContextStateTests.cpp
+        gui/AppContext.cpp
+    )
+    target_include_directories(NativeAppContextStateTests PRIVATE
+        ${CMAKE_SOURCE_DIR}
+    )
+    if(MSVC)
+        target_compile_options(NativeAppContextStateTests PRIVATE /W4)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(NativeAppContextStateTests PRIVATE -Wall -Wextra)
+    endif()
+    set_target_properties(NativeAppContextStateTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    )
+    add_test(NAME native_app_context_state COMMAND NativeAppContextStateTests)
 
     add_executable(NativeSocketClientTransportTests
         tests/SocketClientTransportTests.cpp
@@ -764,6 +903,7 @@ if(BUILD_TESTING)
         tests/MultiPortClientManagerTests.cpp
         socket/DeviceSession.cpp
         socket/MultiPortClientManager.cpp
+        socket/ServerHandshake.cpp
     )
     target_include_directories(NativeMultiPortClientManagerTests PRIVATE
         ${CMAKE_SOURCE_DIR}
@@ -811,6 +951,30 @@ if(BUILD_TESTING)
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/VerifyRequiredProductFeatures.cmake
+    )
+    add_test(
+        NAME native_gui_mem_service_boundary
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyGuiMemServiceBoundary.cmake
+    )
+    add_test(
+        NAME native_context_budget_gate
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyContextBudgetGate.cmake
+    )
+    add_test(
+        NAME native_provider_trust_gate
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyProviderTrustGate.cmake
+    )
+    add_test(
+        NAME native_session_protection_gate
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifySessionProtectionGate.cmake
     )
 endif()
 

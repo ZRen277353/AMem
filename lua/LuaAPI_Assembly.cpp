@@ -5,7 +5,7 @@
 #include "LuaAPI.h"
 #include "../gui/AssemblyHelper.h"
 #include "../gui/DisassemblyHelper.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "../gui/Gui.h"
 
 namespace {
@@ -61,6 +61,32 @@ std::vector<uint8_t> readByteTable(lua_State* L, int index) {
         lua_pop(L, 1);
     }
     return bytes;
+}
+
+bool readMemory(lua_State* L, uint64_t address, uint32_t size,
+                std::vector<unsigned char>& bytes) {
+    auto& service = LuaAPI::GetMemService(L);
+    Mem::MemoryReadRequest request;
+    request.address = address;
+    request.size = size;
+    auto response = service.readMemory(
+        LuaAPI::GetOperationContext(L, true), request);
+    if (!response.ok()) {
+        bytes.clear();
+        return false;
+    }
+    bytes = std::move(response.value().bytes);
+    return true;
+}
+
+bool writeMemory(lua_State* L, uint64_t address,
+                 const std::vector<unsigned char>& bytes) {
+    auto& service = LuaAPI::GetMemService(L);
+    Mem::MemoryWriteRequest request;
+    request.address = address;
+    request.bytes = bytes;
+    return service.writeMemory(
+        LuaAPI::GetOperationContext(L, true), request).ok();
 }
 } // namespace
 
@@ -149,8 +175,7 @@ int LuaAPI_Assembly::Patch(lua_State* L) {
 
     // 转换为 unsigned char vector
     std::vector<unsigned char> data(result.bytes.begin(), result.bytes.end());
-    bool writeOk = WriteProcessMemoryBytes(address,
-        static_cast<uint32_t>(data.size()), data);
+    bool writeOk = writeMemory(L, address, data);
 
     lua_pushboolean(L, writeOk ? 1 : 0);
     return 1;
@@ -182,7 +207,8 @@ int LuaAPI_Assembly::Disassemble(lua_State* L) {
             L, 3, 0, kMaxLuaDisassemblyInstructions, "max instructions");
 
         std::vector<unsigned char> buffer(size);
-        if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), buffer)) {
+        if (!readMemory(
+                L, address, static_cast<uint32_t>(size), buffer)) {
             LuaAPI::PushError(L, "读取进程内存失败");
             return 2;
         }

@@ -11,16 +11,20 @@ class BreakpointWindow;
 class LuaScriptWindow;
 class ServerConnectWindow;
 class LogWindow;
+namespace Mem {
+class IMemService;
+}
 
 class CEWindow : public Window {
 public:
-    CEWindow();
+    explicit CEWindow(Mem::IMemService& memService);
     unsigned int getWindowFlags() const override;
 
 protected:
     void onDraw() override;
 
 private:
+    Mem::IMemService& memService_;
     void drawMenuBar();
     void drawTopProcessBar();
     void drawSelectedProcessBanner();

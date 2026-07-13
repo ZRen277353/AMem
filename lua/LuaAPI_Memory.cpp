@@ -1,6 +1,6 @@
 #include "LuaAPI_Memory.h"
 #include "LuaAPI.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include <string>
 #include <vector>
 #include <cstring>
@@ -54,6 +54,32 @@ double checkFiniteNumber(lua_State* L, int index, const char* name) {
     return number;
 }
 
+bool readMemory(lua_State* L, uint64_t address, uint32_t size,
+                std::vector<unsigned char>& data) {
+    auto& service = LuaAPI::GetMemService(L);
+    Mem::MemoryReadRequest request;
+    request.address = address;
+    request.size = size;
+    auto response = service.readMemory(
+        LuaAPI::GetOperationContext(L, true), request);
+    if (!response.ok()) {
+        data.clear();
+        return false;
+    }
+    data = std::move(response.value().bytes);
+    return true;
+}
+
+bool writeMemory(lua_State* L, uint64_t address,
+                 const std::vector<unsigned char>& data) {
+    auto& service = LuaAPI::GetMemService(L);
+    Mem::MemoryWriteRequest request;
+    request.address = address;
+    request.bytes = data;
+    return service.writeMemory(
+        LuaAPI::GetOperationContext(L, true), request).ok();
+}
+
 }
 
 // ==================== 注册内存操作API ====================
@@ -103,7 +129,7 @@ int LuaAPI_Memory::ReadMemory(lua_State* L) {
     uint32_t size = checkSize(L, 2);
 
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, size, data)) {
+    if (readMemory(L, address, size, data)) {
         lua_newtable(L);
         for (size_t i = 0; i < data.size(); ++i) {
             lua_pushinteger(L, i + 1);
@@ -147,7 +173,7 @@ int LuaAPI_Memory::WriteMemory(lua_State* L) {
         luaL_error(L, "Expected table or string for data");
     }
 
-    bool success = WriteProcessMemoryBytes(address, static_cast<uint32_t>(data.size()), data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -155,7 +181,7 @@ int LuaAPI_Memory::WriteMemory(lua_State* L) {
 int LuaAPI_Memory::ReadInt(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 4, data) && data.size() == 4) {
+    if (readMemory(L, address, 4, data) && data.size() == 4) {
         int32_t value = 0;
         if (!readScalar(data, value)) {
             LuaAPI::PushError(L, "Failed to read int");
@@ -173,7 +199,7 @@ int LuaAPI_Memory::WriteInt(lua_State* L) {
     int32_t value = static_cast<int32_t>(
         checkIntegerRange(L, 2, (std::numeric_limits<int32_t>::min)(), (std::numeric_limits<int32_t>::max)(), "int"));
     std::vector<unsigned char> data = scalarToBytes(value);
-    bool success = WriteProcessMemoryBytes(address, 4, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -181,7 +207,7 @@ int LuaAPI_Memory::WriteInt(lua_State* L) {
 int LuaAPI_Memory::ReadLong(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 8, data) && data.size() == 8) {
+    if (readMemory(L, address, 8, data) && data.size() == 8) {
         int64_t value = 0;
         if (!readScalar(data, value)) {
             LuaAPI::PushError(L, "Failed to read long");
@@ -199,7 +225,7 @@ int LuaAPI_Memory::WriteLong(lua_State* L) {
     int64_t value = static_cast<int64_t>(
         checkIntegerRange(L, 2, (std::numeric_limits<lua_Integer>::min)(), (std::numeric_limits<lua_Integer>::max)(), "long"));
     std::vector<unsigned char> data = scalarToBytes(value);
-    bool success = WriteProcessMemoryBytes(address, 8, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -207,7 +233,7 @@ int LuaAPI_Memory::WriteLong(lua_State* L) {
 int LuaAPI_Memory::ReadShort(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 2, data) && data.size() == 2) {
+    if (readMemory(L, address, 2, data) && data.size() == 2) {
         int16_t value = 0;
         if (!readScalar(data, value)) {
             LuaAPI::PushError(L, "Failed to read short");
@@ -225,7 +251,7 @@ int LuaAPI_Memory::WriteShort(lua_State* L) {
     int16_t value = static_cast<int16_t>(
         checkIntegerRange(L, 2, (std::numeric_limits<int16_t>::min)(), (std::numeric_limits<int16_t>::max)(), "short"));
     std::vector<unsigned char> data = scalarToBytes(value);
-    bool success = WriteProcessMemoryBytes(address, 2, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -233,7 +259,7 @@ int LuaAPI_Memory::WriteShort(lua_State* L) {
 int LuaAPI_Memory::ReadByte(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 1, data) && data.size() == 1) {
+    if (readMemory(L, address, 1, data) && data.size() == 1) {
         lua_pushinteger(L, data[0]);
         return 1;
     }
@@ -245,7 +271,7 @@ int LuaAPI_Memory::WriteByte(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     unsigned char value = static_cast<unsigned char>(checkIntegerRange(L, 2, 0, 0xFF, "byte"));
     std::vector<unsigned char> data = {value};
-    bool success = WriteProcessMemoryBytes(address, 1, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -253,7 +279,7 @@ int LuaAPI_Memory::WriteByte(lua_State* L) {
 int LuaAPI_Memory::ReadFloat(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 4, data) && data.size() == 4) {
+    if (readMemory(L, address, 4, data) && data.size() == 4) {
         float value = 0.0f;
         if (!readScalar(data, value)) {
             LuaAPI::PushError(L, "Failed to read float");
@@ -275,7 +301,7 @@ int LuaAPI_Memory::WriteFloat(lua_State* L) {
     }
     float value = static_cast<float>(number);
     std::vector<unsigned char> data = scalarToBytes(value);
-    bool success = WriteProcessMemoryBytes(address, 4, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -283,7 +309,7 @@ int LuaAPI_Memory::WriteFloat(lua_State* L) {
 int LuaAPI_Memory::ReadDouble(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, 8, data) && data.size() == 8) {
+    if (readMemory(L, address, 8, data) && data.size() == 8) {
         double value = 0.0;
         if (!readScalar(data, value)) {
             LuaAPI::PushError(L, "Failed to read double");
@@ -300,7 +326,7 @@ int LuaAPI_Memory::WriteDouble(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
     double value = checkFiniteNumber(L, 2, "double");
     std::vector<unsigned char> data = scalarToBytes(value);
-    bool success = WriteProcessMemoryBytes(address, 8, data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }
@@ -311,7 +337,7 @@ int LuaAPI_Memory::ReadString(lua_State* L) {
     const char* encoding = luaL_optstring(L, 3, "ascii");
 
     std::vector<unsigned char> data;
-    if (ReadProcessMemoryBytes(address, maxLength, data)) {
+    if (readMemory(L, address, maxLength, data)) {
         size_t len = 0;
         while (len < data.size() && data[len] != 0) {
             ++len;
@@ -333,7 +359,7 @@ int LuaAPI_Memory::WriteString(lua_State* L) {
     }
     std::vector<unsigned char> data(reinterpret_cast<const unsigned char*>(str),
                                    reinterpret_cast<const unsigned char*>(str) + len + 1);
-    bool success = WriteProcessMemoryBytes(address, static_cast<uint32_t>(data.size()), data);
+    bool success = writeMemory(L, address, data);
     lua_pushboolean(L, success ? 1 : 0);
     return 1;
 }

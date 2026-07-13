@@ -2,6 +2,8 @@
 
 #include "Window.h"
 #include "DisassemblyHelper.h"
+#include "../mem/MemTypes.h"
+#include "../mem/MemResult.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -170,6 +172,27 @@ public:
 
 private:
     Mem::IMemService& memService_;
+    bool readTargetMemory(
+        uint64_t address, uint32_t size,
+        std::vector<unsigned char>& bytes,
+        Mem::MemoryReadChannel channel = Mem::MemoryReadChannel::Foreground,
+        Mem::Error* error = nullptr);
+    bool writeTargetMemory(
+        uint64_t address, const std::vector<unsigned char>& bytes,
+        Mem::Error* error = nullptr);
+    bool addFrozenValue(
+        uint64_t address, const unsigned char* bytes, size_t size,
+        Mem::Error* error = nullptr);
+    bool updateFrozenValue(
+        uint64_t address, const unsigned char* bytes, size_t size,
+        Mem::Error* error = nullptr);
+    bool removeFrozenValue(uint64_t address, Mem::Error* error = nullptr);
+    bool readDissectMemory(
+        uint64_t address, int size, std::vector<unsigned char>& bytes);
+    bool resolveWatchItemAddress(
+        const MemoryWatchItem& item, uint64_t& address);
+    void clearWatchItemFreeze(MemoryWatchItem& item);
+    void clearWatchItemFreezes(std::vector<MemoryWatchItem>& items);
     int navSubscriptionId = 0;  // EventBus 订阅 ID
     uint64_t observedProcessRevision = 0;
     static bool parseAddressExpression(const char* expr, uint64_t& result);

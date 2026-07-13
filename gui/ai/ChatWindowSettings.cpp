@@ -7,6 +7,8 @@
 #include "DefaultSystemPrompt.h"
 #include "HttpClient.h"
 #include "ProviderRegistry.h"
+#include "ProviderTrust.h"
+#include "SecureMemory.h"
 #include "ToolExecutor.h"
 
 #include "../ColorScheme.h"
@@ -55,21 +57,61 @@ bool isHttpsUrl(const std::string& url) {
 
 } // namespace
 
+void ChatWindow::loadSettingsDraft() {
+    settingsDraft_.clear();
+
+    auto& keyStore = ApiKeyStore::getInstance();
+    auto& registry = ProviderRegistry::getInstance();
+    const AiSettingsData settings = AiSettings::getInstance().get();
+
+    copyIntoBuf(settingsDraft_.systemPrompt, settings.systemPrompt);
+    copyIntoBuf(settingsDraft_.proxyHost, settings.proxy.host);
+    settingsDraft_.tokenLimit = settings.tokenLimit;
+    settingsDraft_.executionTimeout = settings.executionTimeout;
+    settingsDraft_.maxAgentSteps = settings.maxAgentSteps;
+    settingsDraft_.maxToolCallsPerTurn = settings.maxToolCallsPerTurn;
+    settingsDraft_.autoApproveWrites = settings.autoApproveWrites;
+    settingsDraft_.proxyEnabled = settings.proxy.enabled;
+    settingsDraft_.proxyPort = settings.proxy.port;
+
+    for (const std::string& name : registry.getProviderNames()) {
+        ProviderSettingsDraft& buffer = settingsDraft_.provider(name);
+        buffer.wasConfigured = keyStore.hasConfig(name);
+        AIProvider* provider = registry.getProvider(name);
+
+        ProviderConfig config;
+        if (keyStore.loadConfig(name, config)) {
+            copyIntoBuf(buffer.apiKey, config.apiKey);
+            copyIntoBuf(buffer.baseUrl, config.baseUrl);
+            copyIntoBuf(buffer.model, config.model);
+            copyIntoBuf(buffer.apiVersion, config.apiVersion);
+            buffer.contextWindowTokens = config.contextWindowTokens;
+        }
+        secureClearString(config.apiKey);
+
+        if (buffer.baseUrl[0] == '\0') {
+            if (provider) {
+                copyIntoBuf(buffer.baseUrl, provider->getDefaultBaseUrl());
+            }
+        }
+        if (provider) {
+            ProviderConfig trustConfig;
+            trustConfig.baseUrl = buffer.baseUrl;
+            trustConfig.trustedBaseUrl = config.trustedBaseUrl;
+            buffer.endpointTrusted =
+                isProviderEndpointTrusted(*provider, trustConfig);
+        }
+    }
+
+    settingsDraft_.loaded = true;
+}
+
 void ChatWindow::drawSettingsPanel() {
     if (!showSettings_) return;
 
-    // Cross-frame edit buffers for the panel. Declared before the popup
-    // Begin so the dismissal path below can reset them. These are
-    // function-local statics; ChatWindow is a getOrCreate singleton in
-    // practice, so a single shared edit context is correct.
-    static char systemPromptBuf[4096] = {};
-    static bool systemPromptLoaded = false;
-    static int tokenLimitBuf = 0;
-    static int executionTimeoutBuf = 0;
-    static int maxAgentStepsBuf = 0;
-    static int maxToolCallsPerTurnBuf = 0;
-    static bool autoApproveWritesBuf = false;
-    static bool numericSettingsLoaded = false;
+    if (!settingsDraft_.loaded) {
+        loadSettingsDraft();
+    }
 
     ImGui::SetNextWindowSize(ImVec2(640.0f, 460.0f), ImGuiCond_Appearing);
     ImGui::OpenPopup("AI Chat Settings");
@@ -80,9 +122,7 @@ void ChatWindow::drawSettingsPanel() {
         // reloads fresh values from disk instead of resurrecting stale
         // unsaved edits (matches the Cancel button's reset).
         if (!showSettings_) {
-            settingsBuffers_.clear();
-            systemPromptLoaded = false;
-            numericSettingsLoaded = false;
+            settingsDraft_.clear();
         }
         return;
     }
@@ -90,31 +130,6 @@ void ChatWindow::drawSettingsPanel() {
     auto& keyStore = ApiKeyStore::getInstance();
     auto& registry = ProviderRegistry::getInstance();
     const std::vector<std::string> providerNames = registry.getProviderNames();
-
-    // Lazily populate settingsBuffers_ from ApiKeyStore on first open so
-    // the panel reflects the live on-disk configuration. Unpopulated
-    // buffers get the provider's default base URL (AC 11.3).
-    for (const std::string& name : providerNames) {
-        if (settingsBuffers_.find(name) == settingsBuffers_.end()) {
-            SettingsBuffer& buf = settingsBuffers_[name];
-            ProviderConfig cfg;
-            if (keyStore.loadConfig(name, cfg)) {
-                copyIntoBuf(buf.apiKey, cfg.apiKey);
-                copyIntoBuf(buf.baseUrl, cfg.baseUrl);
-                copyIntoBuf(buf.model, cfg.model);
-                copyIntoBuf(buf.apiVersion, cfg.apiVersion);
-                buf.dirty = false;
-            }
-            // If no baseUrl was stored (or no config existed), seed the
-            // field with the provider's default so the user sees a
-            // working URL immediately (AC 11.3).
-            if (buf.baseUrl[0] == '\0') {
-                if (AIProvider* p = registry.getProvider(name)) {
-                    copyIntoBuf(buf.baseUrl, p->getDefaultBaseUrl());
-                }
-            }
-        }
-    }
 
     // Surface any decryption failures from a previous load so the user
     // knows why an API key field is blank (AC 10.5).
@@ -148,14 +163,15 @@ void ChatWindow::drawSettingsPanel() {
 
     // Proxy configuration block. Applied globally to HttpClient on save.
     ImGui::TextDisabled("Proxy (optional)");
-    ImGui::Checkbox("Enable proxy", &proxyEnabled_);
-    if (proxyEnabled_) {
+    ImGui::Checkbox("Enable proxy", &settingsDraft_.proxyEnabled);
+    if (settingsDraft_.proxyEnabled) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(220.0f);
-        ImGui::InputText("Host", proxyHost_, sizeof(proxyHost_));
+        ImGui::InputText("Host", settingsDraft_.proxyHost,
+                         sizeof(settingsDraft_.proxyHost));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
-        ImGui::InputInt("Port", &proxyPort_);
+        ImGui::InputInt("Port", &settingsDraft_.proxyPort);
     }
 
     ImGui::Separator();
@@ -163,29 +179,6 @@ void ChatWindow::drawSettingsPanel() {
     // General AI settings (non-secret, stored in ai_settings.json).
     ImGui::TextDisabled("General");
 
-    AiSettingsData settings = AiSettings::getInstance().get();
-
-    // The edit buffers (declared at the top of this function so the
-    // dismissal path can reset them) must survive across frames: `settings`
-    // is a fresh snapshot on every draw, so writing straight back into its
-    // fields and reading them next frame would revert every edit. The
-    // *Loaded flags keep the user's in-progress edits until Save, Cancel,
-    // or dismissal commits/discards them.
-    if (!systemPromptLoaded) {
-        const size_t n = std::min(settings.systemPrompt.size(),
-                                  sizeof(systemPromptBuf) - 1);
-        if (n) std::memcpy(systemPromptBuf, settings.systemPrompt.data(), n);
-        systemPromptBuf[n] = '\0';
-        systemPromptLoaded = true;
-    }
-    if (!numericSettingsLoaded) {
-        tokenLimitBuf = settings.tokenLimit;
-        executionTimeoutBuf = settings.executionTimeout;
-        maxAgentStepsBuf = settings.maxAgentSteps;
-        maxToolCallsPerTurnBuf = settings.maxToolCallsPerTurn;
-        autoApproveWritesBuf = settings.autoApproveWrites;
-        numericSettingsLoaded = true;
-    }
     ImGui::Text("System Prompt:");
     ImGui::SameLine();
     // "Restore default" is intentionally right next to the label so it
@@ -193,12 +186,13 @@ void ChatWindow::drawSettingsPanel() {
     // standalone button floating elsewhere in the panel.
     if (ImGui::SmallButton("Restore default##sysprompt")) {
         const size_t n = std::min(std::strlen(kDefaultSystemPrompt),
-                                  sizeof(systemPromptBuf) - 1);
-        std::memcpy(systemPromptBuf, kDefaultSystemPrompt, n);
-        systemPromptBuf[n] = '\0';
+                                  sizeof(settingsDraft_.systemPrompt) - 1);
+        std::memcpy(settingsDraft_.systemPrompt, kDefaultSystemPrompt, n);
+        settingsDraft_.systemPrompt[n] = '\0';
     }
-    ImGui::InputTextMultiline("##ai_system_prompt", systemPromptBuf,
-                              sizeof(systemPromptBuf), ImVec2(-1.0f, 80.0f));
+    ImGui::InputTextMultiline("##ai_system_prompt", settingsDraft_.systemPrompt,
+                              sizeof(settingsDraft_.systemPrompt),
+                              ImVec2(-1.0f, 80.0f));
 
     // Token limit — clamped to [1000, 1000000] in AiSettings::setTokenLimit.
     // Explicit button layout instead of ImGui::InputInt's built-in steppers
@@ -214,23 +208,28 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::Text("Token limit");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::InputInt("##tokenlimit_input", &tokenLimitBuf, 0, 0);
-        tokenLimitBuf = std::clamp(tokenLimitBuf, kMinLimit, kMaxLimit);
+        ImGui::InputInt("##tokenlimit_input", &settingsDraft_.tokenLimit, 0, 0);
+        settingsDraft_.tokenLimit =
+            std::clamp(settingsDraft_.tokenLimit, kMinLimit, kMaxLimit);
         ImGui::SameLine();
         if (ImGui::Button("-##tokenlimit")) {
-            tokenLimitBuf = std::max(kMinLimit, tokenLimitBuf - kStep);
+            settingsDraft_.tokenLimit =
+                std::max(kMinLimit, settingsDraft_.tokenLimit - kStep);
         }
         ImGui::SameLine();
         if (ImGui::Button("+##tokenlimit")) {
-            tokenLimitBuf = std::min(kMaxLimit, tokenLimitBuf + kStep);
+            settingsDraft_.tokenLimit =
+                std::min(kMaxLimit, settingsDraft_.tokenLimit + kStep);
         }
         ImGui::SameLine();
         if (ImGui::Button("--##tokenlimit")) {
-            tokenLimitBuf = std::max(kMinLimit, tokenLimitBuf - kStepFast);
+            settingsDraft_.tokenLimit =
+                std::max(kMinLimit, settingsDraft_.tokenLimit - kStepFast);
         }
         ImGui::SameLine();
         if (ImGui::Button("++##tokenlimit")) {
-            tokenLimitBuf = std::min(kMaxLimit, tokenLimitBuf + kStepFast);
+            settingsDraft_.tokenLimit =
+                std::min(kMaxLimit, settingsDraft_.tokenLimit + kStepFast);
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(%d..%d)", kMinLimit, kMaxLimit);
@@ -245,23 +244,29 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::Text("Tool timeout (s)");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::InputInt("##tooltimeout_input", &executionTimeoutBuf, 0, 0);
-        executionTimeoutBuf = std::clamp(executionTimeoutBuf, kMinTimeout, kMaxTimeout);
+        ImGui::InputInt("##tooltimeout_input",
+                        &settingsDraft_.executionTimeout, 0, 0);
+        settingsDraft_.executionTimeout = std::clamp(
+            settingsDraft_.executionTimeout, kMinTimeout, kMaxTimeout);
         ImGui::SameLine();
         if (ImGui::Button("-##tooltimeout")) {
-            executionTimeoutBuf = std::max(kMinTimeout, executionTimeoutBuf - kStep);
+            settingsDraft_.executionTimeout = std::max(
+                kMinTimeout, settingsDraft_.executionTimeout - kStep);
         }
         ImGui::SameLine();
         if (ImGui::Button("+##tooltimeout")) {
-            executionTimeoutBuf = std::min(kMaxTimeout, executionTimeoutBuf + kStep);
+            settingsDraft_.executionTimeout = std::min(
+                kMaxTimeout, settingsDraft_.executionTimeout + kStep);
         }
         ImGui::SameLine();
         if (ImGui::Button("--##tooltimeout")) {
-            executionTimeoutBuf = std::max(kMinTimeout, executionTimeoutBuf - kStepFast);
+            settingsDraft_.executionTimeout = std::max(
+                kMinTimeout, settingsDraft_.executionTimeout - kStepFast);
         }
         ImGui::SameLine();
         if (ImGui::Button("++##tooltimeout")) {
-            executionTimeoutBuf = std::min(kMaxTimeout, executionTimeoutBuf + kStepFast);
+            settingsDraft_.executionTimeout = std::min(
+                kMaxTimeout, settingsDraft_.executionTimeout + kStepFast);
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(%d..%d)", kMinTimeout, kMaxTimeout);
@@ -273,15 +278,19 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::Text("Agent step limit");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::InputInt("##agentsteps_input", &maxAgentStepsBuf, 0, 0);
-        maxAgentStepsBuf = std::clamp(maxAgentStepsBuf, kMinSteps, kMaxSteps);
+        ImGui::InputInt("##agentsteps_input",
+                        &settingsDraft_.maxAgentSteps, 0, 0);
+        settingsDraft_.maxAgentSteps = std::clamp(
+            settingsDraft_.maxAgentSteps, kMinSteps, kMaxSteps);
         ImGui::SameLine();
         if (ImGui::Button("-##agentsteps")) {
-            maxAgentStepsBuf = std::max(kMinSteps, maxAgentStepsBuf - 1);
+            settingsDraft_.maxAgentSteps = std::max(
+                kMinSteps, settingsDraft_.maxAgentSteps - 1);
         }
         ImGui::SameLine();
         if (ImGui::Button("+##agentsteps")) {
-            maxAgentStepsBuf = std::min(kMaxSteps, maxAgentStepsBuf + 1);
+            settingsDraft_.maxAgentSteps = std::min(
+                kMaxSteps, settingsDraft_.maxAgentSteps + 1);
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(%d..%d)", kMinSteps, kMaxSteps);
@@ -293,15 +302,19 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::Text("Tool calls per turn");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140.0f);
-        ImGui::InputInt("##toolcalls_input", &maxToolCallsPerTurnBuf, 0, 0);
-        maxToolCallsPerTurnBuf = std::clamp(maxToolCallsPerTurnBuf, kMinCalls, kMaxCalls);
+        ImGui::InputInt("##toolcalls_input",
+                        &settingsDraft_.maxToolCallsPerTurn, 0, 0);
+        settingsDraft_.maxToolCallsPerTurn = std::clamp(
+            settingsDraft_.maxToolCallsPerTurn, kMinCalls, kMaxCalls);
         ImGui::SameLine();
         if (ImGui::Button("-##toolcalls")) {
-            maxToolCallsPerTurnBuf = std::max(kMinCalls, maxToolCallsPerTurnBuf - 1);
+            settingsDraft_.maxToolCallsPerTurn = std::max(
+                kMinCalls, settingsDraft_.maxToolCallsPerTurn - 1);
         }
         ImGui::SameLine();
         if (ImGui::Button("+##toolcalls")) {
-            maxToolCallsPerTurnBuf = std::min(kMaxCalls, maxToolCallsPerTurnBuf + 1);
+            settingsDraft_.maxToolCallsPerTurn = std::min(
+                kMaxCalls, settingsDraft_.maxToolCallsPerTurn + 1);
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(%d..%d)", kMinCalls, kMaxCalls);
@@ -316,8 +329,8 @@ void ChatWindow::drawSettingsPanel() {
     ImGui::Separator();
     ImGui::TextDisabled("AI Write Permissions");
     ImGui::Checkbox("Auto-approve AI write operations (YOLO mode)",
-                    &autoApproveWritesBuf);
-    if (autoApproveWritesBuf) {
+                    &settingsDraft_.autoApproveWrites);
+    if (settingsDraft_.autoApproveWrites) {
         ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::ErrorBright);
         ImGui::TextWrapped(
             "WARNING: the AI will execute memory writes, breakpoints, and "
@@ -334,79 +347,106 @@ void ChatWindow::drawSettingsPanel() {
     // Save commits all valid buffers; Cancel drops edits.
     if (ImGui::Button("Save", ImVec2(120.0f, 32.0f))) {
         if (validateSettings()) {
-            for (auto& kv : settingsBuffers_) {
+            std::vector<ProviderConfigChange> changes;
+            for (auto& kv : settingsDraft_.providers) {
                 const std::string& pname = kv.first;
-                SettingsBuffer& buf = kv.second;
-                // Don't clobber an existing stored config with a blank
-                // placeholder row. Rows that are fully empty represent
-                // "user never filled this provider in"; leaving them
-                // untouched preserves any key set in a previous session
-                // or via hand-editing ai_config.json.
+                ProviderSettingsDraft& buf = kv.second;
+                if (buf.forgetRequested) {
+                    ProviderConfigChange change;
+                    change.providerName = pname;
+                    change.remove = true;
+                    changes.push_back(std::move(change));
+                    continue;
+                }
+                if (!buf.dirty) {
+                    continue;
+                }
                 if (std::string(buf.apiKey).empty()) {
                     continue;
                 }
-                ProviderConfig cfg;
-                cfg.apiKey = buf.apiKey;
-                cfg.baseUrl = buf.baseUrl;
-                cfg.model = buf.model;
-                cfg.apiVersion = buf.apiVersion;
-                keyStore.storeConfig(pname, cfg);
-                // Push live so the next sendCompletion uses the new
-                // values without a round-trip through loadFromFile (AC 11.2).
-                if (AIProvider* p = registry.getProvider(pname)) {
-                    p->configure(cfg);
+                ProviderConfigChange change;
+                change.providerName = pname;
+                change.config.apiKey = buf.apiKey;
+                change.config.baseUrl = buf.baseUrl;
+                change.config.model = buf.model;
+                change.config.apiVersion = buf.apiVersion;
+                if (AIProvider* provider = registry.getProvider(pname)) {
+                    if (!isDefaultProviderEndpoint(*provider, buf.baseUrl) &&
+                        buf.endpointTrusted) {
+                        change.config.trustedBaseUrl =
+                            canonicalEndpointForTrust(buf.baseUrl);
+                    }
                 }
+                change.config.contextWindowTokens =
+                    buf.contextWindowTokens;
+                changes.push_back(std::move(change));
             }
-            keyStore.saveToFile("ai_config.json");
 
-            // Apply proxy configuration to the HTTP client singleton.
-            ProxyConfig proxy;
-            proxy.enabled = proxyEnabled_;
-            proxy.host = proxyHost_;
-            proxy.port = proxyPort_;
-            HttpClient::getInstance().setProxy(proxy);
+            const bool providerChangesSaved = changes.empty() ||
+                keyStore.applyChangesAndSave(changes, kConfigFile);
+            if (!providerChangesSaved) {
+                Gui::log("[AI Chat] provider settings were not saved");
+                for (ProviderConfigChange& change : changes) {
+                    secureClearString(change.config.apiKey);
+                }
+            } else {
+                for (ProviderConfigChange& change : changes) {
+                    if (AIProvider* provider = registry.getProvider(
+                            change.providerName)) {
+                        if (change.remove) {
+                            ProviderConfig cleared;
+                            cleared.baseUrl = provider->getDefaultBaseUrl();
+                            provider->configure(cleared);
+                        } else {
+                            provider->configure(change.config);
+                        }
+                        if (change.providerName == currentProvider_) {
+                            currentModel_ = provider->getConfig().model;
+                        }
+                    }
+                    secureClearString(change.config.apiKey);
+                }
 
-            // Persist general AI settings to ai_settings.json.
-            settings.systemPrompt = systemPromptBuf;
-            settings.tokenLimit = tokenLimitBuf;
-            settings.executionTimeout = executionTimeoutBuf;
-            settings.maxAgentSteps = maxAgentStepsBuf;
-            settings.maxToolCallsPerTurn = maxToolCallsPerTurnBuf;
-            settings.autoApproveWrites = autoApproveWritesBuf;
-            // Guard against an accidentally-cleared prompt: saving an
-            // empty string would leave the AI without guidance, so fall
-            // back to the shipped default. The user can still explicitly
-            // customise it by typing something other than empty.
-            if (settings.systemPrompt.empty()) {
-                settings.systemPrompt = kDefaultSystemPrompt;
+                // Apply proxy configuration to the HTTP client singleton.
+                ProxyConfig proxy;
+                proxy.enabled = settingsDraft_.proxyEnabled;
+                proxy.host = settingsDraft_.proxyHost;
+                proxy.port = settingsDraft_.proxyPort;
+                HttpClient::getInstance().setProxy(proxy);
+
+                // Persist general AI settings to ai_settings.json.
+                AiSettingsData settings = AiSettings::getInstance().get();
+                settings.systemPrompt = settingsDraft_.systemPrompt;
+                settings.tokenLimit = settingsDraft_.tokenLimit;
+                settings.executionTimeout = settingsDraft_.executionTimeout;
+                settings.maxAgentSteps = settingsDraft_.maxAgentSteps;
+                settings.maxToolCallsPerTurn =
+                    settingsDraft_.maxToolCallsPerTurn;
+                settings.autoApproveWrites = settingsDraft_.autoApproveWrites;
+                if (settings.systemPrompt.empty()) {
+                    settings.systemPrompt = kDefaultSystemPrompt;
+                }
+                settings.proxy = proxy;
+                AiSettings::getInstance().set(settings);
+                ToolExecutor::getInstance().setExecutionTimeout(
+                    settings.executionTimeout);
+                session_.setSystemPrompt(settings.systemPrompt);
+                session_.setTokenLimit(settings.tokenLimit);
+                maxAgentSteps_ = settings.maxAgentSteps;
+                maxToolCallsPerTurn_ = settings.maxToolCallsPerTurn;
+
+                Gui::log("[AI Chat] settings saved");
+                settingsDraft_.clear();
+                showSettings_ = false;
+                ImGui::CloseCurrentPopup();
             }
-            settings.proxy = proxy;
-            AiSettings::getInstance().set(settings);
-            // Apply live.
-            ToolExecutor::getInstance().setExecutionTimeout(settings.executionTimeout);
-            // Push the updated system prompt + token limit into the live
-            // ChatSession so the next outgoing request uses them without
-            // needing to restart the window. Without this, AiSettings
-            // was saved to disk but session_ kept its original values.
-            session_.setSystemPrompt(settings.systemPrompt);
-            session_.setTokenLimit(settings.tokenLimit);
-            maxAgentSteps_ = settings.maxAgentSteps;
-            maxToolCallsPerTurn_ = settings.maxToolCallsPerTurn;
-
-            Gui::log("[AI Chat] settings saved");
-            showSettings_ = false;
-            systemPromptLoaded = false;   // reload fresh buffers on next open
-            numericSettingsLoaded = false;
-            ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120.0f, 32.0f))) {
         // Drop in-memory edits; next open reloads from ApiKeyStore.
-        settingsBuffers_.clear();
+        settingsDraft_.clear();
         showSettings_ = false;
-        systemPromptLoaded = false;
-        numericSettingsLoaded = false;
         ImGui::CloseCurrentPopup();
     }
 
@@ -414,12 +454,53 @@ void ChatWindow::drawSettingsPanel() {
 }
 
 void ChatWindow::drawProviderSettings(const std::string& providerName) {
-    SettingsBuffer& buf = settingsBuffers_[providerName];
+    ProviderSettingsDraft& buf = settingsDraft_.provider(providerName);
 
     // ---- API key (masked by default, reveal toggle, AC 10.1) ----------
     ImGui::Text("API Key:");
     ImGui::SameLine();
     ImGui::Checkbox(("Show##" + providerName).c_str(), &buf.showApiKey);
+    if (buf.wasConfigured && !buf.forgetRequested) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(("Forget saved key##" + providerName).c_str())) {
+            secureClearMemory(buf.apiKey, sizeof(buf.apiKey));
+            secureClearMemory(buf.baseUrl, sizeof(buf.baseUrl));
+            secureClearMemory(buf.model, sizeof(buf.model));
+            secureClearMemory(buf.apiVersion, sizeof(buf.apiVersion));
+            buf.contextWindowTokens = 0;
+            buf.endpointTrusted = false;
+            buf.showApiKey = false;
+            buf.dirty = true;
+            buf.forgetRequested = true;
+            buf.validationError.clear();
+        }
+    }
+
+    if (buf.forgetRequested) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::Warning);
+        ImGui::TextUnformatted("Saved provider configuration will be removed on Save.");
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton(("Undo##forget_" + providerName).c_str())) {
+            ProviderConfig config;
+            if (ApiKeyStore::getInstance().loadConfig(providerName, config)) {
+                buf.clear();
+                buf.wasConfigured = true;
+                copyIntoBuf(buf.apiKey, config.apiKey);
+                copyIntoBuf(buf.baseUrl, config.baseUrl);
+                copyIntoBuf(buf.model, config.model);
+                copyIntoBuf(buf.apiVersion, config.apiVersion);
+                buf.contextWindowTokens = config.contextWindowTokens;
+                if (AIProvider* provider =
+                        ProviderRegistry::getInstance().getProvider(providerName)) {
+                    buf.endpointTrusted =
+                        isProviderEndpointTrusted(*provider, config);
+                }
+            }
+            secureClearString(config.apiKey);
+        }
+        return;
+    }
+
     const ImGuiInputTextFlags keyFlags =
         buf.showApiKey ? 0 : ImGuiInputTextFlags_Password;
     ImGui::SetNextItemWidth(-1.0f);
@@ -434,12 +515,35 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
     if (ImGui::InputText(("##" + providerName + "_url").c_str(),
                          buf.baseUrl, sizeof(buf.baseUrl))) {
         buf.dirty = true;
+        if (AIProvider* provider =
+                ProviderRegistry::getInstance().getProvider(providerName)) {
+            buf.endpointTrusted =
+                isDefaultProviderEndpoint(*provider, buf.baseUrl);
+        } else {
+            buf.endpointTrusted = false;
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button(("Reset##" + providerName).c_str())) {
         if (AIProvider* p = ProviderRegistry::getInstance().getProvider(providerName)) {
             copyIntoBuf(buf.baseUrl, p->getDefaultBaseUrl());
+            buf.endpointTrusted = true;
             buf.dirty = true;
+        }
+    }
+
+    if (AIProvider* provider =
+            ProviderRegistry::getInstance().getProvider(providerName)) {
+        if (!isDefaultProviderEndpoint(*provider, buf.baseUrl)) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::Warning);
+            ImGui::TextWrapped("Custom endpoint: %s", buf.baseUrl);
+            ImGui::PopStyleColor();
+            if (ImGui::Checkbox(("Trust this endpoint##" + providerName).c_str(),
+                                &buf.endpointTrusted)) {
+                buf.dirty = true;
+            }
+        } else {
+            buf.endpointTrusted = true;
         }
     }
 
@@ -449,6 +553,21 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
     if (ImGui::InputText(("##" + providerName + "_model").c_str(),
                          buf.model, sizeof(buf.model))) {
         buf.dirty = true;
+    }
+
+    ImGui::Text("Context window:");
+    ImGui::SetNextItemWidth(160.0f);
+    if (ImGui::InputInt(("##" + providerName + "_context").c_str(),
+                        &buf.contextWindowTokens, 0, 0)) {
+        buf.contextWindowTokens =
+            std::clamp(buf.contextWindowTokens, 0, 2000000);
+        buf.dirty = true;
+    }
+    ImGui::SameLine();
+    if (AIProvider* provider =
+            ProviderRegistry::getInstance().getProvider(providerName)) {
+        ImGui::TextDisabled("default: %d",
+                            provider->getCapabilities().maxContextTokens);
     }
 
     // ---- API version (Anthropic only) ---------------------------------
@@ -482,6 +601,8 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
         buf.validationError = "Endpoint URL is required when an API key is set.";
     } else if (!isHttpsUrl(urlStr)) {
         buf.validationError = "Endpoint URL must begin with https://";
+    } else if (!buf.endpointTrusted) {
+        buf.validationError = "Custom endpoint must be explicitly trusted.";
     }
 
     if (!buf.validationError.empty()) {
@@ -493,8 +614,11 @@ void ChatWindow::drawProviderSettings(const std::string& providerName) {
 
 bool ChatWindow::validateSettings() {
     bool allOk = true;
-    for (auto& kv : settingsBuffers_) {
-        const SettingsBuffer& buf = kv.second;
+    for (auto& kv : settingsDraft_.providers) {
+        const ProviderSettingsDraft& buf = kv.second;
+        if (buf.forgetRequested) {
+            continue;
+        }
         const std::string apiKeyStr = buf.apiKey;
         const std::string urlStr = buf.baseUrl;
         // Skip rows the user never touched — tabs for other providers
@@ -520,6 +644,13 @@ bool ChatWindow::validateSettings() {
             Gui::log(
                 "[AI Chat] cannot save: provider '%s' endpoint must be https:// (got: %s)",
                 kv.first.c_str(), urlStr.c_str());
+            allOk = false;
+            continue;
+        }
+        if (!buf.endpointTrusted) {
+            Gui::log(
+                "[AI Chat] cannot save: provider '%s' custom endpoint is not trusted",
+                kv.first.c_str());
             allOk = false;
         }
     }

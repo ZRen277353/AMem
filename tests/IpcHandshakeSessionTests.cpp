@@ -268,6 +268,20 @@ void testMalformedAndUnknownCapabilitiesRejected() {
         json({{"client_name", ""},
               {"requested_capabilities", json::array({"Observe"})}})
             .dump());
+    runInvalidHelloCase(
+        L"unknown-field",
+        json({{"client_name", "AMem.Tests"},
+              {"requested_capabilities", json::array({"Observe"})},
+              {"unexpected", true}})
+            .dump());
+
+    std::string deepHello =
+        "{\"client_name\":\"AMem.Tests\",\"requested_capabilities\":[\"Observe\"],\"nested\":";
+    deepHello.append(17u, '[');
+    deepHello += "null";
+    deepHello.append(17u, ']');
+    deepHello.push_back('}');
+    runInvalidHelloCase(L"deep-json", deepHello);
 }
 
 void testRejectedClientDrainIsBounded() {

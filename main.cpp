@@ -1,4 +1,4 @@
-#include "socket/client_singleton.h"
+#include "mem/SystemMemService.h"
 #include "imgui/imgui.h"
 #include "imgui/backends/imgui_impl_win32.h"
 #include "imgui/backends/imgui_impl_dx12.h"
@@ -139,7 +139,14 @@ int main(int, char**)
     // Close the managed device session while AppContext and all socket
     // consumers are still alive. The socket singleton destructor only has
     // to release raw clients and never re-enters process cleanup.
-    DisconnectMultiPort();
+    auto& memService = Mem::getSystemMemService();
+    const auto disconnectResult = memService.disconnect(
+        memService.captureContext(false));
+    if (!disconnectResult.ok()) {
+        Gui::log("device disconnect failed [%s]: %s",
+                 Mem::errorCodeName(disconnectResult.error().code),
+                 disconnectResult.error().message.c_str());
+    }
 
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();

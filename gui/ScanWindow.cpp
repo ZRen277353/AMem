@@ -33,6 +33,60 @@ ScanWindow::~ScanWindow()
     addressListRefreshThread.stop();
 }
 
+bool ScanWindow::readTargetMemory(
+    uint64_t address, uint32_t size,
+    std::vector<unsigned char>& bytes,
+    Mem::MemoryReadChannel channel,
+    Mem::Error* error) {
+    Mem::MemoryReadRequest request;
+    request.address = address;
+    request.size = size;
+    request.channel = channel;
+    auto response = memService_.readMemory(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        bytes.clear();
+        if (error) *error = response.error();
+        return false;
+    }
+    bytes = std::move(response.value().bytes);
+    return true;
+}
+
+bool ScanWindow::readTargetMemoryBatch(
+    const std::vector<Mem::MemoryReadRequest>& requests,
+    std::vector<Mem::MemoryBlock>& blocks,
+    Mem::MemoryReadChannel channel,
+    Mem::Error* error) {
+    Mem::MemoryBatchReadRequest request;
+    request.items = requests;
+    request.channel = channel;
+    auto response = memService_.readMemoryBatch(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        blocks.clear();
+        if (error) *error = response.error();
+        return false;
+    }
+    blocks = std::move(response.value().items);
+    return true;
+}
+
+bool ScanWindow::writeTargetMemory(
+    uint64_t address, const std::vector<unsigned char>& bytes,
+    Mem::Error* error) {
+    Mem::MemoryWriteRequest request;
+    request.address = address;
+    request.bytes = bytes;
+    auto response = memService_.writeMemory(
+        memService_.captureContext(true), request);
+    if (!response.ok()) {
+        if (error) *error = response.error();
+        return false;
+    }
+    return true;
+}
+
 void ScanWindow::requestScanCancellation()
 {
     scanCancelled = true;

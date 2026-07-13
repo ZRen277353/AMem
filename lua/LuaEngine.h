@@ -20,6 +20,11 @@ extern "C" {
 #include <functional>
 #include <mutex>
 
+namespace Mem {
+class IMemService;
+struct OperationContext;
+}
+
 /**
  * LuaJIT引擎核心类
  * 单例模式，管理Lua状态机和脚本执行
@@ -34,7 +39,7 @@ public:
     LuaEngine& operator=(const LuaEngine&) = delete;
 
     // 初始化和清理
-    bool Initialize();
+    bool Initialize(Mem::IMemService& memService);
     void Shutdown();
 
     // 脚本执行
@@ -46,7 +51,8 @@ public:
     bool ExecuteStringCapture(const std::string& code,
                               const std::string& chunkName,
                               std::string& output,
-                              int timeoutMs = 0);
+                              int timeoutMs = 0,
+                              const Mem::OperationContext* context = nullptr);
 
     // 脚本管理
     bool ReloadScript(const std::string& name);
@@ -102,5 +108,6 @@ private:
     
     // 线程安全
     mutable std::mutex mutex;
+    Mem::IMemService* memService_ = nullptr;
 };
 

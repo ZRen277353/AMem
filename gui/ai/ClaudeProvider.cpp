@@ -65,11 +65,11 @@ json parseJsonOr(const std::string& text, const json& fallback) {
     if (text.empty()) {
         return fallback;
     }
-    try {
-        return json::parse(text);
-    } catch (...) {
-        return fallback;
-    }
+    json parsed;
+    std::string error;
+    return parseToolArgumentJson(text, parsed, error)
+        ? parsed
+        : fallback;
 }
 
 const json* objectMember(const json& object, const char* key) {
@@ -177,8 +177,9 @@ ProviderError mapError(const HttpResponse& http, const std::string& body) {
     // Try to extract Anthropic's error envelope:
     //   { "type": "error", "error": { "type": "...", "message": "..." } }
     std::string detail;
-    try {
-        json j = json::parse(body);
+    json j;
+    std::string parseError;
+    if (parseProviderResponseJson(body, j, parseError)) {
         if (j.is_object() && j.contains("error") && j["error"].is_object()) {
             const auto& e = j["error"];
             if (e.contains("type") && e["type"].is_string()) {
@@ -188,8 +189,6 @@ ProviderError mapError(const HttpResponse& http, const std::string& body) {
                 detail = e["message"].get<std::string>();
             }
         }
-    } catch (...) {
-        // Fall through; use http.errorMessage below.
     }
 
     switch (http.statusCode) {
@@ -259,9 +258,8 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
     if (eventData.empty()) return;
 
     json ev;
-    try {
-        ev = json::parse(eventData);
-    } catch (...) {
+    std::string parseError;
+    if (!parseProviderEventJson(eventData, ev, parseError)) {
         // Anthropic sometimes sends ping events with empty payload; safely ignore.
         return;
     }
@@ -426,7 +424,9 @@ const ProviderConfig& ClaudeProvider::getConfig() const {
 std::string ClaudeProvider::buildRequestBody(const CompletionRequest& request) {
     json root = json::object();
     root["model"]      = request.model.empty() ? config_.model : request.model;
-    root["max_tokens"] = kDefaultMaxTokens;
+    root["max_tokens"] = request.maxOutputTokens > 0
+        ? request.maxOutputTokens
+        : kDefaultMaxTokens;
     root["stream"]     = request.stream;
 
     // 1. Hoist every System-role message into the top-level "system" field.
@@ -523,11 +523,10 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
     }
 
     json j;
-    try {
-        j = json::parse(body);
-    } catch (...) {
+    std::string parseError;
+    if (!parseProviderResponseJson(body, j, parseError)) {
         out.error.category = ErrorCategory::InvalidResponse;
-        out.error.message  = "failed to parse response JSON";
+        out.error.message  = "failed to parse response JSON: " + parseError;
         return out;
     }
 

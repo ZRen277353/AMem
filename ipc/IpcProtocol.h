@@ -11,6 +11,7 @@ constexpr uint32_t kMagic = 0x4D454D41u; // "AMEM" on the wire.
 constexpr uint16_t kVersionMajor = 1;
 constexpr uint16_t kVersionMinor = 0;
 constexpr size_t kHeaderSize = 24;
+constexpr uint32_t kMaxHandshakePayloadBytes = 16u * 1024u;
 constexpr uint32_t kMaxRequestPayloadBytes = 1u * 1024u * 1024u;
 constexpr uint32_t kMaxResponsePayloadBytes = 4u * 1024u * 1024u;
 constexpr uint32_t kMaxFramePayloadBytes = kMaxResponsePayloadBytes;

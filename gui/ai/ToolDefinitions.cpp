@@ -198,10 +198,12 @@ std::string execLuaExecute(const std::string& argsJson,
 // terminate the raw string early.
 constexpr const char* kSchemaMemoryRead = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "size": {
@@ -215,10 +217,12 @@ constexpr const char* kSchemaMemoryRead = R"JSON({
 
 constexpr const char* kSchemaMemoryWrite = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address", "data_hex"],
   "properties": {
     "address": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "data_hex": {
@@ -232,14 +236,17 @@ constexpr const char* kSchemaMemoryWrite = R"JSON({
 
 constexpr const char* kSchemaScanStart = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["mode"],
   "properties": {
     "mode": {
       "type": "string",
+      "enum": ["exact", "greater", "less", "between", "unknown"],
       "description": "exact, greater, less, between, or unknown"
     },
     "data_type": {
       "type": "string",
+      "enum": ["byte", "word", "dword", "qword", "xor", "float", "double"],
       "description": "byte, word, dword, qword, xor, float, or double"
     },
     "value": {
@@ -256,14 +263,17 @@ constexpr const char* kSchemaScanStart = R"JSON({
     },
     "memory_type": {
       "type": "string",
+      "enum": ["all", "anonymous", "c_alloc", "c_heap", "c_data", "c_bss", "java_heap", "java", "stack", "code_app", "code_system", "video", "ashmem", "bad", "other"],
       "description": "all, anonymous, c_alloc, c_heap, c_data, c_bss, java_heap, java, stack, code_app, code_system, video, ashmem, bad, or other"
     },
     "start": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Optional explicit 0x-prefixed start address"
     },
     "end": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Optional explicit 0x-prefixed end address"
     }
   }
@@ -271,6 +281,7 @@ constexpr const char* kSchemaScanStart = R"JSON({
 
 constexpr const char* kSchemaScanRefine = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["scan_epoch", "mode", "data_type"],
   "properties": {
     "scan_epoch": {
@@ -279,10 +290,12 @@ constexpr const char* kSchemaScanRefine = R"JSON({
     },
     "mode": {
       "type": "string",
+      "enum": ["exact", "greater", "less", "between", "increased", "increased_by", "decreased", "decreased_by", "changed", "unchanged"],
       "description": "exact, greater, less, between, increased, increased_by, decreased, decreased_by, changed, or unchanged"
     },
     "data_type": {
       "type": "string",
+      "enum": ["byte", "word", "dword", "qword", "xor", "float", "double"],
       "description": "Must match the active scan session"
     },
     "value": {
@@ -296,6 +309,7 @@ constexpr const char* kSchemaScanRefine = R"JSON({
 
 constexpr const char* kSchemaScanResults = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["scan_epoch"],
   "properties": {
     "scan_epoch": {
@@ -317,6 +331,7 @@ constexpr const char* kSchemaScanResults = R"JSON({
 
 constexpr const char* kSchemaScanClear = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["scan_epoch"],
   "properties": {
     "scan_epoch": {
@@ -328,11 +343,13 @@ constexpr const char* kSchemaScanClear = R"JSON({
 
 constexpr const char* kSchemaEmptyObject = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "properties": {}
 })JSON";
 
 constexpr const char* kSchemaDriverInitialize = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["card"],
   "properties": {
     "card": {
@@ -346,14 +363,17 @@ constexpr const char* kSchemaDriverInitialize = R"JSON({
 
 constexpr const char* kSchemaMemoryReadValue = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "data_type": {
       "type": "string",
+      "enum": ["byte", "word", "dword", "qword", "xor", "float", "double"],
       "description": "byte, word, dword, qword, xor, float, or double"
     }
   }
@@ -361,10 +381,12 @@ constexpr const char* kSchemaMemoryReadValue = R"JSON({
 
 constexpr const char* kSchemaMemoryWriteValue = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address", "value"],
   "properties": {
     "address": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Memory address as an explicit 0x-prefixed hexadecimal string"
     },
     "value": {
@@ -372,6 +394,7 @@ constexpr const char* kSchemaMemoryWriteValue = R"JSON({
     },
     "data_type": {
       "type": "string",
+      "enum": ["byte", "word", "dword", "qword", "xor", "float", "double"],
       "description": "byte, word, dword, qword, xor, float, or double"
     }
   }
@@ -379,6 +402,7 @@ constexpr const char* kSchemaMemoryWriteValue = R"JSON({
 
 constexpr const char* kSchemaListModules = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "filter": {
       "type": "string",
@@ -399,6 +423,7 @@ constexpr const char* kSchemaListModules = R"JSON({
 
 constexpr const char* kSchemaModuleResolve = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["module_name"],
   "properties": {
     "module_name": {
@@ -412,6 +437,7 @@ constexpr const char* kSchemaModuleResolve = R"JSON({
 
 constexpr const char* kSchemaPointerResolve = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["module_name", "base_offset"],
   "properties": {
     "module_name": {
@@ -422,12 +448,16 @@ constexpr const char* kSchemaPointerResolve = R"JSON({
     },
     "base_offset": {
       "type": "string",
+      "pattern": "^0[xX][0-9A-Fa-f]+$",
       "description": "Explicit 0x-prefixed offset from the module base"
     },
     "offsets": {
       "type": "array",
       "description": "Pointer offsets as explicit 0x-prefixed strings",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string",
+        "pattern": "^0[xX][0-9A-Fa-f]+$"
+      },
       "maxItems": 1024
     },
     "deref_final": {
@@ -439,6 +469,7 @@ constexpr const char* kSchemaPointerResolve = R"JSON({
 
 constexpr const char* kSchemaDisassemble = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
@@ -457,6 +488,7 @@ constexpr const char* kSchemaDisassemble = R"JSON({
 
 constexpr const char* kSchemaBreakpointSet = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
@@ -479,6 +511,7 @@ constexpr const char* kSchemaBreakpointSet = R"JSON({
 
 constexpr const char* kSchemaBreakpointAddress = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
@@ -491,6 +524,7 @@ constexpr const char* kSchemaBreakpointAddress = R"JSON({
 
 constexpr const char* kSchemaBreakpointHits = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["address"],
   "properties": {
     "address": {
@@ -508,6 +542,7 @@ constexpr const char* kSchemaBreakpointHits = R"JSON({
 
 constexpr const char* kSchemaSymbolResolve = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["module_name", "symbol_name"],
   "properties": {
     "module_name": {
@@ -527,6 +562,7 @@ constexpr const char* kSchemaSymbolResolve = R"JSON({
 
 constexpr const char* kSchemaSymbolList = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["module_name"],
   "properties": {
     "module_name": {
@@ -555,6 +591,7 @@ constexpr const char* kSchemaSymbolList = R"JSON({
 
 constexpr const char* kSchemaLuaExecute = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["code"],
   "properties": {
     "code": {
@@ -574,6 +611,7 @@ constexpr const char* kSchemaLuaExecute = R"JSON({
 
 constexpr const char* kSchemaOpenProcess = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "required": ["pid"],
   "properties": {
     "pid": {
@@ -591,6 +629,7 @@ constexpr const char* kSchemaOpenProcess = R"JSON({
 
 constexpr const char* kSchemaProcessList = R"JSON({
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "filter": {
       "type": "string",

@@ -61,10 +61,6 @@ std::vector<std::string> ProviderRegistry::getProviderNames() const {
 }
 
 void ProviderRegistry::initBuiltinProviders() {
-    // TODO: populate in tasks 3.1 - 3.3 once the concrete provider classes
-    // (OpenAIProvider / ClaudeProvider / DeepSeekProvider) are implemented.
-    // The __has_include guards above let this method light up automatically
-    // as each provider header is added, without needing further edits here.
 #ifdef AI_HAS_OPENAI_PROVIDER
     {
         auto provider = std::make_unique<OpenAIProvider>();

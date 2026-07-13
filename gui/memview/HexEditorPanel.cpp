@@ -3,7 +3,7 @@
 #include "../Gui.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
+#include "../../mem/IMemService.h"
 #include <algorithm>
 #include <cstdint>
 #include <sstream>
@@ -102,7 +102,9 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
         viewSize = pageSize;
         buffer.resize(viewSize);
 
-        if (!ReadProcessMemoryBytes(viewAddress, (uint32_t)viewSize, buffer, PORT_DEBUG)) {
+        if (!readTargetMemory(
+                viewAddress, static_cast<uint32_t>(viewSize), buffer,
+                Mem::MemoryReadChannel::Background)) {
             std::fill(buffer.begin(), buffer.end(), 0);
             Gui::log("读取历史地址失败: 0x%llX", (unsigned long long)historyAddr);
         }
@@ -575,7 +577,20 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
             
             if (!parseHexStrict(baseOffsetBuf, baseOff)) {
                 Gui::log("无效的基址偏移: %s", baseOffsetBuf);
-            } else if (ResolveModuleOffsetChain(addr, moduleNameBuf, baseOff, offsetChain, derefFinal)) {
+            } else {
+                Mem::PointerResolveRequest request;
+                request.moduleName = moduleNameBuf;
+                request.baseOffset = baseOff;
+                request.offsets = offsetChain;
+                request.dereferenceFinal = derefFinal;
+                auto response = memService_.resolvePointer(
+                    memService_.captureContext(true), request);
+                if (!response.ok()) {
+                    Gui::log("解析失败 [%s]: %s",
+                             Mem::errorCodeName(response.error().code),
+                             response.error().message.c_str());
+                } else {
+                addr = response.value().address;
                 jumpToAddress(addr);
                 
                 // 构建日志信息
@@ -590,8 +605,7 @@ void MemoryViewerWindow::drawMemoryViewerPanel()
                 logMsg += " = 0x";
                 logMsg += resolvedAddrStr;
                 Gui::log("%s", logMsg.c_str());
-            } else {
-                Gui::log("解析失败 (模块未找到或读取错误)");
+                }
             }
         }
         
@@ -848,7 +862,9 @@ void MemoryViewerWindow::drawMemoryHexEditor()
                 // 读取下一页数据
                 uint64_t nextPageAddr = safeNextPageAddr;
                 std::vector<unsigned char> nextPageData;
-                if (ReadProcessMemoryBytes(nextPageAddr, pageSize, nextPageData, PORT_DEBUG)) {
+                if (readTargetMemory(
+                        nextPageAddr, static_cast<uint32_t>(pageSize),
+                        nextPageData, Mem::MemoryReadChannel::Background)) {
                     // 复制数据到buffer末尾
                     std::copy(nextPageData.begin(), nextPageData.end(), buffer.begin() + currentSize);
                     viewSize = newSize;
@@ -872,7 +888,9 @@ void MemoryViewerWindow::drawMemoryHexEditor()
             
             // 限制最大缓冲区大小
             if (buffer.size() < pageSize * 10) {
-                if (ReadProcessMemoryBytes(prevPageAddr, pageSize, prevPageData, PORT_DEBUG)) {
+                if (readTargetMemory(
+                        prevPageAddr, static_cast<uint32_t>(pageSize),
+                        prevPageData, Mem::MemoryReadChannel::Background)) {
                     // 在buffer前面插入数据
                     buffer.insert(buffer.begin(), prevPageData.begin(), prevPageData.end());
                     viewAddress = prevPageAddr;

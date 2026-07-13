@@ -10,7 +10,13 @@ public:
     virtual ~IMemService() = default;
 
     virtual OperationContext captureContext(bool includeTarget) const = 0;
+    virtual ConnectionSnapshot connectionSnapshot() const = 0;
     virtual Result<Status> status(const OperationContext& context) = 0;
+    virtual Result<ConnectionReceipt> connect(
+        const OperationContext& context,
+        const ConnectRequest& request) = 0;
+    virtual Result<DisconnectReceipt> disconnect(
+        const OperationContext& context) = 0;
     virtual Result<DriverInitializationReceipt> initializeDriver(
         const OperationContext& context,
         const DriverInitializeRequest& request) = 0;
@@ -76,6 +82,9 @@ public:
     virtual Result<MemoryBlock> readMemory(
         const OperationContext& context,
         const MemoryReadRequest& request) = 0;
+    virtual Result<MemoryBatch> readMemoryBatch(
+        const OperationContext& context,
+        const MemoryBatchReadRequest& request) = 0;
     virtual Result<ScalarValue> readValue(
         const OperationContext& context,
         const ValueReadRequest& request) = 0;
@@ -85,6 +94,17 @@ public:
     virtual Result<WriteReceipt> writeValue(
         const OperationContext& context,
         const ValueWriteRequest& request) = 0;
+    virtual Result<FreezeMutationReceipt> freezeAdd(
+        const OperationContext& context,
+        const FreezeValueRequest& request) = 0;
+    virtual Result<FreezeMutationReceipt> freezeUpdate(
+        const OperationContext& context,
+        const FreezeValueRequest& request) = 0;
+    virtual Result<FreezeMutationReceipt> freezeRemove(
+        const OperationContext& context,
+        const FreezeAddressRequest& request) = 0;
+    virtual Result<FreezeMutationReceipt> freezeClear(
+        const OperationContext& context) = 0;
 };
 
 } // namespace Mem

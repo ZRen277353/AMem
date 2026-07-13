@@ -20,6 +20,14 @@ struct StoredProviderConfig {
     std::string baseUrl;
     std::string model;
     std::string apiVersion;
+    std::string trustedBaseUrl;
+    int contextWindowTokens = 0;
+};
+
+struct ProviderConfigChange {
+    std::string providerName;
+    bool remove = false;
+    ProviderConfig config;
 };
 
 // Meyer's singleton that keeps all AI provider configurations on disk in
@@ -59,6 +67,14 @@ public:
     bool hasConfig(const std::string& providerName) const;
     void removeConfig(const std::string& providerName);
     std::vector<std::string> getConfiguredProviders() const;
+
+    // Apply all provider updates/removals to a temporary encrypted snapshot.
+    // The live map changes only after the complete snapshot has been installed
+    // atomically, so an encryption or file error cannot leave UI and disk
+    // configuration out of sync.
+    bool applyChangesAndSave(
+        const std::vector<ProviderConfigChange>& changes,
+        const std::string& filepath = "ai_config.json");
 
     // Set of provider names whose entries failed decryption on load and
     // should be re-entered by the user (AC 10.5). The UI should consume

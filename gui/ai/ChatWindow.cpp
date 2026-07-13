@@ -10,6 +10,8 @@
 #include "DefaultSystemPrompt.h"
 #include "HttpClient.h"
 #include "ProviderRegistry.h"
+#include "ProviderResponseLimits.h"
+#include "ProviderTrust.h"
 #include "SessionManager.h"
 #include "ToolExecutor.h"
 #include "UIMessageQueue.h"
@@ -112,6 +114,10 @@ bool getProviderConfigProblem(const AIProvider* provider, const std::string& mod
         out = "Configure a valid https:// endpoint in Settings before sending";
         return true;
     }
+    if (!isProviderEndpointTrusted(*provider, cfg)) {
+        out = "Trust the custom endpoint in Settings before sending credentials";
+        return true;
+    }
     if (model.empty() && cfg.model.empty()) {
         out = "Enter a model name before sending";
         return true;
@@ -156,17 +162,18 @@ std::string validateAndNormalizeToolCalls(std::vector<ToolCall>& calls) {
         if (call.arguments.size() > kMaxToolCallArgumentsBytes) {
             return label + " arguments are too large";
         }
-        try {
-            const nlohmann::json parsed = nlohmann::json::parse(call.arguments);
-            if (!parsed.is_object()) {
-                return label + " arguments must be a JSON object";
-            }
-            call.arguments = parsed.dump();
-            if (call.arguments.size() > kMaxToolCallArgumentsBytes) {
-                return label + " normalized arguments are too large";
-            }
-        } catch (const nlohmann::json::exception& e) {
-            return label + " has invalid JSON arguments: " + e.what();
+        nlohmann::json parsed;
+        std::string parseError;
+        if (!parseToolArgumentJson(call.arguments, parsed, parseError)) {
+            return label + " has invalid or over-complex JSON arguments: " +
+                   parseError;
+        }
+        if (!parsed.is_object()) {
+            return label + " arguments must be a JSON object";
+        }
+        call.arguments = parsed.dump();
+        if (call.arguments.size() > kMaxToolCallArgumentsBytes) {
+            return label + " normalized arguments are too large";
         }
     }
     return {};
@@ -419,14 +426,6 @@ ChatWindow::ChatWindow()
     session_.setSystemPrompt(settingsSnapshot.systemPrompt);
     maxAgentSteps_ = settingsSnapshot.maxAgentSteps;
     maxToolCallsPerTurn_ = settingsSnapshot.maxToolCallsPerTurn;
-    proxyEnabled_ = settingsSnapshot.proxy.enabled;
-    proxyPort_    = settingsSnapshot.proxy.port;
-    {
-        const size_t n = std::min(settingsSnapshot.proxy.host.size(),
-                                  sizeof(proxyHost_) - 1);
-        if (n) std::memcpy(proxyHost_, settingsSnapshot.proxy.host.data(), n);
-        proxyHost_[n] = '\0';
-    }
 
     // Push every stored provider configuration into its live AIProvider
     // instance so they can start serving requests immediately.
@@ -886,10 +885,9 @@ void ChatWindow::drawToolbar() {
     ImGui::SameLine();
     ImGui::TextDisabled("[%s]", stateLabel(this, static_cast<int>(state_)));
 
-    // Live token usage. `estimateTokenCount()` is the same heuristic the
-    // session uses when deciding whether to truncate. Showing it here
-    // gives users an at-a-glance warning when they're approaching the
-    // configured ceiling so they can wipe history or raise the limit.
+    // Live retained-history usage. Provider dispatch applies the stricter
+    // provider/model cap plus tool-schema and output reserves to a request
+    // copy, so this gauge intentionally describes persistence retention only.
     const int usedTokens = session_.estimateTokenCount();
     const int tokenLimit = session_.getTokenLimit();
     ImGui::SameLine();
@@ -905,7 +903,8 @@ void ChatWindow::drawToolbar() {
     else if (frac >= 0.7f)  tokenColor = ColorScheme::Warning;
     else                    tokenColor = ColorScheme::Success;
     ImGui::PushStyleColor(ImGuiCol_Text, tokenColor);
-    ImGui::Text("tokens: %d / %d (%.0f%%)", usedTokens, tokenLimit, frac * 100.0f);
+    ImGui::Text("history: %d / %d (%.0f%%)",
+                usedTokens, tokenLimit, frac * 100.0f);
     ImGui::PopStyleColor();
 
     // YOLO indicator. Shows up only when auto-approve is on so the user
@@ -1772,13 +1771,13 @@ void ChatWindow::drawToolConfirmationModal() {
             const std::string& displayArguments =
                 toolCallArgumentsForDisplay(*pending);
             std::string prettyArgs = displayArguments;
-            try {
-                if (!displayArguments.empty()) {
-                    const auto parsed = nlohmann::json::parse(displayArguments);
+            if (!displayArguments.empty()) {
+                nlohmann::json parsed;
+                std::string parseError;
+                if (parseToolArgumentJson(
+                        displayArguments, parsed, parseError)) {
                     prettyArgs = parsed.dump(2);
                 }
-            } catch (const nlohmann::json::exception&) {
-                // keep raw
             }
             ImGui::TextUnformatted("Arguments:");
             ImGui::PushStyleColor(ImGuiCol_Text, ColorScheme::TextSecondary);
@@ -1980,6 +1979,7 @@ bool ChatWindow::dispatchAgentRequest(const std::vector<ChatMessage>& messages,
     request.modelOverride = modelName;
     request.failureDetail = failureDetail ? failureDetail : "";
     request.messages = messages;
+    request.userTokenLimit = session_.getTokenLimit();
     request.stream = true;
 
     streamingContent_.clear();

@@ -4,8 +4,6 @@
 #include "../AppContext.h"
 #include "../ColorScheme.h"
 #include "../../imgui/imgui.h"
-#include "../../socket/client_singleton.h"
-#include "../../socket/client.hpp"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -480,7 +478,7 @@ void BreakpointWindow::drawPCHitStatisticsInWindow(BreakpointDetailWindow& detai
                             ImGui::SetClipboardText(addrHexStr);
                         }
                         if (ImGui::MenuItem("在内存查看器中打开")) {
-                            navigateToAddress(stat.pc_address);
+                            navigateToAddress(stat.pc_address, memService_);
                             Gui::log("跳转到内存地址: 0x%llX", stat.pc_address);
                         }
                         ImGui::EndPopup();
@@ -685,7 +683,7 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
                 char pcStr[32];
                 snprintf(pcStr, sizeof(pcStr), "0x%llX", hit.programCounter);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(hit.programCounter);
+                    navigateToAddress(hit.programCounter, memService_);
                     Gui::log("跳转到PC地址: 0x%llX", hit.programCounter);
                 }
                 
@@ -719,13 +717,13 @@ void BreakpointWindow::drawDetailedHitInfoInWindow(BreakpointDetailWindow& detai
             ImGui::TableSetColumnIndex(1);
             if (ImGui::SmallButton("跳转到PC")) {
                 const auto& hit = bp.hitHistory[detailWindow.selectedHitIndex];
-                navigateToAddress(hit.programCounter);
+                navigateToAddress(hit.programCounter, memService_);
                 Gui::log("跳转到PC地址: 0x%llX", hit.programCounter);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("跳转到SP")) {
                 const auto& hit = bp.hitHistory[detailWindow.selectedHitIndex];
-                navigateToAddress(hit.stackPointer);
+                navigateToAddress(hit.stackPointer, memService_);
                 Gui::log("跳转到栈地址: 0x%llX", hit.stackPointer);
             }
             
@@ -762,7 +760,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, B
                     snprintf(regStr, sizeof(regStr), "0x%016llX", hit.registers[i]);
                     if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
                         if (hit.registers[i] != 0) {
-                            navigateToAddress(hit.registers[i]);
+                            navigateToAddress(hit.registers[i], memService_);
                             Gui::log("跳转到寄存器X%d地址: 0x%llX", i, hit.registers[i]);
                         }
                     }
@@ -777,7 +775,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, B
                         snprintf(regStr, sizeof(regStr), "0x%016llX", hit.registers[i + 1]);
                         if (ImGui::Selectable(regStr, false, ImGuiSelectableFlags_None)) {
                             if (hit.registers[i + 1] != 0) {
-                                navigateToAddress(hit.registers[i + 1]);
+                                navigateToAddress(hit.registers[i + 1], memService_);
                                 Gui::log("跳转到寄存器X%d地址: 0x%llX", i + 1, hit.registers[i + 1]);
                             }
                         }
@@ -795,7 +793,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, B
                 char spStr[32];
                 snprintf(spStr, sizeof(spStr), "0x%016llX", hit.stackPointer);
                 if (ImGui::Selectable(spStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(hit.stackPointer);
+                    navigateToAddress(hit.stackPointer, memService_);
                     Gui::log("跳转到栈指针地址: 0x%llX", hit.stackPointer);
                 }
                 if (ImGui::IsItemHovered()) {
@@ -808,7 +806,7 @@ void BreakpointWindow::drawRegisterInfoInWindow(const Mem::BreakpointHit& hit, B
                 char pcStr[32];
                 snprintf(pcStr, sizeof(pcStr), "0x%016llX", hit.programCounter);
                 if (ImGui::Selectable(pcStr, false, ImGuiSelectableFlags_None)) {
-                    navigateToAddress(hit.programCounter);
+                    navigateToAddress(hit.programCounter, memService_);
                     Gui::log("跳转到程序计数器地址: 0x%llX", hit.programCounter);
                 }
                 if (ImGui::IsItemHovered()) {
@@ -1340,7 +1338,7 @@ void BreakpointWindow::drawDisassemblyInWindow(uint64_t address, const uint8_t* 
             snprintf(addrStr, sizeof(addrStr), "0x%llX", instr.address);
             if (ImGui::Selectable(addrStr, false, ImGuiSelectableFlags_SpanAllColumns)) {
                 // 点击地址可以跳转到内存查看器
-                navigateToAddress(instr.address);
+                navigateToAddress(instr.address, memService_);
                 Gui::log("跳转到地址: 0x%llX", instr.address);
             }
             if (ImGui::IsItemHovered()) {
@@ -1359,7 +1357,7 @@ void BreakpointWindow::drawDisassemblyInWindow(uint64_t address, const uint8_t* 
                     ImGui::SetClipboardText(instr.fullInstruction.c_str());
                 }
                 if (ImGui::MenuItem("在内存查看器中打开")) {
-                    navigateToAddress(instr.address);
+                    navigateToAddress(instr.address, memService_);
                 }
                 ImGui::EndPopup();
             }
@@ -1447,7 +1445,9 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
     if (!cacheValid || shouldAutoRefresh) {
         // 从远程进程读取内存（使用调试端口进行自动刷新）
         std::vector<unsigned char> memoryData;
-        bool readSuccess = ReadProcessMemoryBytes(startAddress, totalSize, memoryData, PORT_DEBUG);
+        bool readSuccess = readTargetMemory(
+            startAddress, totalSize, memoryData,
+            Mem::MemoryReadChannel::Background);
         
         if (!readSuccess || memoryData.empty()) {
             // 读取失败，但如果有缓存，继续使用缓存
@@ -1566,7 +1566,7 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
                 ImGui::TextColored(ColorScheme::DisassemblyPC, "%s", addrDisplayStr.c_str());
             } else {
                 if (ImGui::Selectable(addrDisplayStr.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
-                    navigateToAddress(instr.address);
+                    navigateToAddress(instr.address, memService_);
                     Gui::log("跳转到地址: 0x%llX", instr.address);
                 }
             }
@@ -1592,7 +1592,7 @@ void BreakpointWindow::drawDisassemblyForPC(uint64_t pcAddress, int beforeCount,
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("在内存查看器中打开")) {
-                    navigateToAddress(instr.address);
+                    navigateToAddress(instr.address, memService_);
                 }
                 ImGui::EndPopup();
             }

@@ -15,6 +15,7 @@ CMD_CLOSECONNECTION      = 1
 CMD_TERMINATESERVER      = 2
 CMD_OPENPROCESS          = 3
 CMD_GETARCHITECTURE      = 21
+CMD_GETMEMTYPE           = 100
 CMD_READPROCESSMEMORY    = 9
 CMD_WRITEPROCESSMEMORY   = 10
 CMD_STOPPROCESS          = 226
@@ -180,7 +181,6 @@ class AMemClient:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
             s.connect((host, port))
-            s.settimeout(None)
             self._sock = s
             return True
         except OSError:
@@ -240,6 +240,11 @@ class AMemClient:
     def get_architecture(self) -> int:
         with self._lock:
             self._send_cmd(CMD_GETARCHITECTURE)
+            return struct.unpack("<B", self._recv_all(1))[0]
+
+    def get_mem_type(self) -> int:
+        with self._lock:
+            self._send_cmd(CMD_GETMEMTYPE)
             return struct.unpack("<B", self._recv_all(1))[0]
 
     def init_driver(self, card: str) -> tuple[int, str]:

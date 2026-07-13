@@ -18,17 +18,21 @@ enum class MultiPortConnectFailure {
     Main,
     Debug,
     Error,
+    Compatibility,
 };
 
 class MultiPortClientManager {
 public:
     using ResetStateCallback = std::function<void()>;
+    using ConnectionValidator =
+        std::function<bool(WindowsSocketClient& mainClient)>;
 
     MultiPortClientManager(DeviceSession& session,
                            IWindowsSocketOps& mainOps,
                            IWindowsSocketOps& debugOps,
                            IWindowsSocketOps& errorOps,
-                           ResetStateCallback resetState);
+                           ResetStateCallback resetState,
+                           ConnectionValidator validateConnection = {});
     ~MultiPortClientManager();
 
     MultiPortClientManager(const MultiPortClientManager&) = delete;
@@ -49,4 +53,5 @@ private:
     WindowsSocketClient debugClient_;
     WindowsSocketClient errorClient_;
     ResetStateCallback resetState_;
+    ConnectionValidator validateConnection_;
 };

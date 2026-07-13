@@ -2,9 +2,9 @@ name: Build AMem
 
 on:
   push:
-    branches: [ dev, WinGui, docking ]
+    branches: [ dev, NativeAgent, WinGui, docking ]
   pull_request:
-    branches: [ dev ]
+    branches: [ dev, NativeAgent ]
   workflow_dispatch:
 
 env:
@@ -30,11 +30,11 @@ jobs:
     - name: Setup Ninja
       uses: seanmiddleditch/gha-setup-ninja@v4
 
-    - name: Install capstone + keystone (static /MT)
+    - name: Install mandatory native dependencies (static /MT)
       # 反汇编(capstone)/汇编(keystone)核心库，静态链接进单 exe。
       # 用引号避免 bash 把 [feature] 当通配符；keystone 会编译其捆绑的 LLVM 后端，耗时较长。
       run: |
-        vcpkg install 'capstone[core,arm,arm64,x86,mips]:x64-windows-static' 'keystone:x64-windows-static'
+        vcpkg install 'capstone[core,arm,arm64,x86,mips]:x64-windows-static' 'keystone:x64-windows-static' 'openssl:x64-windows-static'
       shell: bash
 
     - name: Configure CMake (static capstone + keystone)
@@ -45,11 +45,17 @@ jobs:
           -DCMAKE_CXX_COMPILER="${{ runner.temp }}/llvm/bin/clang++.exe" \
           -Dcapstone_ROOT="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" \
           -Dkeystone_ROOT="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" \
+          -DOPENSSL_ROOT_DIR="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" \
+          -DENABLE_NATIVE_IPC=ON \
           -S . -B build -G Ninja
       shell: bash
 
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }}
+      shell: bash
+
+    - name: Run native test suite
+      run: ctest --test-dir build --build-config ${{ env.BUILD_TYPE }} --output-on-failure
       shell: bash
 
     - name: Show build output

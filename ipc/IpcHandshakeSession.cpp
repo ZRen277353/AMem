@@ -1,4 +1,5 @@
 #include "IpcHandshakeSession.h"
+#include "IpcJsonLimits.h"
 
 #include <nlohmann/json.hpp>
 
@@ -24,10 +25,24 @@ bool hasAsciiControl(const std::string& value) {
 bool parseHelloPayload(const std::string& payload,
                        HandshakeResult& result,
                        std::string& error) {
-    const json hello = json::parse(payload, nullptr, false);
-    if (hello.is_discarded() || !hello.is_object()) {
+    json hello;
+    if (!utils::parseBoundedJson(
+            payload, kHandshakeJsonLimits, hello, error)) {
+        return false;
+    }
+    if (!hello.is_object()) {
         error = "hello payload must be a JSON object";
         return false;
+    }
+
+    constexpr std::array<const char*, 3> allowedFields = {
+        "client_name", "client_version", "requested_capabilities"};
+    for (auto it = hello.begin(); it != hello.end(); ++it) {
+        if (std::find(allowedFields.begin(), allowedFields.end(), it.key()) ==
+            allowedFields.end()) {
+            error = "hello payload contains an unknown field";
+            return false;
+        }
     }
 
     const auto nameIt = hello.find("client_name");

@@ -1,4 +1,5 @@
 #include "socket/MultiPortClientManager.h"
+#include "socket/ServerHandshake.h"
 #include "tests/ScriptedSocketOps.h"
 
 #include <array>
@@ -33,6 +34,45 @@ bool allConnected(MultiPortClientManager& manager) {
            manager.GetClient(ManagedSocketPort::Error)->IsConnected();
 }
 
+bool receiveExact(SOCKET socketValue, char* buffer, int length) {
+    int receivedTotal = 0;
+    while (receivedTotal < length) {
+        const int received = ::recv(socketValue, buffer + receivedTotal,
+                                    length - receivedTotal, 0);
+        if (received <= 0) {
+            return false;
+        }
+        receivedTotal += received;
+    }
+    return true;
+}
+
+bool sendAll(SOCKET socketValue, const char* buffer, int length) {
+    int sentTotal = 0;
+    while (sentTotal < length) {
+        const int sent = ::send(socketValue, buffer + sentTotal,
+                                length - sentTotal, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        sentTotal += sent;
+    }
+    return true;
+}
+
+bool sendServerVersion(SOCKET socketValue, const std::string& identity) {
+    if (identity.size() > 255) {
+        return false;
+    }
+    const CeVersion version{
+        1, static_cast<unsigned char>(identity.size())};
+    return sendAll(socketValue,
+                   reinterpret_cast<const char*>(&version),
+                   static_cast<int>(sizeof(version))) &&
+           sendAll(socketValue, identity.data(),
+                   static_cast<int>(identity.size()));
+}
+
 void testSystemOpsThreePortLoopback() {
     auto& session = DeviceSession::GetInstance();
     resetSession(session);
@@ -40,7 +80,7 @@ void testSystemOpsThreePortLoopback() {
     auto& systemOps = GetSystemWindowsSocketOps();
     MultiPortClientManager manager(
         session, systemOps, systemOps, systemOps,
-        [&] { ++resetCalls; });
+        [&] { ++resetCalls; }, &AmemServerHandshake::Validate);
 
     SOCKET listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     expect(listener != INVALID_SOCKET,
@@ -77,6 +117,14 @@ void testSystemOpsThreePortLoopback() {
         }
 
         if (accepted.size() == 3) {
+            unsigned char command = 0;
+            if (!receiveExact(accepted[0],
+                              reinterpret_cast<char*>(&command),
+                              sizeof(command)) ||
+                command != CMD_GETVERSION ||
+                !sendServerVersion(accepted[0], "CHEATENGINE v2.0")) {
+                serverError = "three-port compatibility handshake failed";
+            }
             for (SOCKET client : accepted) {
                 char value = 0;
                 if (::recv(client, &value, sizeof(value), 0) != 0 &&
@@ -111,6 +159,100 @@ void testSystemOpsThreePortLoopback() {
            serverError.empty()
                ? "system Winsock manager should connect and close all three loopback streams"
                : serverError);
+}
+
+void runRejectedCompatibilityHandshake(const char* identity,
+                                       bool expectTimeout) {
+    auto& session = DeviceSession::GetInstance();
+    resetSession(session);
+    unsigned resetCalls = 0;
+    auto& systemOps = GetSystemWindowsSocketOps();
+    MultiPortClientManager manager(
+        session, systemOps, systemOps, systemOps,
+        [&] { ++resetCalls; }, &AmemServerHandshake::Validate);
+
+    SOCKET listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    expect(listener != INVALID_SOCKET,
+           "compatibility test listener should be created");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    expect(::bind(listener, reinterpret_cast<sockaddr*>(&address),
+                  sizeof(address)) != SOCKET_ERROR &&
+               ::listen(listener, 3) != SOCKET_ERROR,
+           "compatibility test listener should bind and listen");
+    int addressLength = sizeof(address);
+    expect(::getsockname(listener, reinterpret_cast<sockaddr*>(&address),
+                         &addressLength) != SOCKET_ERROR,
+           "compatibility test listener should expose its port");
+    const uint16_t port = ntohs(address.sin_port);
+
+    std::string serverError;
+    std::thread server([&] {
+        std::vector<SOCKET> accepted;
+        for (size_t index = 0; index < 3; ++index) {
+            SOCKET client = ::accept(listener, nullptr, nullptr);
+            if (client == INVALID_SOCKET) {
+                serverError = "compatibility test accept failed";
+                break;
+            }
+            accepted.push_back(client);
+        }
+
+        if (accepted.size() == 3) {
+            unsigned char command = 0;
+            if (!receiveExact(accepted[0],
+                              reinterpret_cast<char*>(&command),
+                              sizeof(command)) ||
+                command != CMD_GETVERSION) {
+                serverError = "compatibility test received an invalid command";
+            } else if (identity &&
+                       !sendServerVersion(accepted[0], identity)) {
+                serverError = "compatibility test failed to send version";
+            }
+
+            for (SOCKET client : accepted) {
+                char value = 0;
+                if (::recv(client, &value, sizeof(value), 0) != 0 &&
+                    serverError.empty()) {
+                    serverError =
+                        "rejected compatibility handshake should close every stream";
+                }
+            }
+        }
+        for (SOCKET client : accepted) {
+            ::closesocket(client);
+        }
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    const MultiPortConnectFailure failure = manager.Connect("127.0.0.1", port);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    server.join();
+    ::closesocket(listener);
+
+    expect(failure == MultiPortConnectFailure::Compatibility &&
+               !manager.IsConnected() && !allConnected(manager) &&
+               session.GetState() == DeviceSession::State::Disconnected &&
+               resetCalls == 1 && serverError.empty(),
+           serverError.empty()
+               ? "rejected server identity should roll back all three ports"
+               : serverError);
+    if (expectTimeout) {
+        expect(elapsed >= std::chrono::seconds(4) &&
+                   elapsed < std::chrono::seconds(15),
+               "silent handshake should fail at the default bounded I/O timeout");
+    }
+}
+
+void testIncompatibleServerIsRejected() {
+    runRejectedCompatibilityHandshake("MiniMem 1.0.0", false);
+}
+
+void testSilentServerTimesOutAndRollsBack() {
+    runRejectedCompatibilityHandshake(nullptr, true);
 }
 
 void testConnectAndDisconnectAllPorts() {
@@ -332,6 +474,10 @@ void testRepeatedLifecycleDoesNotReuseEndpoints() {
 int main() {
     const std::vector<std::pair<std::string, std::function<void()>>> tests = {
         {"system Winsock three-port loopback", &testSystemOpsThreePortLoopback},
+        {"incompatible server handshake rejection",
+         &testIncompatibleServerIsRejected},
+        {"silent server bounded handshake timeout",
+         &testSilentServerTimesOutAndRollsBack},
         {"connect and disconnect all ports", &testConnectAndDisconnectAllPorts},
         {"connection failure rollback", &testConnectionFailureRollsBackEarlierPorts},
         {"single-port poison and full reconnect", &testSinglePortPoisonRequiresFullReconnect},

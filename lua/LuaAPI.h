@@ -13,6 +13,10 @@ extern "C" {
 // 前向声明
 struct ImVec2;
 struct ImVec4;
+namespace Mem {
+class IMemService;
+struct OperationContext;
+}
 
 /**
  * Lua API绑定
@@ -21,7 +25,12 @@ struct ImVec4;
 class LuaAPI {
 public:
     // 注册所有API到Lua状态机
-    static void RegisterAll(lua_State* L);
+    static void RegisterAll(lua_State* L, Mem::IMemService& memService);
+    static Mem::IMemService& GetMemService(lua_State* L);
+    static Mem::OperationContext GetOperationContext(
+        lua_State* L, bool includeTarget);
+    static const Mem::OperationContext* BindOperationContext(
+        lua_State* L, const Mem::OperationContext* context);
 
     // ==================== 内存操作API ====================
     // 已移至 LuaAPI_Memory.h
