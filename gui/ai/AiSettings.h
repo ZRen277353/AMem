@@ -32,7 +32,7 @@ struct AiSettingsData {
     int executionTimeout = 30;   // seconds, clamped to [1, 300]
     int maxAgentSteps = 12;      // model/tool loop iterations, clamped to [1, 64]
     int maxToolCallsPerTurn = 16;// tool calls in one assistant turn, clamped to [1, 64]
-    int tokenLimit = 16000;      // clamped to [1000, 200000]
+    int tokenLimit = 16000;      // clamped to [1000, 1000000]
     std::string systemPrompt;    // prepended to every request
     ProxyConfig proxy;           // host / port / enabled
 

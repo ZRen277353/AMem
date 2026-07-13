@@ -32,12 +32,15 @@ public:
     const std::vector<ChatMessage>& getMessages() const;
     void clearHistory();
 
-    // System prompt (max 4000 chars, truncated silently per AC 8.2)
+    // Live copy of the global AiSettings prompt. It is never loaded from or
+    // saved to a session file (format v2).
+    // Maximum 4000 chars, truncated silently per AC 8.2.
     void setSystemPrompt(const std::string& prompt);
     std::string getSystemPrompt() const;
 
-    // Token management
-    // Default 16000, clamped to [1000, 200000] per AC 8.3
+    // Live copy of the global AiSettings token budget. It is never loaded
+    // from or saved to a session file (format v2).
+    // Default 800000, clamped to [1000, 1000000] per AC 8.3.
     void setTokenLimit(int limit);
     int getTokenLimit() const;
     int estimateTokenCount() const;
@@ -52,8 +55,8 @@ public:
     // Clear in-memory messages WITHOUT touching the persisted file or the
     // bound sessionFilePath_. Used when switching to a different chat
     // session where the current on-disk content must survive. The system
-    // prompt and token limit are preserved — those are per-window
-    // settings, not per-session content.
+    // prompt and token limit are preserved because AiSettings owns them
+    // globally; they are not per-session content.
     void resetInMemory();
 
     // Change the persisted file path (e.g. when switching sessions). The

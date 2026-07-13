@@ -251,6 +251,62 @@ void testChatSessionLoadAndInstallAreTransactional() {
            "first message should persist to the missing session path");
 }
 
+void testSessionSettingsRemainGlobal() {
+    TempDirectory temp("global-session-settings");
+    const auto legacy = temp.path() / "legacy-v1.json";
+    const auto legacyBudget = temp.path() / "legacy-v1-budget.json";
+    const auto migrated = temp.path() / "migrated-v2.json";
+
+    json legacyDocument = sessionDocument("legacy message");
+    legacyDocument["systemPrompt"] = json::array({"not", "a", "prompt"});
+    legacyDocument["tokenLimit"] = "not-a-token-limit";
+    writeText(legacy, legacyDocument.dump());
+
+    AI::ChatSession session;
+    session.setSystemPrompt("global prompt");
+    session.setTokenLimit(42000);
+    const auto loaded = session.load(legacy.string());
+    expect(loaded.status == PersistenceLoadStatus::Loaded &&
+               session.getSystemPrompt() == "global prompt" &&
+               session.getTokenLimit() == 42000 &&
+               session.getMessages().size() == 2,
+           "legacy session settings must be ignored without blocking message migration");
+
+    expect(session.save(migrated.string()),
+           "migrated session should save in the current format");
+    const json saved = json::parse(readText(migrated));
+    expect(saved.at("version") == 2 &&
+               !saved.contains("systemPrompt") &&
+               !saved.contains("tokenLimit"),
+           "session format v2 must not persist global prompt/token settings");
+
+    AI::ChatSession reloaded;
+    reloaded.setSystemPrompt("new global prompt");
+    reloaded.setTokenLimit(64000);
+    expect(reloaded.load(migrated.string()).status ==
+               PersistenceLoadStatus::Loaded &&
+               reloaded.getSystemPrompt() == "new global prompt" &&
+               reloaded.getTokenLimit() == 64000,
+           "switching to a v2 session must preserve the current global settings");
+
+    json budgetDocument = sessionDocument("unused");
+    budgetDocument["tokenLimit"] = AI::ChatSession::kMaxTokenLimit;
+    budgetDocument["messages"] = json::array({
+        {{"role", "user"}, {"content", std::string(3000, 'o')}},
+        {{"role", "assistant"}, {"content", std::string(3000, 'a')}},
+        {{"role", "user"}, {"content", "latest"}},
+    });
+    writeText(legacyBudget, budgetDocument.dump());
+
+    AI::ChatSession budgeted;
+    budgeted.setTokenLimit(AI::ChatSession::kMinTokenLimit);
+    expect(budgeted.load(legacyBudget.string()).status ==
+               PersistenceLoadStatus::Loaded &&
+               budgeted.getMessages().size() == 1 &&
+               budgeted.getMessages().front().content == "latest",
+           "session load must apply the live global token budget, not the legacy session field");
+}
+
 void testPersistenceFileLimit() {
     TempDirectory temp("file-limit");
     const auto oversized = temp.path() / "oversized.json";
@@ -370,11 +426,14 @@ void testRuntimeSessionPayloadLimit() {
         json document = sessionDocument("unused");
         document["tokenLimit"] = AI::ChatSession::kMaxTokenLimit;
         document["messages"] = json::array({
-            {{"role", "user"},
-             {"content", std::string(2u * AI::Limits::kMiB, 'o')}},
-            {{"role", "user"},
+            {{"role", "user"}, {"content", "old"}},
+            {{"role", "system"},
+             {"content", std::string(
+                 2u * AI::Limits::kMiB - 64u, 'o')}},
+            {{"role", "user"}, {"content", "new"}},
+            {{"role", "system"},
              {"content", std::string(7u * AI::Limits::kMiB, 'n')}},
-            {{"role", "assistant"},
+            {{"role", "system"},
              {"content", std::string(7u * AI::Limits::kMiB, 'a')}},
         });
         writeText(rejectedSource, document.dump());
@@ -386,18 +445,20 @@ void testRuntimeSessionPayloadLimit() {
     expect(!transactional.addMessage(chatMessage(
                AI::Role::Assistant,
                std::string(3u * AI::Limits::kMiB, 'x'))) &&
-               transactional.getMessages().size() == 3 &&
-               transactional.getMessages().front().content.front() == 'o',
+               transactional.getMessages().size() == 5 &&
+               transactional.getMessages().front().content == "old",
            "rejected latest-turn growth must preserve older conversation groups");
 
     {
         json document = sessionDocument("unused");
         document["tokenLimit"] = AI::ChatSession::kMaxTokenLimit;
         document["messages"] = json::array({
-            {{"role", "user"},
+            {{"role", "user"}, {"content", "old"}},
+            {{"role", "system"},
              {"content", std::string(7u * AI::Limits::kMiB, 'o')}},
             {{"role", "assistant"}, {"content", "old answer"}},
-            {{"role", "user"},
+            {{"role", "user"}, {"content", "new"}},
+            {{"role", "system"},
              {"content", std::string(7u * AI::Limits::kMiB, 'n')}},
         });
         writeText(source, document.dump());
@@ -411,11 +472,13 @@ void testRuntimeSessionPayloadLimit() {
                std::string(3u * AI::Limits::kMiB, 'r'))),
            "a new message should fit after evicting an old conversation group");
     const auto& retained = evicted.getMessages();
-    expect(retained.size() == 2 &&
+    expect(retained.size() == 3 &&
                retained[0].role == AI::Role::User &&
-               retained[0].content.front() == 'n' &&
-               retained[1].role == AI::Role::Assistant &&
-               retained[1].content.front() == 'r',
+               retained[0].content == "new" &&
+               retained[1].role == AI::Role::System &&
+               retained[1].content.front() == 'n' &&
+               retained[2].role == AI::Role::Assistant &&
+               retained[2].content.front() == 'r',
            "session payload eviction must remove the complete oldest conversation group");
 }
 
@@ -427,6 +490,7 @@ int main() {
         {"API key transactional load", testApiKeyLoadIsTransactional},
         {"settings transactional load", testSettingsLoadIsTransactional},
         {"chat session transactional load", testChatSessionLoadAndInstallAreTransactional},
+        {"global session settings ownership", testSessionSettingsRemainGlobal},
         {"persistence file limit", testPersistenceFileLimit},
         {"chat session load limits", testChatSessionLoadLimitsAreTransactional},
         {"runtime session payload limit", testRuntimeSessionPayloadLimit},

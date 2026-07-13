@@ -27,6 +27,8 @@ namespace AI {
 
 namespace {
 
+constexpr int kSessionFormatVersion = 2;
+
 // ---- Role <-> string helpers -----------------------------------------------
 
 const char* roleToString(Role r) {
@@ -671,9 +673,7 @@ bool ChatSession::saveBound() {
 
 bool ChatSession::saveUnlocked(const std::string& filepath) const {
     nlohmann::json root;
-    root["version"]      = 1;
-    root["systemPrompt"] = systemPrompt_;
-    root["tokenLimit"]   = tokenLimit_;
+    root["version"] = kSessionFormatVersion;
 
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& m : messages_) {
@@ -762,38 +762,26 @@ PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
     }
 
     std::vector<ChatMessage> loadedMessages;
-    std::string loadedPrompt = systemPrompt_;
-    int loadedTokenLimit = tokenLimit_;
     try {
         const nlohmann::json& root = document.document;
         if (!root.is_object()) {
             throw std::runtime_error("root is not a JSON object");
         }
 
-        const auto prompt = root.find("systemPrompt");
-        if (prompt != root.end()) {
-            if (!prompt->is_string()) {
-                throw std::runtime_error("systemPrompt must be a string");
+        const auto version = root.find("version");
+        if (version != root.end()) {
+            if (!version->is_number_integer()) {
+                throw std::runtime_error("session version must be an integer");
             }
-            loadedPrompt = prompt->get<std::string>();
-            if (loadedPrompt.size() >
-                static_cast<size_t>(kMaxSystemPromptChars)) {
-                loadedPrompt.resize(static_cast<size_t>(kMaxSystemPromptChars));
+            const int value = version->get<int>();
+            if (value < 1 || value > kSessionFormatVersion) {
+                throw std::runtime_error("unsupported session version");
             }
         }
 
-        const auto tokenLimit = root.find("tokenLimit");
-        if (tokenLimit != root.end()) {
-            if (!tokenLimit->is_number_integer()) {
-                throw std::runtime_error("tokenLimit must be an integer");
-            }
-            loadedTokenLimit = tokenLimit->get<int>();
-            if (loadedTokenLimit < kMinTokenLimit) {
-                loadedTokenLimit = kMinTokenLimit;
-            } else if (loadedTokenLimit > kMaxTokenLimit) {
-                loadedTokenLimit = kMaxTokenLimit;
-            }
-        }
+        // Version 1 stored systemPrompt/tokenLimit in every session. They
+        // are intentionally ignored during migration: AiSettings is the
+        // sole owner, and ChatWindow applies its global snapshot live.
 
         const auto messages = root.find("messages");
         if (messages != root.end()) {
@@ -845,8 +833,7 @@ PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
     }
 
     messages_ = std::move(loadedMessages);
-    systemPrompt_ = std::move(loadedPrompt);
-    tokenLimit_ = loadedTokenLimit;
+    truncateIfNeededUnlocked();
     sessionFilePath_ = filepath;
     return {PersistenceLoadStatus::Loaded, {}};
 }

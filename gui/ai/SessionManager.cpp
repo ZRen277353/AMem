@@ -159,17 +159,18 @@ PersistenceLoadResult SessionManager::init(
 
             // Try to peek at the message count so the sidebar shows a
             // meaningful badge immediately; non-fatal on parse failure.
-            try {
-                std::ifstream in(legacySessionFile, std::ios::binary);
-                if (in.is_open()) {
-                    nlohmann::json j;
-                    in >> j;
-                    if (j.is_object() && j.contains("messages") &&
-                        j["messages"].is_array()) {
-                        info.messageCount = static_cast<int>(j["messages"].size());
-                    }
-                }
-            } catch (...) { /* ignore */ }
+            JsonDocumentLoadResult legacyDocument =
+                loadJsonDocument(legacySessionFile);
+            if (legacyDocument.result.status == PersistenceLoadStatus::Loaded &&
+                legacyDocument.document.is_object() &&
+                legacyDocument.document.contains("messages") &&
+                legacyDocument.document["messages"].is_array()) {
+                const size_t count =
+                    legacyDocument.document["messages"].size();
+                info.messageCount = static_cast<int>(std::min(
+                    count,
+                    static_cast<size_t>(std::numeric_limits<int>::max())));
+            }
 
             const std::string destPath = pathForUnlocked(info.id);
             std::error_code mec;
