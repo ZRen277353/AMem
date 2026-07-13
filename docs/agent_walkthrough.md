@@ -124,13 +124,13 @@ provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请
 
 `postAsync()`：
 
-1. 注册 request id/cancellation token，增加 `inFlight_`。
+1. 回收上次已完成并可 join 的 worker，拒绝 shutdown 后的新请求。
 2. 复制 timeout/proxy 配置。
-3. 创建 detached worker。
+3. 注册 request id、cancellation token、transport stop hook 和 owned/joinable worker。
 4. cpp-httplib 发 HTTPS POST。
 5. `content_receiver` 累积原始响应，并把数据喂给 `SSEParser`。
-6. provider callback 拼接 content/tool calls。
-7. 完成时通过请求 callback 向 `UIMessageQueue` 投递。
+6. provider callback 拼接 content/tool calls，并向 `UIMessageQueue` 投递。
+7. callback 返回后标记 worker 完成；下次 dispatch 或 shutdown 才 join 并移除记录。
 
 后台线程不直接调用 ImGui，这是正确边界。
 
@@ -143,19 +143,20 @@ provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请
 
 局部 tool call 数量和 arguments 上限是在结果进入 `ChatWindow` 后才校验，不能替代网络层上限。
 
-### 3.3 HTTP 完成计数的时序
+### 3.3 HTTP 完成与回收时序
 
-每条结束路径当前是：
+每条结束路径现在是：
 
 ```text
-removeFromActive()
-  -> inFlight_--
-  -> completeSafely()
+completeSafely()
   -> provider callback
   -> UIMessageQueue::push()
+  -> callback returns
+  -> markRequestCompleted()
+  -> next dispatch/shutdown joins worker
 ```
 
-所以 `HttpClient::shutdown()` 观察到 `inFlight_ == 0` 时，最后一个完成回调可能仍在运行。这是 A-05 的具体来源。
+`HttpClient::shutdown()` 先禁止新 dispatch、设置全部 token 并调用每个 active client 的 best-effort `stop()`，随后 join 全部线程，因此不会在最后一个 provider callback 仍运行时返回。若 callback 自身误调用 shutdown，会返回 `false` 而不是 self-join；主退出路径检查该结果。静默 read 不保证被 `stop()` 立即打断，shutdown 可能等待配置的 I/O timeout，但不会像旧 3 秒 bounded wait 那样提前遗留 worker。A-05 已关闭。
 
 provider 完成条件在独立状态机中统一：
 
@@ -402,11 +403,11 @@ ShutdownSystemNativeAgentRuntime()
 当前边界：
 
 - Native IPC Stop 会取消审批与活动请求，并 join pipe handler 和 request worker。
-- HTTP 最后 callback 不在 `inFlight_` 计数内。
-- HTTP 只等待 3 秒，worker 仍是 detached。
+- HTTP request worker 全部由 `HttpClient` 持有；shutdown 取消/stop 后等待 provider callback 返回并 join。
+- transport stop 是尽力中断，静默 read 仍可能让退出等待配置的 I/O timeout。
 - Agent 工具 worker 会取消 queued/active task，并等待 active executor 返回后 join。
 
-因此工具与 Native IPC shutdown 已闭环，但整个应用退出仍受 provider HTTP detached task 约束。若调试退出崩溃、静态析构异常或偶发访问，应先检查 HTTP worker/callback；设备 socket 在 Native IPC 与工具 worker join 后才断开。
+因此正常主线程退出在断开设备和销毁 ImGui 前会排空 Native IPC、HTTP callback 和 Agent 工具 worker。若退出停顿，先检查 provider socket 是否正等待 read timeout，而不是把 join 改回 bounded wait 或 detached。
 
 GUI 的 connect/disconnect/auto-reconnect 现在委托 `MultiPortClientManager`，它通过 `DeviceSession` exclusive lifecycle lease 串行关闭旧端口、清目标状态、连接或回滚 MAIN/DEBUG/ERROR；普通命令持 shared request lease，因此 disconnect 会等待在途请求释放。脚本故障与真实三连接 loopback 已覆盖单端口 poison、全端口重连和 generation 隔离；Android 远端状态恢复仍需设备验证。
 
@@ -577,15 +578,15 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 | 正常 2xx 却得到半截回答 | provider 是否看见 `message_stop`/`finish_reason` |
 | provider 报 context 太长 | 本地估算是否忽略工具 schema、输出预留和 provider 上限 |
 | 切会话后 prompt 变了 | 会话文件中的 `systemPrompt`/`tokenLimit` |
-| API key 配置消失 | `ai_config.json` 是否损坏后被启动流程覆盖 |
+| API key 配置未加载 | `ai_config.json` 的 load status/log；损坏文件应保留而不是被默认值覆盖 |
 | 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
 | Native IPC client 收不到完整帧 | header/payload 上限、deadline、partial close 和 terminal Error drain |
 | Native IPC privileged 请求被拒绝 | GUI 是否批准、grant 是否因 target/generation/deadline/session 失效 |
-| 退出偶发崩溃 | provider HTTP callback 的 detached 生命周期；工具和 Native IPC worker 应已 join |
+| 退出长时间停顿 | provider HTTP 静默 read 是否仍在等待配置 timeout；所有 worker 最终必须 join |
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 的 14 组覆盖完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE、分片与 partial error retention。`native_persistence_recovery` 的 4 组覆盖损坏索引恢复以及 API key、settings、session 事务式加载，连续 50/50 通过。当前共 20 项 CTest；fresh Release `ENABLE_NATIVE_IPC=ON` 在 AI Chat 关闭和开启两种配置下均为 20/20，并完成产品链接。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 有 14 组，persistence recovery 有 4 组并连续 50/50，HTTP lifecycle 有 4 组并连续 100/100。当前共 21 项 CTest；fresh Release `ENABLE_NATIVE_IPC=ON` 在 AI Chat 关闭和开启两种配置下均为 21/21，并完成产品链接。其余测试优先从无设备依赖的边界开始：
 
 1. 用本机假 provider HTTP/TLS 覆盖真实 content receiver、状态码和 full-response 解析。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。

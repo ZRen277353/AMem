@@ -173,7 +173,7 @@ HTTP 2xx 不等于 provider stream 完整：
 | 线程/任务 | 创建位置 | 所有权现状 | 主要行为 |
 |-----------|----------|------------|----------|
 | ImGui 主线程 | `main.cpp` | 主循环拥有 | UI、run 状态、会话、队列消费 |
-| HTTP worker | `HttpClient::postAsync()` | detached，`inFlight_` 计数 | HTTPS、SSE、provider 完成回调 |
+| HTTP worker | `HttpClient::postAsync()` | 每请求一个 owned/joinable `std::thread`；完成后由下次 dispatch 或 shutdown 回收 | HTTPS、SSE、provider 完成回调 |
 | Agent 工具 worker | `AgentTaskExecutor` 构造 | 单个 joinable `std::thread` | 串行取队列、同步调用 `ToolExecutor`、投递 completion callback |
 | Native pipe server/handler | `NativeAgentIpcWindow` -> `NativeAgentRuntime::start()` -> `NamedPipeServer::start()` | 用户显式启用后，system runtime 持有单个 joinable `std::thread` | overlapped accept、串行 handshake/session handler、stop event/`CancelIoEx`、实例复用 |
 | Native request dispatch | `NativeAgentRuntime` -> `IpcRequestSession::run()` | 每个已建立 session 一个 owned/joinable worker | 单 active request、Observe dispatch、server-owned capability 检查、cooperative deadline/Cancel、bounded response |
@@ -194,7 +194,7 @@ HTTP 2xx 不等于 provider stream 完整：
 | 操作 | 当前效果 | 不保证 |
 |------|----------|--------|
 | Stop/`cancelRequest()` | 设置 HTTP token，调用 `AgentTaskExecutor::cancelRun()`，清 active id 并结束当前编排；mutation 最终状态在 UI callback 前写独立审计 | 撤回已发送写操作、让迟到回执进入原会话/trace |
-| HTTP cancellation token | content receiver 在数据块边界中止 | 阻塞 read 立刻结束、worker 已 join |
+| HTTP cancellation token | content receiver 在数据块边界中止；`cancelRequest()`/shutdown 还调用 `Client::stop()` 尝试打断 transport | 静默阻塞 read 立刻结束；只有进程级 shutdown 承诺 join |
 | 排队任务取消/deadline | worker 在执行前返回 `cancelled_before_start`/`timed_out_before_start` | 已开始操作被抢占 |
 | 活动工具取消/deadline | 同一 `OperationContext` 传到 service/host 和 socket I/O；worker 始终受管 | 阻塞设备命令被抢占、已发送设备命令被撤回 |
 | deadline 后完成 | 只读结果归一为 `timed_out`；写结果保留 `completed_after_deadline` 或底层不确定状态，并写 mutation audit | 原会话接收已过期结果 |
@@ -214,7 +214,7 @@ HTTP 2xx 不等于 provider stream 完整：
 
 工具路径已有明确的排空保证：`AgentTaskExecutor::shutdown()` 停止接收新任务，标记 active/queued task 取消，向未开始任务交付取消结果，并 join 唯一 worker。返回后不会再有 Agent 工具访问 socket，因此设备断开排在它之后。
 
-Native IPC Stop 会取消并 join server handler 与 request worker。进程级 teardown 仍不是完整排空保证，因为 provider HTTP 在完成回调前减少 `inFlight_`，等待上限为 3 秒且 worker 仍是 detached。因此只可把 **Agent 工具与 Native IPC shutdown** 称为已 join；整个应用退出仍受 provider HTTP detached task 限制，不能宣称所有后台任务已排空。
+Native IPC Stop 会取消并 join server handler 与 request worker。`HttpClient` 为每个请求保存 cancellation token、best-effort transport stop hook 和 joinable thread；worker 只有在 provider completion callback 返回后才标记完成。进程级 shutdown 先拒绝新请求并设置全部 token，调用 stop hook，再 join 所有 worker；从自身 callback 调用会返回 `false` 以避免 self-join，`main.cpp` 会检查该结果。正常主线程退出返回后，HTTP、Agent 工具和 Native IPC worker 都已排空。`Client::stop()` 不保证静默 read 立即结束，因此 shutdown 可能等待配置的 I/O timeout，但不能以超时为由提前遗留线程。
 
 连接按钮、自动重连和退出通过 `MultiPortClientManager` 取得 `DeviceSession` exclusive lifecycle lease；普通命令持 shared request lease。manager 在同一转换内关闭旧三端口、清目标状态、顺序连接 MAIN/DEBUG/ERROR，并在任一失败时全量回滚。测试覆盖真实三连接 Winsock loopback、活动请求阻塞 disconnect、单端口 poison 与全端口显式重连；真实 Android 远端状态恢复仍需设备验证。
 
@@ -500,7 +500,7 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试，覆盖 SSE 分片/多行、`[DONE]`、EOF flush、callback exception、完整/截断/重复 terminal、空 `finish_reason`、malformed/non-SSE 与 partial tool-call error retention。persistence recovery 的 4 组覆盖损坏索引恢复以及 API key、settings、session 的事务式加载，连续 50/50 通过。连同四个静态 gate，当前共 20 项 CTest；本切片 fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 均为 20/20，并完成产品链接。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试；persistence recovery 有 4 组并连续 50/50 通过；HTTP lifecycle 有 4 组本机 server 测试并连续 100/100 通过。连同四个静态 gate，当前共 21 项 CTest；本切片 fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 均为 21/21，并完成产品链接。以下路径仍缺测试：
 
 - provider 真实 HTTP/TLS 与 full-response 端到端解析
 - ChatSession 通用工具配对与预算裁剪

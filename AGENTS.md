@@ -37,7 +37,7 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Socket coverage adds 4 client-transport groups and 6 multi-port manager groups for system Winsock loopback, partial I/O, timeout/EOF poisoning, all-port rollback, request/disconnect exclusion, and reconnect generation isolation. `native_provider_stream_terminal` adds 14 pure parser/state-machine groups for SSE fragmentation, malformed/truncated/duplicate terminal handling, and partial error retention. `native_persistence_recovery` adds 4 groups for corrupt-index recovery and transactional API-key, settings, and session loading. Twenty CTests include these sixteen runtime/service/provider/persistence suites plus four static gates. Live provider HTTP, GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 23 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Socket coverage adds 4 client-transport groups and 6 multi-port manager groups for system Winsock loopback, partial I/O, timeout/EOF poisoning, all-port rollback, request/disconnect exclusion, and reconnect generation isolation. `native_provider_stream_terminal` adds 14 pure parser/state-machine groups for SSE fragmentation, malformed/truncated/duplicate terminal handling, and partial error retention. `native_persistence_recovery` adds 4 groups for corrupt-index recovery and transactional API-key, settings, and session loading. `native_http_client_lifecycle` adds 4 local-HTTP groups for streaming cancellation, self-join rejection, callback-inclusive shutdown, and post-shutdown rejection; it has passed 100/100 repeated runs. Twenty-one CTests include these seventeen runtime/service/provider/persistence/HTTP suites plus four static gates. Live provider HTTP/TLS, GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
@@ -190,15 +190,15 @@ Unknown tools cannot execute and are rejected by `ToolExecutor`.
 
 Provider and tool threads must never access ImGui or run state directly. In-app background results return through `UIMessageQueue`.
 
-Current runtime ownership is imperfect:
+Current runtime ownership:
 
-- `HttpClient::postAsync()` creates detached HTTP workers.
+- `HttpClient::postAsync()` stores every request worker as a joinable thread together with its cancellation token and a best-effort `httplib::Client::stop()` hook. A request becomes reapable only after its provider completion callback returns.
 - In-app tools run only on the joinable `AgentTaskExecutor` worker; do not reintroduce outer or inner detached tool threads.
 - Stop cancels model orchestration and signals queued/active tool contexts. It cannot retract a sent write. Late results remain excluded from the stale chat/session by the run-id filter, but mutation and symbol-session outcomes are persisted to `ai_mutation_audit.jsonl` before the UI callback and remain visible in the Audit table.
-- `AgentTaskExecutor::shutdown()` cancels queued/active work and joins the worker before device disconnect. `HttpClient::shutdown()` remains a bounded best-effort wait, not proof that every HTTP worker exited.
+- `HttpClient::shutdown()` rejects new work, sets every request token, invokes transport stop hooks, and joins all request workers through completion callbacks. `AgentTaskExecutor::shutdown()` then cancels queued/active tool work and joins before device disconnect.
 - Provider streams pass every SSE event, including `[DONE]`, through `StreamTerminalTracker`. Claude requires `message_start` plus `message_stop`; OpenAI-compatible providers require a valid `choices` start plus non-null string `finish_reason` or `[DONE]`. A malformed or unterminated HTTP 2xx response is `InvalidResponse`; partial content/tool calls remain displayable but cannot execute.
 
-Do not add new detached threads. Extend the owned task model and keep completion callbacks in lifecycle accounting. See `docs/agent_project_issues.md` before touching cancellation or teardown.
+Do not add detached threads. Extend the owned task model and keep completion callbacks in lifecycle accounting. `Client::stop()` is an interruption hint, not proof that a silent read ended immediately; shutdown may wait for the configured I/O timeout, but it must not return while a worker or provider callback is alive. See `docs/agent_project_issues.md` before touching cancellation or teardown.
 
 ### Target Binding
 

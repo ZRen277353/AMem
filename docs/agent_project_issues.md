@@ -21,7 +21,7 @@
 | A-02 | P0 | 已修复 | 当前内置工具均在 service/host send 边界消费 run target；退役 executor 已删除 |
 | A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
 | A-04 | P0 | 已修复 | 配置/会话事务式加载；损坏索引可保留并扫描重建，失败绑定不会写回 |
-| A-05 | P1 | 未修复 | HTTP worker 在完成回调前就从 in-flight 计数移除 |
+| A-05 | P1 | 已修复 | HTTP request thread 受管且 completion callback 返回后才可回收；shutdown 全量 join |
 | A-06 | P1 | 已修复 | legacy detached handler 已删除；Native IPC exact I/O、取消与 join 已覆盖 |
 | A-07 | P1 | 已修复 | Stop 保留真实取消语义；mutation 晚到回执在 UI callback 前进入独立审计 |
 | A-08 | P1 | 未修复 | 复合工具和进程切换不是事务，可被其他前端插入 |
@@ -79,21 +79,18 @@
 
 A-04 只关闭“损坏加载覆盖原件/异常逃逸”问题。持久化文件、单消息和会话载入的总量/分配上限仍属于 A-09；会话中的 `systemPrompt`/`tokenLimit` 仍会覆盖全局设置，A-12 未修复。
 
-### A-05：HTTP worker 的完成回调未纳入排空计数
+### A-05：HTTP worker 的完成回调未纳入排空计数（已修复）
 
-**证据**
+**关闭证据**
 
-`HttpClient::postAsync()` 的所有结束路径都先调用 `removeFromActive()`，减少 `inFlight_`，再调用 `completeSafely()`。完成回调会继续运行 provider 逻辑，并向 `UIMessageQueue` 投递消息。
+- `HttpClient` 为每个请求保存 cancellation token、best-effort `Client::stop()` hook 和 joinable thread；旧的 detached、`inFlight_`、3 秒 bounded wait 与 callback 前移除逻辑均已删除。
+- scope guard 只在 `completeSafely()` 及 provider callback 返回后标记请求完成。正常完成记录由下次 dispatch 回收；进程 shutdown 会禁止新请求、设置全部 token、尝试中断 transport，并 join 所有 active/complete worker。
+- `shutdown()` 返回是否真正排空；从自身 worker callback 调用时返回 `false` 防止 self-join，`main.cpp` 检查并记录该异常路径。
+- `native_http_client_lifecycle` 的 4 组本机 HTTP 测试覆盖 streaming cancellation、self-join rejection、callback-inclusive shutdown 和 shutdown 后拒绝新请求，连续 100/100 通过；完整套件增至 21/21。
 
-**影响**
+**剩余边界**
 
-`HttpClient::shutdown()` 可能在 `inFlight_ == 0` 时返回，但最后一个回调仍未结束。加上 3 秒有界等待，退出阶段仍可能在 UI/AI 单例开始析构后投递消息。
-
-**建议**
-
-- 把计数减少放到完成回调之后，用 scope guard 保证所有返回路径一致。
-- 最好保留可 join 的 HTTP worker；若必须 detach，生命周期对象必须独立于静态析构顺序。
-- shutdown 返回值应表明是否真正排空，超时要记录并采取明确降级策略。
+`Client::stop()` 只是 transport interruption hint，静默 read 不保证立即返回；shutdown 会继续等待配置的 I/O timeout 并最终 join，而不是提前遗留线程。真实 provider HTTP/TLS/full-response 仍缺端到端测试；HTTP/SSE 累计输入上限属于 A-09，未因本项关闭。
 
 ### A-07：Stop 后已发送操作的最终状态独立可见（已修复）
 
@@ -277,7 +274,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试；persistence recovery 有 4 组并连续 50/50 通过。当前共 20 项 CTest；本切片 fresh Release AI-off/AI-on 均为 20/20，并完成产品链接。
+仓库已有 `native_agent_mem_service` 的 23 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组；persistence recovery 有 4 组并连续 50/50；HTTP lifecycle 有 4 组并连续 100/100。当前共 21 项 CTest；本切片 fresh Release AI-off/AI-on 均为 21/21，并完成产品链接。
 
 - 三类 provider 的真实 HTTP/TLS 与 full-response 端到端解析。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
@@ -297,6 +294,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | 项目 | 当前实现 |
 |------|----------|
 | A-04 配置/索引损坏覆盖原件 | 四类 loader 临时解析后提交并区分五种状态；只有缺失才写默认值，损坏索引保留后扫描重建，失败会话不绑定写回，统一使用原子安装助手 |
+| A-05 HTTP callback 脱离排空计数 | 每请求 owned/joinable worker；completion callback 返回后才完成，shutdown 取消/stop 并 join 全部线程，self-join 显式失败 |
 | Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
 | A-01 legacy HTTP 无鉴权/CORS 控制面 | `ipc/IpcServer.*`、端口启动、CMake 选项和 compile macro 已删除；静态 gate 阻止恢复旧 HTTP server |
 | A-06 legacy detached handler/partial send | legacy handler 已随 HTTP server 删除；Native IPC 使用 owned/joinable handler、overlapped exact I/O、Stop event 与 `CancelIoEx` |
@@ -327,7 +325,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 - `runId` 过滤只防止迟到消息污染当前 UI，不会停止网络或工具副作用。
 - `SocketIoTimeout` 现在消费 task absolute deadline，但不提供事务回滚或撤回已经发送的写命令。
-- `AgentTaskExecutor::shutdown()` 会 join；`HttpClient` 的 3 秒 bounded wait 仍不是 HTTP worker 已全部退出的证明。
+- `AgentTaskExecutor` 与 `HttpClient` shutdown 都会 join；HTTP transport stop 不保证静默 read 立即结束，因此退出可能等待配置的 I/O timeout。
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
 - Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权；尚未完成跨用户/session 与真实 remote client 负向验证。
 - execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
@@ -340,7 +338,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 1. 保持 Native IPC compile/runtime default-off；补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability。
 2. 为已落地的 poison/lifecycle gate 增加真实 Android 设备压力与恢复记录。
 3. 为持久化文件、单消息和会话载入增加端到端大小/分配上限，并补原子安装故障注入。
-4. 收敛 detached HTTP worker 生命周期，并建立真实 provider HTTP/TLS 与 full-response 回归测试。
+4. 建立真实 provider HTTP/TLS 与 full-response 回归测试；HTTP worker 生命周期已收敛。
 5. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。
 6. 增加端到端资源/context 上限和列表分页。
 7. 明确第三方 endpoint、会话明文与 provider key 删除策略。
