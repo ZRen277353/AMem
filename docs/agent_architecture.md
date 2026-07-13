@@ -166,6 +166,14 @@ HTTP 2xx 不等于 provider stream 完整：
 
 `StreamTerminalTracker` 记录合法 start、terminal 与首个 malformed/schema error。三个 provider 仅在 HTTP 成功且 tracker 验证通过后提交成功；截断或 malformed 流返回 `InvalidResponse`。已经收到的文本和 tool fragments 保留在错误响应中供 UI 显示，但 `ChatWindow` 在 `response.error` 分支结束处理，不会校验或执行这些 tool calls。重复 terminal（例如 `finish_reason` 后再 `[DONE]`）是幂等的。
 
+### 4.4 Payload 硬边界
+
+`AiLimits.h` 统一 provider、executor 和 session 的字节预算。`HttpClient` 在 append 前把原始响应限制为 16 MiB；`SSEParser` 把单行/单事件限制为 1/2 MiB。三个 provider 的流式和非流式路径把 assistant content 限制为 4 MiB，把一条消息限制为 64 个 tool calls、256-byte id、64-byte name、512 KiB 单调用 arguments 和 4 MiB arguments 合计；非流式 parser 在复制字段和物化第 65 个调用前失败。
+
+`ToolExecutor` 对最终 JSON 使用 4 MiB 上限。超限 mutation 的副作用可能已经发生，因此清空结果并返回 `completion_unknown`；`AgentRunner` 的 tool audit 最终必须落在 8 MiB 普通消息上限内。`ChatWindow` 若无法把 assistant/tool outcome 纳入 16 MiB retained session，会结束当前链，不执行未记录的工具，也不把未记录的结果发给下一轮模型。
+
+这些上限关闭 A-09 的无界累计路径，但不等价于 context token 预算或完整的 allocator 上界。JSON DOM、TLS 和库内部对象有额外开销，大型业务列表仍应分页；真实 provider HTTP/TLS/full-response 尚无端到端自动化。
+
 ## 5. 实际线程与生命周期模型
 
 内置工具执行已经收敛到一个受管 worker。Native runtime 持有一个可 join 的串行 server/handler thread；request session 再拥有一个 joinable serial dispatch worker，使 handler reader 可在执行期间接收 Cancel。产品启动时不创建这些 native 线程：
@@ -348,7 +356,7 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 | `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；无效/I/O 失败保留原文件和内存快照，只有缺失才写默认值 |
 | `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；临时解析/完整校验后一次提交，只有缺失才写默认值 |
 | `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏索引先保留为 `.corrupt*`，再扫描合法会话重建；备份失败时禁止自动写回 |
-| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；失败加载不绑定损坏路径，写入使用统一原子安装；仍可能包含 Lua、地址、内存数据和其他完整参数/结果 |
+| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；32 MiB 文件、16 MiB retained payload、1,000 内存消息/10,000 磁盘消息；失败加载不绑定损坏路径，写入使用统一原子安装 |
 | `ai_mutation_audit.jsonl` / `.1` | `AgentMutationAuditLog` | mutation/session-effect 完成摘要 | 明文、字段脱敏；64 KiB/record，4 MiB active + 一个轮转备份 |
 | `native_ipc_approval_audit.jsonl` / `.1` | `IpcApprovalAuditLog` | Native IPC approval 状态转换 | 明文；无 params/results；16 KiB/record，4 MiB active + 一个轮转备份 |
 
@@ -362,7 +370,7 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 
 `ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 统一使用 `utils::installTempFile()`。加载入口统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid` 或 `IoError`，先把 JSON 完整解析并校验到临时状态，成功后才替换内存状态；只有 `Missing` 会自动创建默认文件。
 
-索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。A-04 因此关闭。该修复不限制持久化文件总大小或单消息分配（A-09），也不改变会话 prompt/token 覆盖全局设置的所有权问题（A-12）。
+索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。所有 JSON loader 在 parse 前拒绝超过 32 MiB 的文件；会话逐消息校验 8 MiB content 和 tool 字段预算，磁盘数组超过 10,000 条拒绝，只 reserve/物化最后 1,000 条，并要求 retained payload 不超过 16 MiB。保存时最终 JSON 转义后超过 32 MiB 也不会安装。A-04 与 A-09 因此关闭；会话 prompt/token 覆盖全局设置的 A-12 仍未修复。
 
 ### 9.3 远端 provider 边界
 
@@ -500,13 +508,13 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider stream 有 14 组纯 parser/state-machine 测试；persistence recovery 有 4 组并连续 50/50 通过；HTTP lifecycle 有 4 组本机 server 测试并连续 100/100 通过。连同四个静态 gate，当前共 21 项 CTest；本切片 fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 均为 21/21，并完成产品链接。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界和 4 MiB tool-result 限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits 有 7 组；HTTP lifecycle/receiver limit 有 5 组。四个 A-09 相关 executable 连续 20/20 通过。连同四个静态 gate，当前共 21 项 CTest；fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 的最终链接证据见重构计划。以下路径仍缺测试：
 
 - provider 真实 HTTP/TLS 与 full-response 端到端解析
 - ChatSession 通用工具配对与预算裁剪
-- 持久化文件/单消息的大小和分配上限，以及原子安装故障注入
-- AgentRunner 预算上限、auto approve 和 denial 的完整组合
-- ToolExecutor schema 和错误契约
+- 持久化原子安装故障注入和 JSON DOM allocator 放大
+- AgentRunner context 预算、auto approve 和 denial 的完整组合
+- ToolExecutor 完整 schema 和错误契约
 - Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试
 - 真实 Android 三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复策略

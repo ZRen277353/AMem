@@ -1,6 +1,6 @@
 # NativeAgent 原生内存工具重构方案
 
-状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`/`LuaJsonTool`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具 worker、退役 alias 清理、Python MCP 与 legacy HTTP IPC 删除、native IPC framing/Hello/request session/catalog/完整 dispatcher/安全 transport/owned runtime/显式 GUI control/逐请求 privileged approval execution/security outcome audit 已落地
+状态：实施中，24 个 canonical Agent/IPC 名称、共享 `MemJsonTools`/`LuaJsonTool`、原生 driver/module/pointer/disassembly/scan/symbol/breakpoint/raw/typed memory、GUI breakpoint/symbol/scan、Lua host boundary、独立 mutation audit、连接生命周期、run target、受管工具/HTTP worker、端到端 payload 硬上限、退役 alias 清理、Python MCP 与 legacy HTTP IPC 删除、native IPC framing/Hello/request session/catalog/完整 dispatcher/安全 transport/owned runtime/显式 GUI control/逐请求 privileged approval execution/security outcome audit 已落地
 适用分支：`NativeAgent`
 分支角色：独立的 Agent 产品分支，目前不以合并回 `dev` 为目标
 基线提交：`0bf354f`
@@ -37,6 +37,7 @@
 - provider SSE parser 已提取为纯组件并保留 `[DONE]`；Claude/OpenAI/DeepSeek 共用 terminal tracker 验证 start/terminal/malformed，截断 partial 只作为 `InvalidResponse` 展示且不执行工具。
 - `HttpClient` 为每个请求持有 cancellation、transport stop hook 和 joinable worker；provider completion callback 返回后才完成，shutdown 禁止新请求并全量 join。
 - 四类 AI 持久化 loader 统一五态结果并先校验临时状态再提交；损坏索引保留后扫描会话重建，失败会话不绑定写回，所有 session 保存使用统一原子安装助手。
+- `AiLimits` 为 HTTP/SSE/provider/tool/session/persistence 建立分层硬上限；超限 mutation 保留 `completion_unknown`，会话按完整组裁剪且拒绝保持事务性，assistant/tool outcome 无法入会话时停止 Agent 链。
 - 33 个旧名称已从注册表和 JSON adapter 删除。LuaJIT 构建为 24 可执行 / 24 广告 / 0 hidden；无 LuaJIT 为 23/23/0。旧会话调用组只会降级为不可执行的 assistant 历史文本。
 - Python FastMCP package、`.mcp.json`、安装元数据和 IDE 配置已删除；标准库 wire-protocol 探针迁至 `tools/protocol_reference/`，明确不参与产品运行或 Agent 集成。
 - legacy `ipc/IpcServer.*`、CMake option/macro、main 启停和 loopback HTTP listener 已删除；`native_agent_no_legacy_http_ipc` 静态 gate 阻止旧 server/CORS/端口入口回归。
@@ -60,9 +61,9 @@
 - `process_open` 在 mutex 保护下执行 controlled selection；只有 adapter 返回 snapshot、当前 service snapshot 与 grant generation/旧 baseline 全部一致时才推进 external session baseline。
 - Native IPC completion 新增 `timed_out_before_start`、`timed_out`、`completed_after_deadline`，保留 deadline 后设备已确认完成的成功回执。
 - security audit schema 2 在同一有界 JSONL 中区分 `approval_transition` 与 `execution_outcome`；outcome 只含 authorized/observed target、success、completion 与 bounded error code，schema 1 继续可加载。post-effect 写盘失败进入 GUI health，但不覆盖真实设备回执。
-- `NativeAgentMemTests` 的 23 个测试组覆盖既有 service/Agent 边界；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket client 有 4 组，multi-port manager 有 6 组；provider stream 有 14 组；persistence recovery 有 4 组并连续 50/50；HTTP lifecycle 有 4 组并连续 100/100。当前共 21 项 CTest；两个 socket suite 各连续 100 次通过，本切片 fresh Release AI-off/AI-on 均为 21/21 并完成产品链接。
+- `NativeAgentMemTests` 的 24 个测试组覆盖既有 service/Agent 边界和 tool-result 输出上限；native IPC 有 6 组 security-audit、12 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试；socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 18 组；persistence recovery/limits 有 7 组；HTTP lifecycle/response limit 有 5 组。当前共 21 项 CTest；两个 socket suite 各连续 100 次通过，四个 A-09 相关 executable 连续 20/20，本切片 fresh Release AI-off/on 均为 21/21 并完成产品链接。
 
-尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；真实 Android 三端口 timeout/reconnect 与远端状态恢复；真实 provider HTTP/TLS。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport、provider stream terminal validation、事务式 persistence recovery 和 owned HTTP lifecycle 已完成。A-01、A-04、A-05、A-06、A-14、A-17、A-18、A-19、A-20 已关闭；A-09 的总量上限和 A-12 的设置所有权仍未关闭。
+尚未完成：Native IPC GUI approval click 与真实 Android privileged operation smoke；不同用户/remote 负向测试；真实 Android 三端口 timeout/reconnect 与远端状态恢复；真实 provider HTTP/TLS/full-response。规范目录、共享 adapter、catalog、完整 dispatch、owned runtime、session/request cancellation、persistent security audit、fail-closed consume、逐请求 approved execution/outcome、Python MCP 与 legacy HTTP 删除、native framing/session/transport、provider stream terminal validation、事务式 persistence recovery、owned HTTP lifecycle 和端到端 payload 硬上限已完成。A-01、A-04、A-05、A-06、A-09、A-14、A-17、A-18、A-19、A-20 已关闭；A-12 的设置所有权与 A-21 的 provider context 预算仍未关闭。
 
 ## 1. 结论
 
@@ -539,7 +540,7 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 变更：
 
-- 修复截断 SSE 成功、provider context 预算、配置损坏覆盖、会话明文策略和设置所有权。（截断 SSE 与配置损坏覆盖已完成；其余仍待完成。）
+- 修复截断 SSE 成功、provider context 预算、配置损坏覆盖、会话明文策略和设置所有权。（截断 SSE、配置损坏覆盖和 payload 总量上限已完成；其余仍待完成。）
 - 将 HTTP provider worker 也改为受管生命周期。（已完成。）
 - 为响应、历史和工具输出建立端到端预算。
 
@@ -556,8 +557,8 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 - executor：排队取消、运行中取消、timeout、shutdown join、晚到结果。
 - service：scan/symbol 复合操作不被其他 caller 插入，错误不会留下半更新本地状态。
 - connection：partial send/receive、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和重连 generation 已覆盖；Android 远端状态恢复仍待设备验证。
-- provider：完整/截断/重复终止/malformed SSE。
-- persistence：损坏 JSON、字段类型错误、临时文件替换失败、旧会话迁移。
+- provider：完整/截断/重复终止/malformed SSE，以及 HTTP/SSE/content/tool arguments 硬边界。
+- persistence：损坏 JSON、字段类型错误、32 MiB 文件、8 MiB 消息、10,000/1,000 消息载入、16 MiB retained payload、临时文件替换失败和旧会话迁移。
 - Native IPC：frame 分片、超大 payload、错误版本、重复 request id、ACL 和危险操作审批。
 
 ### 11.2 真实设备 smoke test
@@ -694,4 +695,6 @@ Named Pipe 的同用户 ACL 只能解决访问主体问题，不能替代危险�
 
 第四十二批关闭 A-05。`HttpClient` 删除 detached、`inFlight_` 与 3 秒 bounded wait，为每个请求保存 cancellation token、best-effort `Client::stop()` hook 和 joinable thread；completion callback 返回后才标记完成，下次 dispatch 回收已完成线程，进程 shutdown 禁止新请求并 join 全部 active/completed worker。从自身 callback 调用 shutdown 显式返回 `false`，主退出路径检查该结果。新增 `native_http_client_lifecycle` 4 组本机 HTTP 测试并连续 100/100 通过，完整套件 21/21。隔离 `ENABLE_NATIVE_IPC=ON` fresh Release full product link：AI-off `29480448` bytes / `CF35E2B998889E3975952A26610E51C5DBA67CAEE89A1313151CC2D16B6F87D2`，AI-on `35806720` bytes / `E616AEBBE5659F864A5323E9AD1948AF00F3E65C9F4ECD44E459BDC061653760`。
 
-四十二个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并记录真实设备三端口 timeout/reconnect 后的 driver/process/scan/breakpoint 状态。provider 后续仍需输入总量、context 预算和真实 HTTP/TLS；静默 read 可能让 owned shutdown 等待配置的 I/O timeout，但不得恢复 bounded wait 或 detached。persistence 仍需 A-09 的文件/消息总量上限和 A-12 的全局/会话设置所有权。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。
+第四十三批关闭 A-09。新增统一 `AiLimits` 与 provider response helper：HTTP 原始累计 16 MiB、SSE line/event 1/2 MiB、assistant/tool result 4 MiB、普通消息 8 MiB，tool calls/id/name/arguments 为 64、256/64 bytes、512 KiB/调用与 4 MiB/消息。三个 provider 的流式/非流式路径在追加/物化前校验并把超限归类为 `InvalidResponse`；最终 tool JSON 超限会释放，mutation 返回 `completion_unknown`，tool audit 最终收缩到消息上限。持久化在 parse 和 session install 前限制 32 MiB；磁盘消息最多 10,000、只物化最后 1,000，retained payload 16 MiB，runtime 按完整对话组裁剪且失败不丢旧历史。assistant/tool outcome 无法入会话时停止后续执行/follow-up。测试增至 provider/SSE 18 组、persistence 7 组、HTTP 5 组、Agent 24 组，四个 executable 连续 20/20，完整 21/21。隔离 `ENABLE_NATIVE_IPC=ON` fresh Release full product link：AI-off `29480448` bytes / `6607AB90B21FF6F5B6E0CABA2FCEAF0D633A86A49D29546D2B03F5486AC4E196`，AI-on `35843072` bytes / `E6B0DCEED9B3F9A0AD36854550E62C63EDEE7A053CC06EF762B4B3D272A924A8`。
+
+四十三个切片已落地。下一批应完成 GUI approval click、真实 Android device operation、跨用户/session 和 remote-client 负向验证，并记录真实设备三端口 timeout/reconnect 后的 driver/process/scan/breakpoint 状态。provider 后续仍需 context 预算、真实 HTTP/TLS/full-response 和 JSON DOM allocator 故障注入；静默 read 可能让 owned shutdown 等待配置的 I/O timeout，但不得恢复 bounded wait 或 detached。persistence 仍需 A-12 的全局/会话设置所有权。不得把逐请求 grant 扩大为 Hello 中的长期 privileged capability；outcome audit 也不是设备事务日志，进程在 effect 与 flush 之间崩溃仍可能缺失记录。

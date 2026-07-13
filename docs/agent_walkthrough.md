@@ -134,14 +134,9 @@ provider 的 `getCapabilities().maxContextTokens` 当前没有参与这里的请
 
 后台线程不直接调用 ImGui，这是正确边界。
 
-当前没有以下总量限制：
+`AiLimits.h` 固定这条链的硬边界：HTTP 原始累计 16 MiB，单 SSE 行 1 MiB、事件 2 MiB，assistant content 4 MiB。tool call 最多 64 个，id/name 为 256/64 bytes，arguments 为 512 KiB/调用、4 MiB/消息。`SSEParser` 和 provider 都在 append/materialize 前检查；HTTP/SSE 超限被归类为 `InvalidResponse`，不能进入工具执行。
 
-- 单 SSE 行/事件
-- HTTP 累计响应
-- assistant content
-- tool argument fragments
-
-局部 tool call 数量和 arguments 上限是在结果进入 `ChatWindow` 后才校验，不能替代网络层上限。
+这些字节上限不计算 TLS、cpp-httplib 或 nlohmann JSON DOM 的内部开销，也不解决 provider context token 预算。真实 provider HTTP/TLS/full-response 仍需要端到端测试。
 
 ### 3.3 HTTP 完成与回收时序
 
@@ -325,6 +320,8 @@ executor 返回 JSON 字符串。`ToolExecutor::extractToolError()` 会识别：
 
 `AgentRunner::makeToolMessage()` 通常会把 arguments 和 result/details 完整写入会话。driver card 是当前例外：原始参数仅在进程内用于执行和当前 tool-call 连续性，审批、审计和 `ChatSession` JSON 使用 `[REDACTED]`。Lua、地址、内存和其他工具数据仍会明文落盘并可能在下一次模型请求中发送到 provider。
 
+`ToolExecutor` 在 executor 返回后立刻把最终 JSON 限制为 4 MiB。超限结果会释放、不会写入 tool message；对可能已经发送的 mutation，completion 必须是 `completion_unknown`。tool audit 经过 result/details 省略和固定摘要两级收缩，最终受 8 MiB 普通消息上限约束。
+
 ## 6. 回喂模型
 
 `ChatWindow::sendFollowUpAfterTools()` 再次调用：
@@ -417,14 +414,15 @@ GUI 的 connect/disconnect/auto-reconnect 现在委托 `MultiPortClientManager`�
 
 `ChatSession::addMessage()`：
 
-1. 加消息。
-2. 超过 1000 条时按完整对话组裁剪。
-3. 根据估算 token 数裁剪旧组。
-4. 释放锁后调用 `save()`。
+1. 在入队前校验 8 MiB content、64 个 tool calls、id/name 和 arguments 预算。
+2. 预检受保护的最新用户回合；即使删完旧组仍超过 16 MiB/1000 条时，事务式拒绝且不丢旧历史。
+3. 加消息，按完整对话组裁剪到 1000 条和 16 MiB retained payload。
+4. 根据估算 token 数裁剪旧组。
+5. 释放锁后调用 `save()`；JSON 转义后的最终文件超过 32 MiB 时拒绝安装。
 
-最新用户回合即使超 token limit 也会保留。单条巨大消息不会被该策略删除。
+最新用户回合即使超 token limit 也会保留，但不能绕过消息/session 硬上限。assistant 消息无法入会话时不会执行其工具；tool outcome 无法入会话时不会继续下一工具或 follow-up。
 
-普通消息保存只作用于有效绑定。退出和会话切换使用 `saveBound()`，加载失败留下的损坏路径不会被随后写回；新建/缺失会话则建立可写绑定。这个一致性修复没有增加文件总大小、单消息或会话载入分配上限，A-09 仍未关闭。
+普通消息保存只作用于有效绑定。退出和会话切换使用 `saveBound()`，加载失败留下的损坏路径不会被随后写回；新建/缺失会话则建立可写绑定。loader 在 JSON parse 前检查 32 MiB 文件上限，拒绝超过 10,000 条的磁盘消息数组，只 reserve/物化最后 1,000 条，并在提交前验证 16 MiB retained payload。A-09 已关闭；A-12 的 prompt/token 所有权仍未处理。
 
 `estimateTokenCount()` 是 UTF-8 字节数/4 的启发式值，未使用 provider 声明的 64k/128k/200k context，也未计工具定义和输出预算。它适合 UI 粗略提示，不适合作为 provider 请求一定有效的证明。
 
@@ -586,11 +584,11 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 23 个测试组覆盖既有 service/Agent 边界。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider stream 有 14 组，persistence recovery 有 4 组并连续 50/50，HTTP lifecycle 有 4 组并连续 100/100。当前共 21 项 CTest；fresh Release `ENABLE_NATIVE_IPC=ON` 在 AI Chat 关闭和开启两种配置下均为 21/21，并完成产品链接。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界与 tool-result 输出限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider/SSE 有 18 组，persistence recovery/limits 有 7 组，HTTP lifecycle/response limit 有 5 组。四个 A-09 相关 executable 连续 20/20；当前仍是 21 项 CTest。fresh Release AI-off/on 的最终产品链接证据记录在重构计划。其余测试优先从无设备依赖的边界开始：
 
 1. 用本机假 provider HTTP/TLS 覆盖真实 content receiver、状态码和 full-response 解析。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
-3. 对持久化文件/消息大小上限和原子安装失败增加故障注入；损坏/错误类型 JSON 的事务恢复已有回归。
+3. 对持久化原子安装失败和 JSON DOM allocator 放大增加故障注入；文件/消息/session 硬上限与损坏事务恢复已有回归。
 4. 用真实 Android 设备记录三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复结果。
 5. 用真实 GUI approval click 与 Android device 覆盖 privileged adapter/send-boundary；persistent security audit、fail-closed consume、execution outcome、session/request cancel 与 GUI status gate 已有无设备测试。
 6. 在不同 Windows 用户/session 与 remote client 环境做身份负向测试。
