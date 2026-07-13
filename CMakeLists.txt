@@ -30,8 +30,7 @@ include(CTest)
 option(USE_DX11 "Use DirectX 11 backend" OFF)
 option(USE_DX12 "Use DirectX 12 backend" ON)
 
-# AI 聊天集成选项（Requirement 13.4）
-option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
+# NativeAgent 产品固定包含 AI Chat、Capstone 和 Keystone；缺失依赖时配置失败。
 
 # 原生 Named Pipe transport 默认只编译测试。产品入口保持关闭，直到 owned
 # runtime composition、GUI status/control 和 privileged approval broker 完成。
@@ -72,14 +71,15 @@ find_path(CAPSTONE_INCLUDE_DIR NAMES capstone/capstone.h
 find_library(CAPSTONE_LIBRARY NAMES capstone capstone_static
     HINTS "${capstone_ROOT}/lib" "C:/vcpkg/installed/x64-windows-static/lib" PATH_SUFFIXES lib lib64)
 
-if(CAPSTONE_INCLUDE_DIR AND CAPSTONE_LIBRARY)
-    set(HAVE_CAPSTONE TRUE)
-    set(CAPSTONE_LIBRARIES ${CAPSTONE_LIBRARY})
-    set(CAPSTONE_INCLUDE_DIRS ${CAPSTONE_INCLUDE_DIR})
-else()
-    set(HAVE_CAPSTONE FALSE)
-    message(WARNING "Capstone not found! Disassembly features will be disabled.")
+if(NOT CAPSTONE_INCLUDE_DIR
+   OR NOT EXISTS "${CAPSTONE_INCLUDE_DIR}/capstone/capstone.h"
+   OR NOT CAPSTONE_LIBRARY
+   OR NOT EXISTS "${CAPSTONE_LIBRARY}")
+    message(FATAL_ERROR
+        "Capstone is required on NativeAgent. Install a static /MT build or set capstone_ROOT.")
 endif()
+set(CAPSTONE_LIBRARIES ${CAPSTONE_LIBRARY})
+set(CAPSTONE_INCLUDE_DIRS ${CAPSTONE_INCLUDE_DIR})
 
 # 查找 Keystone 库（完全静态，vcpkg x64-windows-static，/MT）
 set(keystone_ROOT "C:/vcpkg/installed/x64-windows-static" CACHE PATH "Keystone installation directory")
@@ -89,55 +89,41 @@ find_path(KEYSTONE_INCLUDE_DIR keystone/keystone.h
 find_library(KEYSTONE_LIBRARY NAMES keystone
     HINTS "${keystone_ROOT}/lib" "${keystone_ROOT}" PATH_SUFFIXES lib lib64)
 
-if(KEYSTONE_INCLUDE_DIR AND KEYSTONE_LIBRARY)
-    set(HAVE_KEYSTONE TRUE)
-    set(KEYSTONE_LIBRARIES ${KEYSTONE_LIBRARY})
-    set(KEYSTONE_INCLUDE_DIRS ${KEYSTONE_INCLUDE_DIR})
-else()
-    set(HAVE_KEYSTONE FALSE)
-    message(WARNING "Keystone not found! Assembly features will be disabled.")
+if(NOT KEYSTONE_INCLUDE_DIR
+   OR NOT EXISTS "${KEYSTONE_INCLUDE_DIR}/keystone/keystone.h"
+   OR NOT KEYSTONE_LIBRARY
+   OR NOT EXISTS "${KEYSTONE_LIBRARY}")
+    message(FATAL_ERROR
+        "Keystone is required on NativeAgent. Install keystone:x64-windows-static or set keystone_ROOT.")
 endif()
+set(KEYSTONE_LIBRARIES ${KEYSTONE_LIBRARY})
+set(KEYSTONE_INCLUDE_DIRS ${KEYSTONE_INCLUDE_DIR})
 
 # ==================== AI Chat Integration ====================
 # Requirements: 13.1, 13.2, 13.3, 13.4, 13.5
-set(HAVE_AI_CHAT FALSE)
-if(ENABLE_AI_CHAT)
-    set(HTTPLIB_HEADER "${CMAKE_SOURCE_DIR}/third_party/httplib/httplib.h")
-    set(NLOHMANN_JSON_HEADER "${CMAKE_SOURCE_DIR}/third_party/nlohmann/json.hpp")
+set(HTTPLIB_HEADER "${CMAKE_SOURCE_DIR}/third_party/httplib/httplib.h")
+set(NLOHMANN_JSON_HEADER "${CMAKE_SOURCE_DIR}/third_party/nlohmann/json.hpp")
 
-    if(EXISTS "${HTTPLIB_HEADER}" AND EXISTS "${NLOHMANN_JSON_HEADER}")
-        # cpp-httplib 需要 OpenSSL 才能支持 HTTPS（CPPHTTPLIB_OPENSSL_SUPPORT）
-        # 完全静态：使用 vcpkg 静态 OpenSSL（x64-windows-static，/MT），链入 exe 不分发 DLL。
-        # 不用 x64-windows-static-md（那是 /MD，会与本项目 /MT 冲突）。
-        # 注意：不要设 OPENSSL_USE_STATIC_LIBS —— clang（GNU 驱动）下 MSVC=FALSE，
-        # FindOpenSSL 会把查找后缀硬改成 .a，永远匹配不到 vcpkg 的 libssl.lib/libcrypto.lib；
-        # 该三元组目录下只有静态库，按默认 .lib 后缀即可找到正确文件。
-        if(NOT OPENSSL_ROOT_DIR AND EXISTS "C:/vcpkg/installed/x64-windows-static/include/openssl/ssl.h")
-            set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows-static")
-            set(AMEM_OPENSSL_STATIC TRUE)
-        endif()
-        find_package(OpenSSL QUIET)
-
-        if(OPENSSL_FOUND)
-            set(HAVE_AI_CHAT TRUE)
-            message(STATUS "AI chat enabled: cpp-httplib + nlohmann/json + OpenSSL found")
-        else()
-            message(WARNING "AI chat features will be disabled: OpenSSL not found (required for HTTPS). Install via 'vcpkg install openssl:x64-windows'.")
-        endif()
-    else()
-        if(NOT EXISTS "${HTTPLIB_HEADER}")
-            message(WARNING "AI chat features will be disabled: cpp-httplib header not found at ${HTTPLIB_HEADER}")
-        endif()
-        if(NOT EXISTS "${NLOHMANN_JSON_HEADER}")
-            message(WARNING "AI chat features will be disabled: nlohmann/json header not found at ${NLOHMANN_JSON_HEADER}")
-        endif()
-    endif()
-else()
-    message(WARNING "AI chat features explicitly disabled via ENABLE_AI_CHAT=OFF")
+if(NOT EXISTS "${HTTPLIB_HEADER}")
+    message(FATAL_ERROR "Required cpp-httplib header not found at ${HTTPLIB_HEADER}")
+endif()
+if(NOT EXISTS "${NLOHMANN_JSON_HEADER}")
+    message(FATAL_ERROR "Required nlohmann/json header not found at ${NLOHMANN_JSON_HEADER}")
 endif()
 
-# AI 聊天模块源文件列表（部分文件由后续任务实现，使用 EXISTS 过滤以避免配置期错误）
-set(AI_CHAT_SOURCES_CANDIDATES
+# cpp-httplib 需要 OpenSSL 才能支持 HTTPS（CPPHTTPLIB_OPENSSL_SUPPORT）。
+# 完全静态：使用 vcpkg x64-windows-static，避免 /MD 与最终 /MT 产品冲突。
+# 不设置 OPENSSL_USE_STATIC_LIBS：Clang GNU-like driver 会因此只查找 .a，
+# 无法匹配 vcpkg 提供的静态 .lib。
+if(NOT OPENSSL_ROOT_DIR AND EXISTS "C:/vcpkg/installed/x64-windows-static/include/openssl/ssl.h")
+    set(OPENSSL_ROOT_DIR "C:/vcpkg/installed/x64-windows-static")
+    set(AMEM_OPENSSL_STATIC TRUE)
+endif()
+find_package(OpenSSL REQUIRED)
+message(STATUS "Required AI chat dependencies found: cpp-httplib + nlohmann/json + OpenSSL")
+
+# AI 聊天模块是 NativeAgent 产品的固定组成部分。
+set(AI_CHAT_SOURCES
     gui/ai/ProviderRegistry.cpp
     gui/ai/HttpClient.cpp
     gui/ai/SSEParser.cpp
@@ -164,12 +150,6 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/ChatWindow.cpp
     gui/ai/ChatWindowSettings.cpp
 )
-set(AI_CHAT_SOURCES "")
-foreach(_ai_src IN LISTS AI_CHAT_SOURCES_CANDIDATES)
-    if(EXISTS "${CMAKE_SOURCE_DIR}/${_ai_src}")
-        list(APPEND AI_CHAT_SOURCES "${_ai_src}")
-    endif()
-endforeach()
 
 set(IMGUI_SOURCES
     imgui/imgui.cpp
@@ -240,9 +220,7 @@ if(HAVE_LUAJIT)
     list(APPEND GUI_SOURCES gui/LuaScriptWindow.cpp gui/LuaImGuiWindow.cpp)
 endif()
 
-if(HAVE_AI_CHAT)
-    list(APPEND GUI_SOURCES ${AI_CHAT_SOURCES})
-endif()
+list(APPEND GUI_SOURCES ${AI_CHAT_SOURCES})
 
 set(SOCKET_SOURCES
     socket/DeviceSession.cpp
@@ -263,34 +241,30 @@ set(MEM_SOURCES
     mem/ValueCodec.cpp
 )
 
-if(HAVE_AI_CHAT OR ENABLE_NATIVE_IPC OR BUILD_TESTING)
-    add_library(NativeMemJsonTools STATIC
-        mem/MemJsonTools.cpp
-    )
-    target_include_directories(NativeMemJsonTools PUBLIC
-        ${CMAKE_SOURCE_DIR}
-    )
-    target_include_directories(NativeMemJsonTools PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party
-    )
-    if(HAVE_LUAJIT)
-        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_LUAJIT)
-    endif()
-    if(HAVE_CAPSTONE)
-        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_CAPSTONE)
-    endif()
-    if(HAVE_KEYSTONE)
-        target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_KEYSTONE)
-    endif()
-    if(MSVC)
-        target_compile_options(NativeMemJsonTools PRIVATE /W4)
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-        target_compile_options(NativeMemJsonTools PRIVATE -Wall -Wextra)
-    endif()
-    set_target_properties(NativeMemJsonTools PROPERTIES
-        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-mem"
-    )
+add_library(NativeMemJsonTools STATIC
+    mem/MemJsonTools.cpp
+)
+target_include_directories(NativeMemJsonTools PUBLIC
+    ${CMAKE_SOURCE_DIR}
+)
+target_include_directories(NativeMemJsonTools PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+target_compile_definitions(NativeMemJsonTools PRIVATE
+    HAVE_CAPSTONE
+    HAVE_KEYSTONE
+)
+if(HAVE_LUAJIT)
+    target_compile_definitions(NativeMemJsonTools PRIVATE HAVE_LUAJIT)
 endif()
+if(MSVC)
+    target_compile_options(NativeMemJsonTools PRIVATE /W4)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(NativeMemJsonTools PRIVATE -Wall -Wextra)
+endif()
+set_target_properties(NativeMemJsonTools PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-mem"
+)
 
 set(RENDERER_SOURCES
     renderer/DX12Renderer.cpp
@@ -394,9 +368,7 @@ if(ENABLE_NATIVE_IPC)
     target_link_libraries(ImGuiProject NativeIpcTransport NativeIpcGuiControl)
 endif()
 
-if(HAVE_AI_CHAT)
-    target_link_libraries(ImGuiProject NativeMemJsonTools)
-endif()
+target_link_libraries(ImGuiProject NativeMemJsonTools)
 
 # 包含目录
 target_include_directories(ImGuiProject PRIVATE
@@ -405,13 +377,10 @@ target_include_directories(ImGuiProject PRIVATE
     ${CMAKE_BINARY_DIR}/generated
 )
 
-if(HAVE_CAPSTONE)
-    target_include_directories(ImGuiProject PRIVATE ${CAPSTONE_INCLUDE_DIRS})
-endif()
-
-if(HAVE_KEYSTONE)
-    target_include_directories(ImGuiProject PRIVATE ${KEYSTONE_INCLUDE_DIRS})
-endif()
+target_include_directories(ImGuiProject PRIVATE
+    ${CAPSTONE_INCLUDE_DIRS}
+    ${KEYSTONE_INCLUDE_DIRS}
+)
 
 if(HAVE_LUAJIT)
     target_include_directories(ImGuiProject PRIVATE ${LUAJIT_INCLUDE})
@@ -436,36 +405,29 @@ if(HAVE_LUAJIT)
     endif()
 endif()
 
-# 链接 Capstone 库（静态 /MT，整体链入 exe，不分发 DLL）
-if(HAVE_CAPSTONE)
-    target_link_libraries(ImGuiProject ${CAPSTONE_LIBRARIES})
-    target_compile_definitions(ImGuiProject PRIVATE HAVE_CAPSTONE)
-endif()
+# Capstone、Keystone 与 AI Chat 是 NativeAgent 的必需产品能力。
+target_compile_definitions(ImGuiProject PRIVATE
+    HAVE_CAPSTONE
+    HAVE_KEYSTONE
+    HAVE_AI_CHAT
+    CPPHTTPLIB_OPENSSL_SUPPORT
+)
+target_include_directories(ImGuiProject PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/httplib
+    ${OPENSSL_INCLUDE_DIR}
+)
+target_link_libraries(ImGuiProject
+    ${CAPSTONE_LIBRARIES}
+    ${KEYSTONE_LIBRARIES}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    crypt32
+)
 
-# 链接 Keystone 库（静态 /MT，整体链入 exe，不分发 DLL）
-if(HAVE_KEYSTONE)
-    target_link_libraries(ImGuiProject ${KEYSTONE_LIBRARIES})
-    target_compile_definitions(ImGuiProject PRIVATE HAVE_KEYSTONE)
-endif()
-
-# 链接 AI 聊天依赖（Requirements 13.1, 13.3）
-if(HAVE_AI_CHAT)
-    target_compile_definitions(ImGuiProject PRIVATE
-        HAVE_AI_CHAT
-        CPPHTTPLIB_OPENSSL_SUPPORT
-    )
-    target_include_directories(ImGuiProject PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party/httplib
-        ${OPENSSL_INCLUDE_DIR}
-    )
-    # crypt32 for Windows DPAPI (CryptProtectData/CryptUnprotectData in ApiKeyStore)
-    target_link_libraries(ImGuiProject OpenSSL::SSL OpenSSL::Crypto crypt32)
-
-    # 静态 OpenSSL（libssl/libcrypto）在 Windows 上额外依赖的系统库。
-    # keystone 静态库自带的 /DEFAULTLIB 指令（ole32/uuid/advapi32 等）由链接器自动采纳，此处只补 OpenSSL 所需。
-    if(AMEM_OPENSSL_STATIC)
-        target_link_libraries(ImGuiProject ws2_32 advapi32 user32 gdi32 bcrypt)
-    endif()
+# 静态 OpenSSL（libssl/libcrypto）在 Windows 上额外依赖的系统库。
+# Keystone 静态库自带的 /DEFAULTLIB 指令由链接器自动采纳。
+if(AMEM_OPENSSL_STATIC)
+    target_link_libraries(ImGuiProject ws2_32 advapi32 user32 gdi32 bcrypt)
 endif()
 
 if(BUILD_TESTING)
@@ -843,6 +805,12 @@ if(BUILD_TESTING)
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
             -P ${CMAKE_SOURCE_DIR}/tests/VerifyNativeIpcGate.cmake
+    )
+    add_test(
+        NAME native_agent_required_features
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyRequiredProductFeatures.cmake
     )
 endif()
 

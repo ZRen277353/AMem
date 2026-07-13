@@ -30,20 +30,20 @@ ctest --test-dir build --output-on-failure
 
 Output binary: `bin/ImGuiProject.exe`. The project can also be opened directly in Visual Studio via CMakeLists.txt (select x64-Release or x64-Debug).
 
-`native_agent_mem_service` contains 24 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups. Socket coverage adds 4 client-transport and 6 multi-port manager groups for real Winsock loopback, scripted partial I/O/failures, all-port rollback, request/disconnect exclusion, and reconnect isolation. Provider/SSE coverage has 18 groups, persistence recovery and limits have 7, and HTTP lifecycle/response limits have 5. The four A-09-related executables pass 20/20 repeated runs; the total suite remains twenty-one CTests. Live provider HTTP/TLS/full-response integration, GUI approval clicks, real Android transport, and device paths still need coverage.
+`native_agent_mem_service` contains 24 no-device C++ groups. Native IPC adds 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 runtime groups. Socket coverage adds 4 client-transport and 6 multi-port manager groups for real Winsock loopback, scripted partial I/O/failures, all-port rollback, request/disconnect exclusion, and reconnect isolation. Provider/SSE coverage has 18 groups, persistence recovery/limits/global-settings ownership have 8, and HTTP lifecycle/response limits have 5. The four A-09-related executables pass 20/20 repeated runs; the total suite now has twenty-two CTests, including five static gates. Live provider HTTP/TLS/full-response integration, GUI approval clicks, real Android transport, and device paths still need coverage.
 
 ## Dependencies
 
 - **Required**: Visual Studio 2022 (C++17), CMake 3.16+, DirectX 12 SDK, Windows SDK
 - **Required**: LuaJIT — must be placed in `third_party/LuaJIT/` with `include/` and `lib/lua51.lib` (a `FATAL_ERROR` otherwise)
-- **AI chat** (`ENABLE_AI_CHAT`, default ON): `third_party/httplib/httplib.h` and `third_party/nlohmann/json.hpp` are vendored in-tree; additionally requires **OpenSSL** for HTTPS via `vcpkg install openssl:x64-windows-static` (static `/MT`; linked into the exe, no DLL shipped). If OpenSSL is missing, AI chat is silently disabled but the rest of the app builds.
-- **Optional**: Capstone — disassembly. Static `/MT` only: official installer at `capstone_ROOT` (default `C:/Program Files/capstone`, 6.x) or `vcpkg install capstone[core,arm,arm64,x86,mips]:x64-windows-static` (5.x). Linked into the exe. Do NOT use the dynamic `x64-windows` triplet — its `/MD` import lib conflicts with the `/MT` build.
-- **Optional**: Keystone — assembly-to-machine-code. Static `/MT`: `vcpkg install keystone:x64-windows-static` (or set `keystone_ROOT`). Linked into the exe.
+- **Required AI chat**: `third_party/httplib/httplib.h` and `third_party/nlohmann/json.hpp` are vendored in-tree; **OpenSSL** is required for HTTPS via `vcpkg install openssl:x64-windows-static` (static `/MT`; linked into the exe, no DLL shipped). `NativeAgent` has no supported AI-off build, and missing dependencies fail configuration.
+- **Required Capstone**: disassembly, static `/MT` only. Use the official installer at `capstone_ROOT` (default `C:/Program Files/capstone`, 6.x) or `vcpkg install capstone[core,arm,arm64,x86,mips]:x64-windows-static` (5.x). Do NOT use the dynamic `x64-windows` triplet.
+- **Required Keystone**: assembly-to-machine-code, static `/MT`; use `vcpkg install keystone:x64-windows-static` or set `keystone_ROOT`.
 - **Static single-exe distribution**: the whole app links `/MT` (static CRT via `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` + CMP0091) plus static capstone/keystone/OpenSSL/LuaJIT. **This is a hard constraint**: the prebuilt `lua51.lib` and official `capstone.lib` are both `/MT` (LIBCMT), so the exe must be `/MT` to avoid CRT conflicts. Result: `bin/ImGuiProject.exe` (~34MB) is fully self-contained — no capstone/keystone/OpenSSL DLLs, no VC runtime DLLs, no VC++ Redistributable needed; only Windows 10/11 x64 system DLLs. Copy the exe alone to another machine and it runs.
 
-CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_AI_CHAT` (default ON), `ENABLE_NATIVE_IPC` (default OFF, compile-only), `LUAJIT_STATIC` (default ON).
+CMake options: `USE_DX12` (default ON), `USE_DX11` (OFF), `ENABLE_NATIVE_IPC` (default OFF, compile-only), `LUAJIT_STATIC` (default ON).
 
-Feature gates resolved by CMake: `HAVE_AI_CHAT`, `HAVE_NATIVE_IPC`, `HAVE_CAPSTONE`, `HAVE_KEYSTONE`, `HAVE_LUAJIT`. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
+Supported product builds always define `HAVE_AI_CHAT`, `HAVE_CAPSTONE`, and `HAVE_KEYSTONE`; these are implementation macros, not OFF switches. `HAVE_NATIVE_IPC` remains opt-in. AI chat additionally defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links `OpenSSL::SSL OpenSSL::Crypto crypt32` (crypt32 for DPAPI key encryption).
 
 ## Architecture
 
@@ -98,7 +98,7 @@ native Named Pipe ──┘
 - `socket_request_manager.h` — `SocketRequestManager` serializes request/response pairs so concurrent callers don't interleave responses on a shared port.
 - `socket_io_timeout.h` — `SocketIoTimeout::ScopedTimeout` applies a bounded I/O timeout for the current scope (used by long Lua/IPC calls).
 
-### AI Chat subsystem (`gui/ai/`, gated by `HAVE_AI_CHAT`)
+### AI Chat subsystem (`gui/ai/`, mandatory `HAVE_AI_CHAT` product macro)
 
 The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatWindow`'s constructor (idempotent `initBuiltin*` calls).
 
@@ -115,12 +115,12 @@ The whole subsystem lives in the `AI` namespace and is wired up lazily in `ChatW
 - **Context budget**: `ProviderCapabilities::maxContextTokens` is currently unused. The byte-count heuristic omits tool schemas and output reserve; `tokenLimit` is not a guarantee that a request fits the active model.
 - **Persistence** (all relative to the process working directory; this is only next to the exe when launched from there):
   - `ai_config.json` — provider configs; **API keys are encrypted with Windows DPAPI** (`ApiKeyStore`, base64 over the encrypted blob). Keys are per-Windows-user and never bundled.
-  - `ai_settings.json` — non-secret, hand-editable settings (`AiSettings`): system prompt, proxy, etc. `DefaultSystemPrompt.h` seeds an AMem-specific prompt on first run.
-  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — **plaintext** chat/tool history (`SessionManager` + `ChatSession`; max 1000 messages after load/truncation). Driver card fields are redacted before display/audit/persistence, but files can still contain Lua, addresses, memory data, and other complete tool arguments/results.
+  - `ai_settings.json` — non-secret, hand-editable settings (`AiSettings`): the sole persistent system-prompt/token-budget owner, proxy, and other global settings. `DefaultSystemPrompt.h` seeds an AMem-specific prompt on first run.
+  - `ai_sessions/<id>.json` + `ai_sessions/index.json` — **plaintext** chat/tool history (`SessionManager` + `ChatSession`; format v2, max 1000 messages after load/truncation). Driver card fields are redacted before display/audit/persistence, but files can still contain Lua, addresses, memory data, and other complete tool arguments/results.
   - `ai_mutation_audit.jsonl` + `.1` — **plaintext**, redacted mutation/session-effect summaries. Records are capped at 64 KiB; the active file is capped at 4 MiB and keeps one rotated backup. The Audit window shows the most recent valid records.
   - `native_ipc_approval_audit.jsonl` + `.1` — **plaintext**, bounded approval-state metadata with no params/results. Records are capped at 16 KiB; active/backup files are capped at 4 MiB and the Native IPC window shows recent entries and write failures.
   - Legacy migrations run once on startup: `ai_config.dat`→`ai_config.json`, `ai_session.json`→`ai_sessions/`.
-  - Config, settings, index, and session loaders validate temporary state before commit and distinguish `Loaded`, `Missing`, `Recovered`, `Invalid`, and `IoError`. Only missing files seed defaults. Corrupt/I/O failures preserve the original; corrupt indexes are backed up as `.corrupt*` and rebuilt from valid session files. Session saves use the common atomic installer, and a failed load is not rebound for later save. Total persistence-file and per-message allocation limits remain incomplete, and session files still override global prompt/token settings.
+  - Config, settings, index, and session loaders validate temporary state before commit and distinguish `Loaded`, `Missing`, `Recovered`, `Invalid`, and `IoError`. Only missing files seed defaults. Corrupt/I/O failures preserve the original; corrupt indexes are backed up as `.corrupt*` and rebuilt from valid session files. Session saves use the common atomic installer, and a failed load is not rebound for later save. Persistence and retained-message byte limits are enforced before install/materialization, although JSON DOM overhead remains. Legacy v1 session prompt/token fields are ignored; v2 does not store them, and a successful load trims messages with the live global token budget.
 - **Provider trust**: `OpenAIProvider` currently defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS alone does not establish that the recipient is the provider the user intended.
 
 ### Native IPC foundation (`ipc/IpcProtocol.*`, `ipc/IpcFramedConnection.*`, `ipc/IpcHandshakeSession.*`, `ipc/IpcRequestProtocol.*`, `ipc/IpcRequestSession.*`, `ipc/NamedPipeServer.*`, `ipc/NativeAgentRuntime.*`)
@@ -172,7 +172,7 @@ All canonical in-app and native IPC address fields use shared adapters and requi
 - **Resource bounds**: `AiLimits.h` caps HTTP at 16 MiB, SSE line/event at 1/2 MiB, assistant/tool-result payloads at 4 MiB, ordinary messages at 8 MiB, persistence JSON at 32 MiB, and retained sessions at 16 MiB/1,000 messages (10,000 on disk). Keep validation before append/materialization; these limits do not replace pagination or provider-aware context budgeting.
 - **Sensitive data**: DPAPI protects provider API keys only. Redact secrets before putting tool arguments/results into session history.
 - **Scan flags are bitmasks** (defined in `MemoryTypes.h`): exactly one data-type bit (`BYTE_`/`WORD_`/`DWORD_`/`QWORD_`/`FLOAT_`/`DOUBLE_`/`XOR_`) OR-ed with one scan-mode bit (`_ACCURATE_VAL`, `_LARGER_THAN_VAL`, `_LESS_THAN_VAL`, `_BETWEEN_VAL`, `_UNKNOW_VAL`, `_ADD_UNKNOW_VAL`, `_SUB_UNKNOW_VAL`, `_CHANGED_VAL`, `_UNCHANGED_VAL`, …). The native Agent and temporary IPC validate combinations independently; new work belongs in the shared service contract rather than another constants mirror.
-- **Conditional compilation**: `HAVE_AI_CHAT` / `HAVE_CAPSTONE` / `HAVE_KEYSTONE` / `HAVE_LUAJIT` gate optional features; all source that touches them is `#ifdef`-guarded so the app builds with any subset present.
+- **Conditional compilation**: AI/Capstone/Keystone source retains `HAVE_*` guards as implementation boundaries, but the supported `NativeAgent` product always defines all three and CMake no longer supports a subset build. `HAVE_NATIVE_IPC` remains an actual opt-in feature gate.
 - **ImGui docking**: uses the docking branch; windows use `ImGuiWindowFlags_NoDocking` selectively.
 
 ## Branches

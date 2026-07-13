@@ -96,17 +96,21 @@
 - **CMake**: 3.16 或更高版本
 - **DirectX**: DirectX 12 SDK
 
-#### 可选依赖
-- **Capstone**: 反汇编库（用于断点反汇编功能）
+#### 必需原生依赖
+- **Capstone**: 静态 `/MT` 反汇编库
   ```bash
-  # 使用 vcpkg 安装
-  vcpkg install capstone:x64-windows
+  vcpkg install capstone[core,arm,arm64,x86,mips]:x64-windows-static
   ```
-- **Keystone**: 汇编库（用于汇编指令转机器码）
+- **Keystone**: 静态 `/MT` 汇编库
   ```bash
-  # 使用 vcpkg 安装
-  vcpkg install keystone:x64-windows
+  vcpkg install keystone:x64-windows-static
   ```
+- **OpenSSL**: 内置 AI Agent 的 HTTPS 依赖
+  ```bash
+  vcpkg install openssl:x64-windows-static
+  ```
+
+`NativeAgent` 不提供 AI/Capstone/Keystone 的 OFF 构建。缺少任一依赖时 CMake 配置直接失败。
 
 ### 编译步骤
 
@@ -215,18 +219,18 @@ Python MCP 代理和旧的未鉴权 HTTP IPC 已经从 `NativeAgent` 分支删�
 # 选择渲染后端
 option(USE_DX11 "Use DirectX 11 backend" OFF)
 option(USE_DX12 "Use DirectX 12 backend" ON)
-option(ENABLE_AI_CHAT "Enable AI chat integration" ON)
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 
 # Capstone 库路径
-set(CAPSTONE_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation directory")
+set(capstone_ROOT "C:/Program Files/capstone" CACHE PATH "Capstone installation directory")
 ```
 
 ### 编译宏定义
 
 - `USE_DX12` - 使用 DirectX 12 渲染
-- `HAVE_CAPSTONE` - 启用反汇编功能
-- `HAVE_KEYSTONE` - 启用汇编功能
+- `HAVE_AI_CHAT` - `NativeAgent` 产品固定定义的 AI Agent 实现宏
+- `HAVE_CAPSTONE` - `NativeAgent` 产品固定定义的反汇编实现宏
+- `HAVE_KEYSTONE` - `NativeAgent` 产品固定定义的汇编实现宏
 - `HAVE_LUAJIT` - 启用 LuaJIT 脚本引擎
 - `IMGUI_DISABLE_DEBUG_TOOLS` - 禁用 ImGui 调试工具
 - `DX12_ENABLE_DEBUG_LAYER` - 启用 D3D12 调试层（Debug 模式）

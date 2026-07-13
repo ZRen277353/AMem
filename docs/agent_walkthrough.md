@@ -72,7 +72,7 @@ SessionManager::init("ai_sessions", "ai_session.json")
   -> ChatSession::load(active session file)
 ```
 
-注意顺序：全局 prompt/token 已先写进 `session_`，随后 `ChatSession::load()` 又从会话文件读取同名字段。因此已有会话值会覆盖全局值。切换会话也一样；新会话只清消息，会继承之前留在 `session_` 的值。见 A-12。
+`AiSettings` 是 prompt/token 的唯一持久化所有者。构造函数先把全局 snapshot 写进 `session_`；`ChatSession::load()` 只载入历史，不修改这两个实时值。format v2 不保存 prompt/token；format v1 的旧字段无论类型是否有效都被忽略。每次成功 load 会立即按当前全局 token limit 裁剪历史，因此切换或新建会话不会改变全局设置。A-12 已关闭。
 
 会话加载也先校验临时状态。损坏活动会话不会绑定到 `ChatSession`，退出、切换或下一条消息调用 `saveBound()` 时不会覆盖它；窗口会保留原文件并创建新的可写会话。所有会话写入复用 `utils::installTempFile()`。
 
@@ -422,7 +422,7 @@ GUI 的 connect/disconnect/auto-reconnect 现在委托 `MultiPortClientManager`�
 
 最新用户回合即使超 token limit 也会保留，但不能绕过消息/session 硬上限。assistant 消息无法入会话时不会执行其工具；tool outcome 无法入会话时不会继续下一工具或 follow-up。
 
-普通消息保存只作用于有效绑定。退出和会话切换使用 `saveBound()`，加载失败留下的损坏路径不会被随后写回；新建/缺失会话则建立可写绑定。loader 在 JSON parse 前检查 32 MiB 文件上限，拒绝超过 10,000 条的磁盘消息数组，只 reserve/物化最后 1,000 条，并在提交前验证 16 MiB retained payload。A-09 已关闭；A-12 的 prompt/token 所有权仍未处理。
+普通消息保存只作用于有效绑定。退出和会话切换使用 `saveBound()`，加载失败留下的损坏路径不会被随后写回；新建/缺失会话则建立可写绑定。loader 在 JSON parse 前检查 32 MiB 文件上限，拒绝超过 10,000 条的磁盘消息数组，只 reserve/物化最后 1,000 条，并在提交前验证 16 MiB retained payload。session format v2 只保存历史；v1 prompt/token 字段迁移时忽略。A-09 与 A-12 已关闭。
 
 `estimateTokenCount()` 是 UTF-8 字节数/4 的启发式值，未使用 provider 声明的 64k/128k/200k context，也未计工具定义和输出预算。它适合 UI 粗略提示，不适合作为 provider 请求一定有效的证明。
 
@@ -575,7 +575,7 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 | scan/symbol 结果串台 | 两个前端是否交错执行复合命令 |
 | 正常 2xx 却得到半截回答 | provider 是否看见 `message_stop`/`finish_reason` |
 | provider 报 context 太长 | 本地估算是否忽略工具 schema、输出预留和 provider 上限 |
-| 切会话后 prompt 变了 | 会话文件中的 `systemPrompt`/`tokenLimit` |
+| 切会话后历史变短 | 当前 `AiSettings` token limit 会在 load 成功后立即裁剪历史组 |
 | API key 配置未加载 | `ai_config.json` 的 load status/log；损坏文件应保留而不是被默认值覆盖 |
 | 清空 API key 后又出现 | Save 跳过空 key，没有调用 `removeConfig()` |
 | Native IPC client 收不到完整帧 | header/payload 上限、deadline、partial close 和 terminal Error drain |
@@ -584,7 +584,7 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界与 tool-result 输出限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider/SSE 有 18 组，persistence recovery/limits 有 7 组，HTTP lifecycle/response limit 有 5 组。四个 A-09 相关 executable 连续 20/20；当前仍是 21 项 CTest。fresh Release AI-off/on 的最终产品链接证据记录在重构计划。其余测试优先从无设备依赖的边界开始：
+当前 `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界与 tool-result 输出限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation，Debug/Release 各连续 100 次通过；provider/SSE 有 18 组，persistence recovery/limits/global-settings ownership 有 8 组，HTTP lifecycle/response limit 有 5 组。四个 A-09 相关 executable 连续 20/20；五个静态 gate 加入 mandatory-feature contract 后，当前共 22 项 CTest。fresh mandatory-feature Release 的最终产品链接证据记录在重构计划。其余测试优先从无设备依赖的边界开始：
 
 1. 用本机假 provider HTTP/TLS 覆盖真实 content receiver、状态码和 full-response 解析。
 2. 用 table tests 覆盖 tool use/result 配对、预算和审批。
@@ -599,11 +599,11 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 ```text
 Startup
   config/settings -> live providers/tool/http
-  session index -> active session -> load (currently can override global prompt/token)
+  session index -> active session -> load history with live global prompt/token
 
 Send
   user message -> getMessagesForRequest
-  -> AgentController -> provider -> HttpClient(detached)
+  -> AgentController -> provider -> HttpClient(owned joinable worker)
   -> UIMessageQueue -> pollMessages
 
 Tool
@@ -618,8 +618,8 @@ Stop
   != roll back a sent write or persist its late result
 
 Exit
-  Native IPC cancel/join + HTTP bounded wait + tool worker join + device disconnect
-  != proof that provider HTTP detached work has ended
+  Native IPC cancel/join + HTTP cancel/stop/join + tool worker join + device disconnect
+  HTTP join may wait for the configured I/O timeout, but no worker remains on return
 
 Socket timeout
   -> poison session + advance generation

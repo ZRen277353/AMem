@@ -5,7 +5,7 @@
 
 本文描述当前工作区中的内置 AI Chat、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。`NativeAgent` 固定构建 AI Chat、Capstone 和 Keystone，缺少任一依赖时 CMake 配置失败；`HAVE_AI_CHAT`/`HAVE_CAPSTONE`/`HAVE_KEYSTONE` 不再对应受支持的 OFF 组合。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
 
 ## 1. 系统总览
 
@@ -356,21 +356,21 @@ Android 协议在共享 TCP 字节流上没有 request id/帧 generation。`Devi
 | `ai_config.json` | `ApiKeyStore` | provider endpoint/model/API key | key 用 Windows DPAPI；无效/I/O 失败保留原文件和内存快照，只有缺失才写默认值 |
 | `ai_settings.json` | `AiSettings` | provider 选择、prompt、代理、预算、token limit、自动审批 | 明文；临时解析/完整校验后一次提交，只有缺失才写默认值 |
 | `ai_sessions/index.json` | `SessionManager` | 会话元数据和 active id | 损坏索引先保留为 `.corrupt*`，再扫描合法会话重建；备份失败时禁止自动写回 |
-| `ai_sessions/<id>.json` | `ChatSession` | 消息、tool calls/results、prompt、token limit | 明文；32 MiB 文件、16 MiB retained payload、1,000 内存消息/10,000 磁盘消息；失败加载不绑定损坏路径，写入使用统一原子安装 |
+| `ai_sessions/<id>.json` | `ChatSession` | format v2 消息与 tool calls/results | 明文；32 MiB 文件、16 MiB retained payload、1,000 内存消息/10,000 磁盘消息；失败加载不绑定损坏路径，写入使用统一原子安装 |
 | `ai_mutation_audit.jsonl` / `.1` | `AgentMutationAuditLog` | mutation/session-effect 完成摘要 | 明文、字段脱敏；64 KiB/record，4 MiB active + 一个轮转备份 |
 | `native_ipc_approval_audit.jsonl` / `.1` | `IpcApprovalAuditLog` | Native IPC approval 状态转换 | 明文；无 params/results；16 KiB/record，4 MiB active + 一个轮转备份 |
 
-### 9.1 全局设置与会话字段冲突
+### 9.1 全局设置与会话格式
 
-`ai_settings.json` 把 system prompt/token limit 定义为全局设置；会话文件也保存同名字段。启动时先应用全局值，再 load 会话，因此会话值胜出。创建新会话还会继承前一个会话留在内存中的值。
+`AiSettings` 是 system prompt 与 token limit 的唯一持久化所有者。`ChatSession` 保留一份供请求构造和裁剪使用的实时副本，但 session format v2 只写 `version` 和消息历史，不再保存这两个全局字段。启动、切换和创建会话都保留当前全局值。
 
-维护者需要明确选择“全局”或“每会话”模型，不能继续让两种来源隐式竞争。
+format v1 仍可迁移；旧文件中的 `systemPrompt`/`tokenLimit` 无论类型是否有效都被忽略，不会阻止消息载入。成功 load 后立即按当前全局 token limit 裁剪消息组。该所有权规则关闭 A-12，但裁剪仍是 UTF-8 bytes/4 的本地启发式，provider-aware context 预算仍属于 A-21。
 
 ### 9.2 写盘保证
 
 `ApiKeyStore`、`AiSettings`、`SessionManager` 和 `ChatSession` 统一使用 `utils::installTempFile()`。加载入口统一返回 `Loaded`、`Missing`、`Recovered`、`Invalid` 或 `IoError`，先把 JSON 完整解析并校验到临时状态，成功后才替换内存状态；只有 `Missing` 会自动创建默认文件。
 
-索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。所有 JSON loader 在 parse 前拒绝超过 32 MiB 的文件；会话逐消息校验 8 MiB content 和 tool 字段预算，磁盘数组超过 10,000 条拒绝，只 reserve/物化最后 1,000 条，并要求 retained payload 不超过 16 MiB。保存时最终 JSON 转义后超过 32 MiB 也不会安装。A-04 与 A-09 因此关闭；会话 prompt/token 覆盖全局设置的 A-12 仍未修复。
+索引为 `Invalid` 时，`SessionManager` 先把原件保留为不覆盖既有备份的 `.corrupt*`，再扫描合法会话 JSON 重建元数据；若原件无法保留，则不自动写回。`ChatSession::saveBound()` 只保存成功加载或明确新建的绑定，损坏的活动会话会保留原文件并切换到新的可写会话。所有 JSON loader 在 parse 前拒绝超过 32 MiB 的文件；会话逐消息校验 8 MiB content 和 tool 字段预算，磁盘数组超过 10,000 条拒绝，只 reserve/物化最后 1,000 条，并要求 retained payload 不超过 16 MiB。保存时最终 JSON 转义后超过 32 MiB 也不会安装。A-04、A-09 与 A-12 因此关闭。
 
 ### 9.3 远端 provider 边界
 
@@ -508,7 +508,7 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界和 4 MiB tool-result 限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits 有 7 组；HTTP lifecycle/receiver limit 有 5 组。四个 A-09 相关 executable 连续 20/20 通过。连同四个静态 gate，当前共 21 项 CTest；fresh Release `ENABLE_AI_CHAT=OFF` 与 `ON` 的最终链接证据见重构计划。以下路径仍缺测试：
+当前无设备 CTest `native_agent_mem_service` 的 24 个测试组覆盖既有 service/Agent 边界和 4 MiB tool-result 限制。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、6 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组，二者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits/global-settings ownership 有 8 组；HTTP lifecycle/receiver limit 有 5 组。四个 A-09 相关 executable 连续 20/20 通过。连同五个静态 gate，当前共 22 项 CTest；fresh mandatory-feature Release 的最终链接证据见重构计划。以下路径仍缺测试：
 
 - provider 真实 HTTP/TLS 与 full-response 端到端解析
 - ChatSession 通用工具配对与预算裁剪

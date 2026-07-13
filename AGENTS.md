@@ -37,33 +37,32 @@ Output: `bin/ImGuiProject.exe`.
 
 The project can also be opened directly through `CMakeLists.txt` in Visual Studio 2022 using an x64 Release/Debug configuration.
 
-`native_agent_mem_service` is the main no-device C++ test with 24 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Socket coverage adds 4 client-transport groups and 6 multi-port manager groups for system Winsock loopback, partial I/O, timeout/EOF poisoning, all-port rollback, request/disconnect exclusion, and reconnect generation isolation. `native_provider_stream_terminal` has 18 pure parser/state-machine and payload-boundary groups. `native_persistence_recovery` has 7 groups for transactional recovery plus file/message/session limits. `native_http_client_lifecycle` has 5 local-HTTP groups, including the 16 MiB receiver boundary; the four lifecycle groups previously passed 100/100, and all four A-09-related test executables pass 20/20 together. Twenty-one CTests include these seventeen runtime/service/provider/persistence/HTTP suites plus four static gates. Live provider HTTP/TLS and full-response integration, GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
+`native_agent_mem_service` is the main no-device C++ test with 24 groups. Native IPC has 6 security-audit, 12 approval-broker, 5 protocol, 5 transport, 8 framed-I/O, 8 handshake, 6 request-contract, 9 request-session, 4 method-catalog, 15 dispatcher, and 10 owned-runtime groups. Socket coverage adds 4 client-transport groups and 6 multi-port manager groups for system Winsock loopback, partial I/O, timeout/EOF poisoning, all-port rollback, request/disconnect exclusion, and reconnect generation isolation. `native_provider_stream_terminal` has 18 pure parser/state-machine and payload-boundary groups. `native_persistence_recovery` has 8 groups for transactional recovery, file/message/session limits, and global prompt/token ownership. `native_http_client_lifecycle` has 5 local-HTTP groups, including the 16 MiB receiver boundary; the four lifecycle groups previously passed 100/100, and all four A-09-related test executables pass 20/20 together. Twenty-two CTests include these seventeen runtime/service/provider/persistence/HTTP suites plus five static gates. Live provider HTTP/TLS and full-response integration, GUI approval clicks, real Android transport, and device operations still lack complete automation. For manual wire-protocol checks use `tools/protocol_reference/amem_client.py`; for the live Lua API use `scripts/dump_api.lua` as described in `scripts/README.md`. Changes involving real device state, concurrency, cancellation, or teardown still need manual end-to-end verification with the GUI and an Android device.
 
 ## Dependencies and Feature Gates
 
 - Required: Visual Studio 2022, CMake 3.16+, Windows SDK, DirectX 12 SDK.
 - Required: LuaJIT under `third_party/LuaJIT/` with `include/` and `lib/lua51.lib`.
-- AI Chat (`ENABLE_AI_CHAT`, default ON): vendored cpp-httplib/nlohmann JSON plus static OpenSSL. If OpenSSL is absent, AI Chat is disabled while the rest of the app can still build.
-- Optional: Capstone for disassembly and Keystone for assembly. Prefer static x64 vcpkg triplets.
+- Required on `NativeAgent`: vendored cpp-httplib/nlohmann JSON plus static OpenSSL for AI Chat. There is no supported AI-off build; a missing dependency is a configure error.
+- Required on `NativeAgent`: static `/MT` Capstone for disassembly and Keystone for assembly. Missing libraries are configure errors; prefer static x64 vcpkg triplets.
 - The executable uses the static `/MT` CRT. Do not introduce `/MD` libraries into the final link.
 
 CMake options:
 
 - `USE_DX12` (default ON)
 - `USE_DX11` (default OFF)
-- `ENABLE_AI_CHAT` (default ON)
 - `ENABLE_NATIVE_IPC` (default OFF; compile-only transport foundation)
 - `LUAJIT_STATIC` (default ON)
 
-Compile-time gates:
+Compile-time macros:
 
-- `HAVE_AI_CHAT`
+- `HAVE_AI_CHAT` (always defined in a supported `NativeAgent` product build)
 - `HAVE_NATIVE_IPC`
-- `HAVE_CAPSTONE`
-- `HAVE_KEYSTONE`
+- `HAVE_CAPSTONE` (always defined in a supported `NativeAgent` product build)
+- `HAVE_KEYSTONE` (always defined in a supported `NativeAgent` product build)
 - `HAVE_LUAJIT`
 
-Source that depends on an optional feature must remain correctly guarded.
+The existing AI/Capstone/Keystone source guards remain implementation boundaries, not supported OFF switches. Source that depends on Native IPC or another genuinely optional feature must remain correctly guarded.
 
 ## Unifying Command Pipeline
 
@@ -153,7 +152,7 @@ Validate every untrusted count, string length, and byte size before allocating o
 
 ## In-App AI Chat (`gui/ai/`)
 
-The subsystem is under the `AI` namespace and gated by `HAVE_AI_CHAT`.
+The subsystem is under the `AI` namespace. Supported `NativeAgent` builds always define `HAVE_AI_CHAT`; the source guard is not a user-facing build option.
 
 ### Control Flow
 
@@ -233,11 +232,11 @@ Files are relative to the process working directory:
 
 Do not claim that all AI data is encrypted. `driver_initialize`/`init_driver` card fields are redacted from approval display, tool audit, session JSON, and mutation audit while the original remains transiently available for execution/provider continuity. The mutation audit also omits Lua code, raw memory data, bulk output, registers, hits, and large fields, but it is not encrypted. Session files can still contain Lua code, addresses, memory bytes, registers, other tool arguments, and tool results, and that history can be sent to the active remote provider in later turns.
 
-`ApiKeyStore`, `AiSettings`, `SessionManager`, and `ChatSession` load into temporary state and report `Loaded`, `Missing`, `Recovered`, `Invalid`, or `IoError`; only a genuinely missing file may seed defaults. Invalid/I/O loads preserve the original file and prior in-memory state. A corrupt session index is moved to a `.corrupt*` backup before valid session JSON is scanned to rebuild metadata; if preservation fails, automatic write-back is disabled. `ChatSession` uses `utils::installTempFile()`, refuses serialized output above 32 MiB, and `saveBound()` prevents a failed session load from overwriting the damaged path. These guarantees close A-09's file/message/session byte boundaries but do not resolve the global-versus-session prompt/token ownership conflict in A-12.
+`ApiKeyStore`, `AiSettings`, `SessionManager`, and `ChatSession` load into temporary state and report `Loaded`, `Missing`, `Recovered`, `Invalid`, or `IoError`; only a genuinely missing file may seed defaults. Invalid/I/O loads preserve the original file and prior in-memory state. A corrupt session index is moved to a `.corrupt*` backup before valid session JSON is scanned to rebuild metadata; if preservation fails, automatic write-back is disabled. `ChatSession` uses `utils::installTempFile()`, refuses serialized output above 32 MiB, and `saveBound()` prevents a failed session load from overwriting the damaged path. These guarantees close A-09's file/message/session byte boundaries. `AiSettings` is the sole persistent owner of the system prompt and token budget, closing A-12.
 
 The settings UI currently has no working provider-key deletion path: empty keys are skipped on Save even though `ApiKeyStore::removeConfig()` exists. Add an explicit Forget action and securely clear plaintext edit buffers.
 
-The current session format also stores `systemPrompt` and `tokenLimit`, even though the settings UI presents them as global. Loading a session can override global values.
+Session format v2 stores only the version and chat/tool messages. Version 1 files remain readable, but their legacy `systemPrompt` and `tokenLimit` fields are ignored regardless of field type. Startup, switching, and new-session flows preserve the live `AiSettings` values, and each successful session load immediately trims history against the current global token budget. This local heuristic still does not close the provider-aware context-budget gap in A-21.
 
 `OpenAIProvider` defaults to `https://ai.ikik.net/v1`, a third-party OpenAI-compatible gateway. HTTPS validates transport, not recipient trust. Do not silently introduce or retain third-party endpoints without explicit UI/documentation disclosure.
 

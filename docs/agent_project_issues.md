@@ -28,7 +28,7 @@
 | A-09 | P1 | 已修复 | HTTP/SSE、provider 累积、工具输出和会话载入均有分层硬上限与回归 |
 | A-10 | P1 | 待安全决策 | “OpenAI” provider 默认指向第三方兼容网关 |
 | A-11 | P1 | 部分修复 | driver card 已脱敏；其他敏感工具参数、结果和脚本仍明文保存 |
-| A-12 | P2 | 未修复 | 全局 prompt/token 设置会被会话文件反向覆盖 |
+| A-12 | P2 | 已修复 | `AiSettings` 独占全局 prompt/token；session v2 只保存历史，v1 字段迁移时忽略 |
 | A-13 | P2 | 已修复 | `symbol_*` 按当前二元安全模型统一分类、事务语义和默认 prompt |
 | A-14 | P2 | 已修复 | 内置 Agent 与 Native IPC 共用 `MemJsonTools`，地址均要求显式 `0x` |
 | A-15 | P2 | 未修复 | 设置草稿不完整，且无法从 UI 删除 provider key |
@@ -77,7 +77,7 @@
 
 **剩余边界**
 
-A-04 只关闭“损坏加载覆盖原件/异常逃逸”问题。持久化文件、单消息和会话载入的总量上限现由 A-09 关闭；会话中的 `systemPrompt`/`tokenLimit` 仍会覆盖全局设置，A-12 未修复。
+A-04 只关闭“损坏加载覆盖原件/异常逃逸”问题。持久化文件、单消息和会话载入的总量上限由 A-09 关闭；全局 prompt/token 所有权和 v1 session 迁移由 A-12 关闭。
 
 ### A-05：HTTP worker 的完成回调未纳入排空计数（已修复）
 
@@ -137,7 +137,7 @@ GUI/Agent/Native IPC 并发和 process-selection 多步流程仍不是完整事�
 - `HttpClient` 在 append 前拒绝超限 chunk，`SSEParser::fail()` 清理 line/event buffer；三个 provider 把网络、流式和非流式超限统一归类为 `InvalidResponse`。非流式解析在复制超长字段或物化第 65 个 tool call 前返回。
 - `ToolExecutor` 丢弃并释放超限结果。mutation 已可能发出，因此返回 `completion_unknown`；`AgentRunner` 把 tool audit 收缩到 8 MiB。assistant/tool outcome 无法进入会话时，`ChatWindow` fail closed，不执行未记录工具，也不发送缺失结果的 follow-up。
 - 所有持久化 JSON 在 parse 前受 32 MiB 文件限制；`ChatSession` 写盘也检查最终转义后的 32 MiB。磁盘消息最多 10,000 条，只 reserve/物化最后 1,000 条；单消息/tool 字段逐项校验，retained payload 上限 16 MiB。
-- runtime `addMessage()` 预检受保护的最新用户回合，按完整对话组裁剪；拒绝时不先删除旧历史。`native_persistence_recovery` 的 7 组、`native_provider_stream_terminal` 的 18 组、`native_http_client_lifecycle` 的 5 组和 `native_agent_mem_service` 的 24 组均通过，四个 executable 连续 20/20，完整 CTest 21/21。
+- runtime `addMessage()` 预检受保护的最新用户回合，按完整对话组裁剪；拒绝时不先删除旧历史。`native_persistence_recovery` 的 8 组、`native_provider_stream_terminal` 的 18 组、`native_http_client_lifecycle` 的 5 组和 `native_agent_mem_service` 的 24 组均通过，四个 executable 连续 20/20，完整 CTest 21/21。
 
 **剩余边界**
 
@@ -175,24 +175,19 @@ driver card 已通过 `ToolCallSecurity` 从审批显示、tool audit、`ai_sess
 - 提供“不持久化工具结果”或加密会话选项，并在 UI 说明远端 provider 数据边界。
 - 对内存/寄存器结果保存摘要或用户明确选择的片段。
 
-### A-12：全局 prompt/token 设置被会话文件覆盖
+### A-12：全局 prompt/token 设置被会话文件覆盖（已修复）
 
-**证据**
+**关闭证据**
 
-- `ChatWindow` 构造时先把 `ai_settings.json` 的 `systemPrompt`/`tokenLimit` 写入 `session_`，随后调用 `session_.load()`。
-- `ChatSession::loadUnlocked()` 又从每个会话文件读取同名字段。
-- 切换会话同样直接 load；创建新会话的 `resetInMemory()` 只清消息，会继承刚才会话的 prompt/token。
+- `AiSettings` 明确成为 system prompt/token limit 的唯一持久化所有者；`ChatSession` 只持有请求构造和裁剪所需的实时副本。
+- session format v2 只保存 `version` 和消息历史，不再序列化 `systemPrompt`/`tokenLimit`。loader 仅接受 v1/v2，拒绝未来未知版本。
+- v1 文件中的旧 prompt/token 字段无论值类型是否有效都被忽略，不会覆盖全局设置，也不会阻止历史消息迁移。
+- startup、session switch 和 new session 都保留当前全局值；成功 load 后立即用 live global token limit 按完整消息组裁剪。
+- `native_persistence_recovery` 新增 global-settings ownership 组，覆盖 v1 忽略、v2 输出/重载和 load-time 全局预算裁剪；当前共 8 组并连续 50/50 通过，完整 CTest 22/22。
 
-**影响**
+**剩余边界**
 
-文档和设置 UI 把它们表现为全局设置，实际行为却是隐式的每会话设置。用户切换会话后，模型上下文和 token 裁剪策略可能悄然变化。
-
-**建议**
-
-明确选择一种模型：
-
-- 若为全局设置：会话文件停止保存/加载这两个字段，load 后重新应用 `AiSettings`。
-- 若为每会话设置：UI 显示并编辑当前会话值，索引/迁移文档也要明确。
+所有权冲突已经关闭，但 token limit 仍只是 UTF-8 bytes/4 的本地启发式。它没有结合当前 provider/model context、24 个工具 schema 和输出预留；这些属于 A-21，不能因 A-12 关闭而视为已解决。
 
 ### A-13：`symbol_*` 分类、共享状态和默认 prompt 漂移（已按当前二元模型解决）
 
@@ -248,7 +243,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 
 - provider 声明 `maxContextTokens`：OpenAI 128k、Claude 200k、DeepSeek 64k。
 - 除声明外没有代码读取 `getCapabilities()`。
-- `AiSettings` 允许 `tokenLimit` 到 1,000,000；`AiSettings.h` 注释仍写 200,000。
+- `AiSettings` 允许 `tokenLimit` 到 1,000,000，header 注释已与实现对齐；该值仍只是全局用户上限，不会自动受 provider 能力约束。
 - `ChatSession::estimateTokenCount()` 仅用消息 UTF-8 字节数/4，未计当前 24 个广告工具 schema、provider JSON 开销或输出 token 预留。
 
 **影响**
@@ -260,11 +255,11 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - 请求预算取用户上限、当前 provider/model 上限和 endpoint 配置的最小值。
 - 预留输出 token 与工具 schema/序列化开销；至少使用分语言更保守估算，理想情况下使用对应 tokenizer。
 - 自定义兼容 endpoint 允许用户显式配置 model context，而不是沿用 provider 类硬编码。
-- 清理 `AiSettings.h` 与实现的 clamp 漂移。
+- 保持全局用户上限与 provider-aware 请求预算分层，不能把 1,000,000 直接视为任一模型可接受的 context。
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 24 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits 有 7 组；HTTP lifecycle/response limit 有 5 组。四个 A-09 相关 executable 连续 20/20，当前共 21 项 CTest；fresh Release AI-off/AI-on 的产品链接证据记录在重构计划。
+仓库已有 `native_agent_mem_service` 的 24 个测试组。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、6 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；两者在 Debug/Release 各连续 100 次通过。provider/SSE 有 18 组；persistence recovery/limits/global-settings ownership 有 8 组；HTTP lifecycle/response limit 有 5 组。四个 A-09 相关 executable 连续 20/20，五个静态 gate 加入 mandatory-feature contract 后当前共 22 项 CTest；fresh mandatory-feature Release 的产品链接证据记录在重构计划。
 
 - 三类 provider 的真实 HTTP/TLS 与 full-response 端到端解析。
 - `ChatSession::getMessagesForRequest()` 的通用 tool call/result 配对和预算裁剪。
@@ -286,6 +281,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 | A-04 配置/索引损坏覆盖原件 | 四类 loader 临时解析后提交并区分五种状态；只有缺失才写默认值，损坏索引保留后扫描重建，失败会话不绑定写回，统一使用原子安装助手 |
 | A-05 HTTP callback 脱离排空计数 | 每请求 owned/joinable worker；completion callback 返回后才完成，shutdown 取消/stop 并 join 全部线程，self-join 显式失败 |
 | A-09 响应/输出/会话无总量上限 | HTTP/SSE/provider/tool/session/persistence 分层硬上限；超限 mutation 保留 completion unknown，会话裁剪按完整组且失败事务式，四个相关 executable 连续 20/20 |
+| A-12 全局 prompt/token 被 session 覆盖 | `AiSettings` 是唯一持久化所有者；session v2 只保存历史，v1 同名字段忽略，load 后按当前全局预算裁剪 |
 | Python MCP 复制工具 schema、常量和 retry 语义 | FastMCP package、安装入口、IDE 配置和 `.mcp.json` 已删除；仅保留不参与产品运行的标准库协议排障脚本 |
 | A-01 legacy HTTP 无鉴权/CORS 控制面 | `ipc/IpcServer.*`、端口启动、CMake 选项和 compile macro 已删除；静态 gate 阻止恢复旧 HTTP server |
 | A-06 legacy detached handler/partial send | legacy handler 已随 HTTP server 删除；Native IPC 使用 owned/joinable handler、overlapped exact I/O、Stop event 与 `CancelIoEx` |
@@ -320,7 +316,7 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 - DPAPI 只保护 provider API key，不保护会话、工具参数或结果。
 - Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权；尚未完成跨用户/session 与真实 remote client 负向验证。
 - execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
-- 四类持久化 loader 已事务化且 `ChatSession` 已统一使用 `installTempFile()`；A-09 的文件/消息/session 上限已落地，但 JSON DOM allocator 开销不等于源字节，A-12 的全局/会话设置所有权也未解决。
+- 四类持久化 loader 已事务化且 `ChatSession` 已统一使用 `installTempFile()`；A-09 的文件/消息/session 上限与 A-12 的全局设置所有权已落地，但 JSON DOM allocator 开销仍不等于源字节。
 - `DeviceSession` 已删除待处理字节清理恢复路径；client 与 multi-port manager 测试证明 partial I/O、timeout/EOF、迟到字节隔离和 lifecycle 互斥，但 Android 端 driver/process/scan/breakpoint 状态恢复仍没有自动承诺。
 - `ProviderCapabilities` 当前只是声明，不会自动保护请求不超过模型 context。
 
@@ -333,4 +329,4 @@ Provider、prompt 和数值设置使用可重置的 edit buffer；`proxyEnabled_
 5. 为 Stop、写工具晚到结果和复合设备操作建立明确状态/事务边界。
 6. 增加 provider-aware context 预算和列表分页。
 7. 明确第三方 endpoint、会话明文与 provider key 删除策略。
-8. 最后统一全局/会话设置、安全分类、能力矩阵和跨前端结果契约。
+8. 最后统一安全分类、能力矩阵和跨前端结果契约；全局/会话设置所有权已由 A-12 固定。
