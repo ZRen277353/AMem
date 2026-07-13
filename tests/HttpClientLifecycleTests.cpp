@@ -1,4 +1,5 @@
 #include "gui/ai/HttpClient.h"
+#include "gui/ai/AiLimits.h"
 
 #include "httplib.h"
 
@@ -52,6 +53,12 @@ public:
                     return sink.write("tick", 4);
                 });
         });
+        server_.Post("/oversized", [](const httplib::Request&,
+                                       httplib::Response& response) {
+            std::string body(AI::Limits::kMaxHttpResponseBytes + 64u * 1024u,
+                             'x');
+            response.set_content(std::move(body), "application/octet-stream");
+        });
 
         port_ = server_.bind_to_any_port("127.0.0.1");
         if (port_ <= 0) {
@@ -73,6 +80,10 @@ public:
 
     std::string url() const {
         return "http://127.0.0.1:" + std::to_string(port_) + "/wait";
+    }
+
+    std::string oversizedUrl() const {
+        return "http://127.0.0.1:" + std::to_string(port_) + "/oversized";
     }
 
     bool waitForHandler(std::chrono::milliseconds timeout = 2s) {
@@ -216,6 +227,41 @@ void testWorkerCannotJoinItself() {
            "shutdown from an owned worker must report that it cannot self-join");
 }
 
+void testHttpResponseLimit() {
+    BlockingHttpServer server;
+    AI::HttpClient& client = AI::HttpClient::getInstance();
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool completed = false;
+    AI::HttpResponse response;
+
+    const uint64_t requestId = client.postAsync(
+        server.oversizedUrl(), {}, "{}", nullptr,
+        [&](AI::HttpResponse result) {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                response = std::move(result);
+                completed = true;
+            }
+            cv.notify_all();
+        },
+        std::make_shared<std::atomic<bool>>(false));
+
+    bool callbackCompleted = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        callbackCompleted = cv.wait_for(lock, 5s, [&] { return completed; });
+    }
+
+    expect(requestId != 0, "oversized response test was not dispatched");
+    expect(callbackCompleted, "oversized response callback did not complete");
+    expect(response.limitExceeded &&
+               response.errorMessage.find("16 MiB") != std::string::npos,
+           "HTTP receiver did not reject the first chunk beyond 16 MiB");
+    expect(response.body.empty(),
+           "oversized HTTP payload must not be returned to the provider");
+}
+
 void testShutdownInterruptsAndJoinsCompletion() {
     BlockingHttpServer server;
     AI::HttpClient& client = AI::HttpClient::getInstance();
@@ -276,6 +322,7 @@ int main() {
     const std::vector<std::pair<const char*, void (*)()>> tests = {
         {"cancel stops streaming transport", &testCancelStopsStreamingTransport},
         {"worker self-shutdown rejection", &testWorkerCannotJoinItself},
+        {"HTTP response limit", &testHttpResponseLimit},
         {"shutdown interrupts and joins callback",
          &testShutdownInterruptsAndJoinsCompletion},
         {"post rejected after shutdown", &testPostRejectedAfterShutdown},

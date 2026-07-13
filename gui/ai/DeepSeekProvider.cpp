@@ -2,7 +2,9 @@
 
 #include "DeepSeekProvider.h"
 
+#include "AiLimits.h"
 #include "HttpClient.h"
+#include "ProviderResponseLimits.h"
 #include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
@@ -215,7 +217,9 @@ std::string DeepSeekProvider::buildRequestBody(const CompletionRequest& request)
 
 void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
                                      const CompletionRequest& request,
-                                     ChatMessage& outMessage) {
+                                     ChatMessage& outMessage,
+                                     size_t& totalArgumentBytes,
+                                     std::string& limitError) {
     if (eventData == "[DONE]") {
         return;
     }
@@ -241,9 +245,13 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
         const auto& delta = choice["delta"];
 
         if (delta.contains("content") && delta["content"].is_string()) {
-            const std::string token = delta["content"].get<std::string>();
+            const std::string& token =
+                delta["content"].get_ref<const std::string&>();
             if (!token.empty()) {
-                outMessage.content += token;
+                if (!appendAssistantContentWithinLimit(
+                        outMessage.content, token, limitError)) {
+                    return;
+                }
                 UIMessage msg;
                 msg.type = UIMessageType::Token;
                 msg.runId = request.runId;
@@ -275,15 +283,34 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
                 ToolCall& target = outMessage.toolCalls[idx];
 
                 if (tcFrag.contains("id") && tcFrag["id"].is_string()) {
-                    target.id = tcFrag["id"].get<std::string>();
+                    const std::string& id =
+                        tcFrag["id"].get_ref<const std::string&>();
+                    if (id.size() > Limits::kMaxToolCallIdBytes) {
+                        limitError = "tool call id exceeds 256-byte limit";
+                        return;
+                    }
+                    target.id = id;
                 }
                 if (tcFrag.contains("function") && tcFrag["function"].is_object()) {
                     const auto& fn = tcFrag["function"];
                     if (fn.contains("name") && fn["name"].is_string()) {
-                        target.name = fn["name"].get<std::string>();
+                        const std::string& name =
+                            fn["name"].get_ref<const std::string&>();
+                        if (name.size() > Limits::kMaxToolCallNameBytes) {
+                            limitError =
+                                "tool call name exceeds 64-byte limit";
+                            return;
+                        }
+                        target.name = name;
                     }
                     if (fn.contains("arguments") && fn["arguments"].is_string()) {
-                        target.arguments += fn["arguments"].get<std::string>();
+                        const std::string& fragment =
+                            fn["arguments"].get_ref<const std::string&>();
+                        if (!appendToolArgumentsWithinLimit(
+                                target, fragment, totalArgumentBytes,
+                                limitError)) {
+                            return;
+                        }
                     }
                 }
             }
@@ -299,6 +326,12 @@ void DeepSeekProvider::parseSSEChunk(const std::string& eventData,
 CompletionResponse DeepSeekProvider::parseFullResponse(const std::string& body) {
     CompletionResponse response;
     response.message.role = Role::Assistant;
+
+    if (body.size() > Limits::kMaxHttpResponseBytes) {
+        response.error = providerLimitError(
+            "HTTP response exceeds 16 MiB limit");
+        return response;
+    }
 
     json j;
     try {
@@ -325,28 +358,62 @@ CompletionResponse DeepSeekProvider::parseFullResponse(const std::string& body) 
 
     const auto& msg = choice["message"];
     if (msg.contains("content") && msg["content"].is_string()) {
-        response.message.content = msg["content"].get<std::string>();
+        std::string error;
+        if (!appendAssistantContentWithinLimit(
+                response.message.content,
+                msg["content"].get_ref<const std::string&>(), error)) {
+            response.error = providerLimitError(error);
+            return response;
+        }
     }
 
+    size_t totalArgumentBytes = 0;
     if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
         for (const auto& tc : msg["tool_calls"]) {
             if (!tc.is_object()) continue;
+            if (response.message.toolCalls.size() >=
+                Limits::kMaxToolCallsPerMessage) {
+                response.error = providerLimitError(
+                    "assistant response exceeds 64 tool calls");
+                return response;
+            }
             ToolCall call;
             if (tc.contains("id") && tc["id"].is_string()) {
-                call.id = tc["id"].get<std::string>();
+                const std::string& id =
+                    tc["id"].get_ref<const std::string&>();
+                if (id.size() > Limits::kMaxToolCallIdBytes) {
+                    response.error = providerLimitError(
+                        "tool call id exceeds 256-byte limit");
+                    return response;
+                }
+                call.id = id;
             }
             if (tc.contains("function") && tc["function"].is_object()) {
                 const auto& fn = tc["function"];
                 if (fn.contains("name") && fn["name"].is_string()) {
-                    call.name = fn["name"].get<std::string>();
+                    const std::string& name =
+                        fn["name"].get_ref<const std::string&>();
+                    if (name.size() > Limits::kMaxToolCallNameBytes) {
+                        response.error = providerLimitError(
+                            "tool call name exceeds 64-byte limit");
+                        return response;
+                    }
+                    call.name = name;
                 }
                 if (fn.contains("arguments")) {
+                    std::string arguments;
                     if (fn["arguments"].is_string()) {
-                        call.arguments = fn["arguments"].get<std::string>();
+                        arguments = fn["arguments"].get<std::string>();
                     } else {
                         // Some servers may embed arguments as a JSON object;
                         // preserve the original encoding as a string.
-                        call.arguments = fn["arguments"].dump();
+                        arguments = fn["arguments"].dump();
+                    }
+                    std::string error;
+                    if (!appendToolArgumentsWithinLimit(
+                            call, arguments, totalArgumentBytes, error)) {
+                        response.error = providerLimitError(error);
+                        return response;
                     }
                 }
             }
@@ -357,6 +424,14 @@ CompletionResponse DeepSeekProvider::parseFullResponse(const std::string& body) 
     // Requirement 4.5: validate tool_call arguments are well-formed JSON.
     validateToolCallArguments(response.message, response);
 
+    if (!response.error) {
+        std::string limitError;
+        if (!validateProviderMessageLimits(response.message, limitError)) {
+            response.error = providerLimitError(limitError);
+            response.message.content.clear();
+            response.message.toolCalls.clear();
+        }
+    }
     return response;
 }
 
@@ -376,9 +451,7 @@ bool DeepSeekProvider::validateToolCallArguments(const ChatMessage& message,
         } catch (const std::exception& ex) {
             std::ostringstream oss;
             oss << "DeepSeek returned invalid JSON in tool_call arguments: "
-                << tc.name
-                << " (parse error: " << ex.what()
-                << ", raw arguments: " << tc.arguments << ")";
+                << tc.name << " (parse error: " << ex.what() << ")";
             response.error.category = ErrorCategory::InvalidResponse;
             response.error.message = oss.str();
             return false;
@@ -417,6 +490,8 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
     struct StreamState {
         ChatMessage assembled;
         StreamTerminalTracker terminal;
+        ProviderError limitError;
+        size_t totalArgumentBytes = 0;
     };
     auto state = std::make_shared<StreamState>();
     state->assembled.role = Role::Assistant;
@@ -428,7 +503,15 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
         onSSE = [this, state, request](const std::string& eventData) {
             state->terminal.observe(
                 InspectOpenAICompatibleStreamEvent(eventData, "DeepSeek"));
-            parseSSEChunk(eventData, request, state->assembled);
+            std::string error;
+            parseSSEChunk(eventData, request, state->assembled,
+                          state->totalArgumentBytes, error);
+            if (!error.empty()) {
+                state->limitError = providerLimitError(error);
+                state->assembled.content.clear();
+                state->assembled.toolCalls.clear();
+                throw std::runtime_error(error);
+            }
         };
     }
 
@@ -443,6 +526,12 @@ void DeepSeekProvider::sendCompletion(const CompletionRequest& request,
             if (http.cancelled) {
                 resp.error.category = ErrorCategory::Cancelled;
                 resp.error.message = "request cancelled";
+            } else if (state->limitError) {
+                resp.error = state->limitError;
+            } else if (http.limitExceeded) {
+                resp.error = providerLimitError(http.errorMessage.empty()
+                    ? "provider response exceeds configured limit"
+                    : http.errorMessage);
             } else if (http.timedOut) {
                 resp.error.category = ErrorCategory::Timeout;
                 resp.error.message = http.errorMessage.empty()

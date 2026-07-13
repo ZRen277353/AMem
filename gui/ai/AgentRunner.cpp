@@ -1,6 +1,8 @@
 #ifdef HAVE_AI_CHAT
 
 #include "AgentRunner.h"
+
+#include "AiLimits.h"
 #include "ToolCallSecurity.h"
 
 #include "../../third_party/nlohmann/json.hpp"
@@ -336,6 +338,28 @@ ChatMessage AgentRunner::makeToolMessage(const ToolCall& tc,
     }
 
     toolMsg.content = audit.dump();
+    if (toolMsg.content.size() > Limits::kMaxMessageContentBytes) {
+        audit.erase("result");
+        audit.erase("result_raw");
+        audit.erase("details");
+        audit.erase("details_raw");
+        audit["payload_omitted"] = true;
+        audit["payload_limit_bytes"] = Limits::kMaxMessageContentBytes;
+        toolMsg.content = audit.dump();
+    }
+    if (toolMsg.content.size() > Limits::kMaxMessageContentBytes) {
+        nlohmann::json summary;
+        summary["tool"] = tc.name;
+        summary["success"] = false;
+        summary["duration_ms"] = durationMs;
+        summary["completion"] = toolCompletionStateName(result.completion);
+        summary["error"] =
+            "Tool audit payload omitted because it exceeds the 8 MiB "
+            "message limit";
+        summary["payload_omitted"] = true;
+        summary["payload_limit_bytes"] = Limits::kMaxMessageContentBytes;
+        toolMsg.content = summary.dump();
+    }
     return toolMsg;
 }
 

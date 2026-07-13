@@ -142,6 +142,7 @@ set(AI_CHAT_SOURCES_CANDIDATES
     gui/ai/HttpClient.cpp
     gui/ai/SSEParser.cpp
     gui/ai/ProviderStreamTerminal.cpp
+    gui/ai/ProviderResponseLimits.cpp
     gui/ai/Persistence.cpp
     gui/ai/UIMessageQueue.cpp
     gui/ai/OpenAIProvider.cpp
@@ -471,6 +472,7 @@ if(BUILD_TESTING)
     add_executable(NativePersistenceTests
         tests/PersistenceTests.cpp
         gui/ai/Persistence.cpp
+        gui/ai/ProviderResponseLimits.cpp
         gui/ai/ApiKeyStore.cpp
         gui/ai/AiSettings.cpp
         gui/ai/SessionManager.cpp
@@ -497,6 +499,7 @@ if(BUILD_TESTING)
         tests/ProviderStreamTerminalTests.cpp
         gui/ai/SSEParser.cpp
         gui/ai/ProviderStreamTerminal.cpp
+        gui/ai/ProviderResponseLimits.cpp
     )
     target_include_directories(NativeProviderStreamTerminalTests PRIVATE
         ${CMAKE_SOURCE_DIR}
@@ -753,6 +756,7 @@ if(BUILD_TESTING)
         gui/ai/AgentMutationAudit.cpp
         gui/ai/ToolCallSecurity.cpp
         gui/ai/Persistence.cpp
+        gui/ai/ProviderResponseLimits.cpp
         gui/ai/ChatSession.cpp
         gui/ai/AgentController.cpp
         gui/ai/ToolExecutor.cpp

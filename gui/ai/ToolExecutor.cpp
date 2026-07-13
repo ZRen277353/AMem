@@ -2,6 +2,7 @@
 
 #include "ToolExecutor.h"
 
+#include "AiLimits.h"
 #include "../../socket/socket_io_timeout.h"
 #include "../../third_party/nlohmann/json.hpp"
 
@@ -494,6 +495,14 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
             executionContext.deadline);
         result.resultJson =
             registration.executor(normalizedArgsJson, executionContext);
+        if (result.resultJson.size() > Limits::kMaxToolResultBytes) {
+            std::string().swap(result.resultJson);
+            result.success = false;
+            result.errorMessage = "Tool result exceeds 4 MiB output limit; "
+                                  "operation completion is unknown";
+            result.completion = ToolCompletionState::CompletionUnknown;
+            return result;
+        }
         result.errorMessage = extractToolError(result.resultJson);
         result.success = result.errorMessage.empty();
         result.completion = extractCompletionState(result.resultJson);

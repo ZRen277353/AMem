@@ -2,7 +2,9 @@
 
 #include "ClaudeProvider.h"
 
+#include "AiLimits.h"
 #include "HttpClient.h"
+#include "ProviderResponseLimits.h"
 #include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
@@ -14,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -144,6 +147,13 @@ ProviderError mapError(const HttpResponse& http, const std::string& body) {
         err.httpStatusCode = http.statusCode;
         return err;
     }
+    if (http.limitExceeded) {
+        err.category = ErrorCategory::InvalidResponse;
+        err.message = http.errorMessage.empty()
+            ? "provider response exceeds configured limit"
+            : http.errorMessage;
+        return err;
+    }
     if (http.timedOut) {
         err.category = ErrorCategory::Timeout;
         err.message  = http.errorMessage.empty() ? "request timed out"
@@ -219,7 +229,6 @@ struct StreamState {
     // "tool_use"; deltas and stops reference the same index.
     struct Block {
         std::string type;      // "text" | "tool_use"
-        std::string text;      // for text blocks
         std::string toolId;    // for tool_use blocks
         std::string toolName;  // for tool_use blocks
         std::string toolArgs;  // accumulated input_json_delta fragments
@@ -232,9 +241,16 @@ struct StreamState {
     bool errorSeen = false;
     ProviderError streamError;
     StreamTerminalTracker terminal;
+    size_t totalToolArgumentBytes = 0;
 
     std::string runId;
     StreamCallback onToken;
+};
+
+class ProviderLimitExceeded : public std::runtime_error {
+public:
+    explicit ProviderLimitExceeded(const std::string& message)
+        : std::runtime_error(message) {}
 };
 
 // Handle one SSE event payload (the JSON blob from a "data:" line). Updates
@@ -273,6 +289,14 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         if (block.type == "tool_use") {
             block.toolId   = stringMemberOr(*cb, "id");
             block.toolName = stringMemberOr(*cb, "name");
+            if (block.toolId.size() > Limits::kMaxToolCallIdBytes) {
+                throw ProviderLimitExceeded(
+                    "tool call id exceeds 256-byte limit");
+            }
+            if (block.toolName.size() > Limits::kMaxToolCallNameBytes) {
+                throw ProviderLimitExceeded(
+                    "tool call name exceeds 64-byte limit");
+            }
             // input may be {} initially; deltas stream the real value as JSON
             // fragments via input_json_delta.
         }
@@ -297,8 +321,11 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         if (deltaType == "text_delta") {
             const std::string chunk = stringMemberOr(*delta, "text");
             if (chunk.empty()) return;
-            it->second.text += chunk;
-            state.accumulatedText += chunk;
+            std::string error;
+            if (!appendAssistantContentWithinLimit(
+                    state.accumulatedText, chunk, error)) {
+                throw ProviderLimitExceeded(error);
+            }
             if (state.onToken) {
                 state.onToken(chunk);
             }
@@ -310,7 +337,12 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
         } else if (deltaType == "input_json_delta") {
             // Accumulate raw JSON fragments for the current tool_use block.
             const std::string chunk = stringMemberOr(*delta, "partial_json");
-            it->second.toolArgs += chunk;
+            std::string error;
+            if (!appendToolArgumentTextWithinLimit(
+                    it->second.toolArgs, chunk,
+                    state.totalToolArgumentBytes, error)) {
+                throw ProviderLimitExceeded(error);
+            }
         }
         return;
     }
@@ -333,6 +365,10 @@ void handleStreamEvent(const std::string& eventData, StreamState& state) {
             tc.arguments = it->second.toolArgs.empty() ? std::string("{}")
                                                        : it->second.toolArgs;
             state.toolCalls.push_back(std::move(tc));
+            if (state.toolCalls.size() > Limits::kMaxToolCallsPerMessage) {
+                throw ProviderLimitExceeded(
+                    "assistant response exceeds 64 tool calls");
+            }
         }
         return;
     }
@@ -481,6 +517,11 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
     CompletionResponse out;
     out.message.role = Role::Assistant;
 
+    if (body.size() > Limits::kMaxHttpResponseBytes) {
+        out.error = providerLimitError("HTTP response exceeds 16 MiB limit");
+        return out;
+    }
+
     json j;
     try {
         j = json::parse(body);
@@ -510,23 +551,59 @@ CompletionResponse ClaudeProvider::parseFullResponse(const std::string& body) {
     // Successful response: content is an array of text / tool_use blocks.
     if (j.contains("content") && j["content"].is_array()) {
         std::string text;
+        size_t totalArgumentBytes = 0;
         for (const auto& block : j["content"]) {
             if (!block.is_object()) continue;
             const std::string bt = stringMemberOr(block, "type");
             if (bt == "text") {
-                text += stringMemberOr(block, "text");
+                std::string error;
+                if (!appendAssistantContentWithinLimit(
+                        text, stringMemberOr(block, "text"), error)) {
+                    out.error = providerLimitError(error);
+                    return out;
+                }
             } else if (bt == "tool_use") {
+                if (out.message.toolCalls.size() >=
+                    Limits::kMaxToolCallsPerMessage) {
+                    out.error = providerLimitError(
+                        "assistant response exceeds 64 tool calls");
+                    return out;
+                }
                 ToolCall tc;
                 tc.id        = stringMemberOr(block, "id");
                 tc.name      = stringMemberOr(block, "name");
+                if (tc.id.size() > Limits::kMaxToolCallIdBytes) {
+                    out.error = providerLimitError(
+                        "tool call id exceeds 256-byte limit");
+                    return out;
+                }
+                if (tc.name.size() > Limits::kMaxToolCallNameBytes) {
+                    out.error = providerLimitError(
+                        "tool call name exceeds 64-byte limit");
+                    return out;
+                }
                 // input is an object; re-serialize as a string so the rest of
                 // the pipeline can treat arguments uniformly.
                 const json* input = objectMember(block, "input");
-                tc.arguments = input ? input->dump() : std::string("{}");
+                const std::string arguments =
+                    input ? input->dump() : std::string("{}");
+                std::string error;
+                if (!appendToolArgumentsWithinLimit(
+                        tc, arguments, totalArgumentBytes, error)) {
+                    out.error = providerLimitError(error);
+                    return out;
+                }
                 out.message.toolCalls.push_back(std::move(tc));
             }
         }
         out.message.content = std::move(text);
+    }
+
+    std::string limitError;
+    if (!validateProviderMessageLimits(out.message, limitError)) {
+        out.error = providerLimitError(limitError);
+        out.message.content.clear();
+        out.message.toolCalls.clear();
     }
 
     return out;
@@ -582,7 +659,13 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
     if (streaming) {
         sseCb = [state](const std::string& evt) {
             state->terminal.observe(InspectClaudeStreamEvent(evt));
-            handleStreamEvent(evt, *state);
+            try {
+                handleStreamEvent(evt, *state);
+            } catch (const ProviderLimitExceeded& error) {
+                state->errorSeen = true;
+                state->streamError = providerLimitError(error.what());
+                throw;
+            }
         };
     }
 
@@ -597,6 +680,18 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
 
         if (http.cancelled) {
             final.error = mapError(http, http.body);
+            UIMessage m;
+            m.type     = UIMessageType::Error;
+            m.runId    = state->runId;
+            m.data     = final.error.message;
+            m.response = final;
+            UIMessageQueue::getInstance().push(std::move(m));
+            if (onComplete) onComplete(std::move(final));
+            return;
+        }
+
+        if (streaming && state->errorSeen) {
+            final.error = state->streamError;
             UIMessage m;
             m.type     = UIMessageType::Error;
             m.runId    = state->runId;
@@ -622,17 +717,6 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         }
 
         if (streaming) {
-            if (state->errorSeen) {
-                final.error           = state->streamError;
-                UIMessage m;
-                m.type     = UIMessageType::Error;
-                m.runId    = state->runId;
-                m.data     = final.error.message;
-                m.response = final;
-                UIMessageQueue::getInstance().push(std::move(m));
-                if (onComplete) onComplete(std::move(final));
-                return;
-            }
             if (!state->terminal.applyValidation("Claude", final)) {
                 UIMessage m;
                 m.type     = UIMessageType::Error;
@@ -646,6 +730,14 @@ void ClaudeProvider::sendCompletion(const CompletionRequest& request,
         } else {
             // Non-streaming: parse the full JSON body returned by the API.
             final = ClaudeProvider::parseFullResponse(http.body);
+            if (!final.error) {
+                std::string limitError;
+                if (!validateProviderMessageLimits(final.message, limitError)) {
+                    final.error = providerLimitError(limitError);
+                    final.message.content.clear();
+                    final.message.toolCalls.clear();
+                }
+            }
         }
 
         UIMessage m;

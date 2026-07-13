@@ -2,6 +2,7 @@
 #include "../gui/ai/AgentController.h"
 #include "../gui/ai/AgentMutationAudit.h"
 #include "../gui/ai/AgentTaskExecutor.h"
+#include "../gui/ai/AiLimits.h"
 #include "../gui/ai/ChatSession.h"
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
@@ -2059,6 +2060,24 @@ void testHiddenToolRegistration() {
            "structured completion_unknown must survive result normalization");
 }
 
+void testToolResultLimit() {
+    auto& registry = AI::ToolExecutor::getInstance();
+    registry.registerTool(
+        "test_oversized_tool_result", "oversized result", "{}",
+        AI::ToolSafety::Write,
+        [](const std::string&) {
+            return std::string(AI::Limits::kMaxToolResultBytes + 1u, 'x');
+        });
+
+    const AI::ToolResult result = registry.execute(
+        toolCall("oversized-result", "test_oversized_tool_result"));
+    expect(!result.success && result.resultJson.empty() &&
+               result.completion ==
+                   AI::ToolCompletionState::CompletionUnknown &&
+               result.errorMessage.find("4 MiB") != std::string::npos,
+           "oversized mutation result must be discarded with unknown completion");
+}
+
 void testRetiredToolHistoryDowngrade() {
     const std::vector<std::string> retiredNames = {
         "get_status", "get_server_version", "get_architecture",
@@ -3423,6 +3442,7 @@ int main() {
         {"scan session service", &testScanSessionService},
         {"agent adapter", &testAgentAdapter},
         {"hidden tool registration", &testHiddenToolRegistration},
+        {"tool result output limit", &testToolResultLimit},
         {"retired tool history downgrade", &testRetiredToolHistoryDowngrade},
         {"device session lifecycle", &testDeviceSessionLifecycle},
         {"agent task executor lifecycle", &testAgentTaskExecutorLifecycle},

@@ -2,6 +2,8 @@
 
 #include "SSEParser.h"
 
+#include "AiLimits.h"
+
 #include <exception>
 #include <utility>
 
@@ -11,7 +13,7 @@ SSEParser::SSEParser(SSECallback callback)
     : callback_(std::move(callback)) {}
 
 void SSEParser::feed(const char* data, size_t length) {
-    if (callbackFailed_) {
+    if (failed_) {
         return;
     }
     for (size_t index = 0; index < length; ++index) {
@@ -23,13 +25,17 @@ void SSEParser::feed(const char* data, size_t length) {
             processLine(currentLine_);
             currentLine_.clear();
         } else {
+            if (currentLine_.size() >= Limits::kMaxSseLineBytes) {
+                fail("SSE line exceeds 1 MiB limit", true);
+                return;
+            }
             currentLine_.push_back(value);
         }
     }
 }
 
 void SSEParser::finish() {
-    if (callbackFailed_) {
+    if (failed_) {
         return;
     }
     if (!currentLine_.empty()) {
@@ -39,16 +45,31 @@ void SSEParser::finish() {
     flushEvent();
 }
 
-bool SSEParser::callbackFailed() const {
-    return callbackFailed_;
+void SSEParser::fail(std::string error, bool limitExceeded) {
+    if (failed_) {
+        return;
+    }
+    failed_ = true;
+    limitExceeded_ = limitExceeded;
+    error_ = std::move(error);
+    currentLine_.clear();
+    eventBuffer_.clear();
 }
 
-const std::string& SSEParser::callbackError() const {
-    return callbackError_;
+bool SSEParser::failed() const {
+    return failed_;
+}
+
+bool SSEParser::limitExceeded() const {
+    return limitExceeded_;
+}
+
+const std::string& SSEParser::error() const {
+    return error_;
 }
 
 void SSEParser::processLine(const std::string& line) {
-    if (callbackFailed_) {
+    if (failed_) {
         return;
     }
     if (line.empty()) {
@@ -66,6 +87,15 @@ void SSEParser::processLine(const std::string& line) {
     if (start < line.size() && line[start] == ' ') {
         ++start;
     }
+    const size_t separatorBytes = eventBuffer_.empty() ? 0u : 1u;
+    const size_t fragmentBytes = line.size() - start;
+    if (Limits::wouldExceed(eventBuffer_.size(), separatorBytes,
+                            Limits::kMaxSseEventBytes) ||
+        Limits::wouldExceed(eventBuffer_.size() + separatorBytes,
+                            fragmentBytes, Limits::kMaxSseEventBytes)) {
+        fail("SSE event exceeds 2 MiB limit", true);
+        return;
+    }
     if (!eventBuffer_.empty()) {
         eventBuffer_.push_back('\n');
     }
@@ -80,11 +110,9 @@ void SSEParser::flushEvent() {
         try {
             callback_(eventBuffer_);
         } catch (const std::exception& error) {
-            callbackFailed_ = true;
-            callbackError_ = error.what();
+            fail(error.what());
         } catch (...) {
-            callbackFailed_ = true;
-            callbackError_ = "unknown callback exception";
+            fail("unknown callback exception");
         }
     }
     eventBuffer_.clear();

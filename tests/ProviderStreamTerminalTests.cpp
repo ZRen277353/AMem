@@ -1,4 +1,6 @@
+#include "gui/ai/AiLimits.h"
 #include "gui/ai/ProviderStreamTerminal.h"
+#include "gui/ai/ProviderResponseLimits.h"
 #include "gui/ai/SSEParser.h"
 
 #include <iostream>
@@ -76,9 +78,83 @@ void testSseCallbackExceptionStopsParsing() {
     parser.finish();
 
     expect(calls == 1, "parser must stop dispatching after callback failure");
-    expect(parser.callbackFailed(), "callback failure should be observable");
-    expect(parser.callbackError() == "callback exploded",
+    expect(parser.failed(), "callback failure should be observable");
+    expect(parser.error() == "callback exploded",
            "callback error should preserve the exception message");
+}
+
+void testSseLineLimit() {
+    SSEParser parser(nullptr);
+    std::string input = "data: ";
+    input.append(AI::Limits::kMaxSseLineBytes, 'x');
+    parser.feed(input.data(), input.size());
+
+    expect(parser.failed() && parser.limitExceeded(),
+           "oversized SSE line should fail at the parser boundary");
+    expect(parser.error().find("1 MiB") != std::string::npos,
+           "SSE line error should name its limit");
+}
+
+void testSseEventLimit() {
+    SSEParser parser(nullptr);
+    const std::string fragment(800u * AI::Limits::kKiB, 'x');
+    const std::string line = "data: " + fragment + "\n";
+    parser.feed(line.data(), line.size());
+    parser.feed(line.data(), line.size());
+    parser.feed(line.data(), line.size());
+
+    expect(parser.failed() && parser.limitExceeded(),
+           "oversized multiline SSE event should fail before dispatch");
+    expect(parser.error().find("2 MiB") != std::string::npos,
+           "SSE event error should name its limit");
+}
+
+void testProviderAccumulationLimits() {
+    std::string error;
+    std::string content(AI::Limits::kMaxAssistantContentBytes, 'a');
+    expect(AI::appendAssistantContentWithinLimit(content, "", error),
+           "assistant content at the limit should be accepted");
+    expect(!AI::appendAssistantContentWithinLimit(content, "x", error) &&
+               content.size() == AI::Limits::kMaxAssistantContentBytes,
+           "assistant content must reject the first byte beyond its limit");
+
+    AI::ToolCall call;
+    size_t totalArguments = 0;
+    const std::string maxArguments(
+        AI::Limits::kMaxToolArgumentsPerCallBytes, 'b');
+    error.clear();
+    expect(AI::appendToolArgumentsWithinLimit(
+               call, maxArguments, totalArguments, error),
+           "per-call arguments at the limit should be accepted");
+    expect(!AI::appendToolArgumentsWithinLimit(
+               call, "x", totalArguments, error) &&
+               call.arguments.size() ==
+                   AI::Limits::kMaxToolArgumentsPerCallBytes,
+           "per-call arguments must not grow after limit rejection");
+
+    totalArguments = AI::Limits::kMaxToolArgumentsPerMessageBytes;
+    AI::ToolCall another;
+    error.clear();
+    expect(!AI::appendToolArgumentsWithinLimit(
+               another, "x", totalArguments, error) &&
+               another.arguments.empty(),
+           "message-level argument budget must reject additional bytes");
+}
+
+void testProviderMessageValidationLimits() {
+    AI::ChatMessage message;
+    message.role = AI::Role::Assistant;
+    message.content.assign(AI::Limits::kMaxAssistantContentBytes, 'a');
+    message.toolCalls.resize(AI::Limits::kMaxToolCallsPerMessage);
+
+    std::string error;
+    expect(AI::validateProviderMessageLimits(message, error),
+           "provider message exactly at structural limits should validate");
+
+    message.toolCalls.emplace_back();
+    expect(!AI::validateProviderMessageLimits(message, error) &&
+               error.find("64 tool calls") != std::string::npos,
+           "provider message should reject a 65th tool call");
 }
 
 void testClaudeCompleteStream() {
@@ -192,6 +268,11 @@ int main() {
         {"SSE fragmentation and multiline data", testSseFragmentationAndMultilineData},
         {"SSE DONE visibility and EOF flush", testDoneIsVisibleAndEofFlushes},
         {"SSE callback exception", testSseCallbackExceptionStopsParsing},
+        {"SSE line limit", testSseLineLimit},
+        {"SSE event limit", testSseEventLimit},
+        {"provider accumulation limits", testProviderAccumulationLimits},
+        {"provider message validation limits",
+         testProviderMessageValidationLimits},
         {"Claude complete stream", testClaudeCompleteStream},
         {"Claude missing terminal", testClaudeMissingTerminal},
         {"Claude malformed event", testClaudeMalformedEventWins},

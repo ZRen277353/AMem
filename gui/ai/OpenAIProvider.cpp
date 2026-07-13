@@ -2,7 +2,9 @@
 
 #include "OpenAIProvider.h"
 
+#include "AiLimits.h"
 #include "HttpClient.h"
+#include "ProviderResponseLimits.h"
 #include "ProviderStreamTerminal.h"
 #include "UIMessageQueue.h"
 
@@ -81,6 +83,14 @@ std::string stripTrailingSlash(const std::string& url) {
 ProviderError classifyHttpError(const HttpResponse& resp) {
     ProviderError err;
     err.httpStatusCode = resp.statusCode;
+
+    if (resp.limitExceeded) {
+        err.category = ErrorCategory::InvalidResponse;
+        err.message = resp.errorMessage.empty()
+            ? "provider response exceeds configured limit"
+            : resp.errorMessage;
+        return err;
+    }
 
     if (resp.cancelled) {
         err.category = ErrorCategory::Cancelled;
@@ -368,6 +378,14 @@ CompletionResponse OpenAIProvider::parseSSEChunk(const std::string& chunk) const
         out.error.message = std::string("failed to parse SSE chunk: ") + e.what();
     }
 
+    if (!out.error) {
+        std::string limitError;
+        if (!validateProviderMessageLimits(out.message, limitError)) {
+            out.error = providerLimitError(limitError);
+            out.message.content.clear();
+            out.message.toolCalls.clear();
+        }
+    }
     return out;
 }
 
@@ -378,6 +396,11 @@ CompletionResponse OpenAIProvider::parseSSEChunk(const std::string& chunk) const
 CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) const {
     CompletionResponse out;
     out.message.role = Role::Assistant;
+
+    if (body.size() > Limits::kMaxHttpResponseBytes) {
+        out.error = providerLimitError("HTTP response exceeds 16 MiB limit");
+        return out;
+    }
 
     try {
         auto j = json::parse(body);
@@ -398,30 +421,64 @@ CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) co
         const auto& msg = choice["message"];
 
         if (msg.contains("content") && msg["content"].is_string()) {
-            out.message.content = msg["content"].get<std::string>();
+            std::string error;
+            if (!appendAssistantContentWithinLimit(
+                    out.message.content,
+                    msg["content"].get_ref<const std::string&>(), error)) {
+                out.error = providerLimitError(error);
+                return out;
+            }
         }
 
+        size_t totalArgumentBytes = 0;
         if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
             for (const auto& tc : msg["tool_calls"]) {
                 if (!tc.is_object()) {
                     continue;
                 }
+                if (out.message.toolCalls.size() >=
+                    Limits::kMaxToolCallsPerMessage) {
+                    out.error = providerLimitError(
+                        "assistant response exceeds 64 tool calls");
+                    return out;
+                }
                 ToolCall call;
                 if (tc.contains("id") && tc["id"].is_string()) {
-                    call.id = tc["id"].get<std::string>();
+                    const std::string& id =
+                        tc["id"].get_ref<const std::string&>();
+                    if (id.size() > Limits::kMaxToolCallIdBytes) {
+                        out.error = providerLimitError(
+                            "tool call id exceeds 256-byte limit");
+                        return out;
+                    }
+                    call.id = id;
                 }
                 if (tc.contains("function") && tc["function"].is_object()) {
                     const auto& fn = tc["function"];
                     if (fn.contains("name") && fn["name"].is_string()) {
-                        call.name = fn["name"].get<std::string>();
+                        const std::string& name =
+                            fn["name"].get_ref<const std::string&>();
+                        if (name.size() > Limits::kMaxToolCallNameBytes) {
+                            out.error = providerLimitError(
+                                "tool call name exceeds 64-byte limit");
+                            return out;
+                        }
+                        call.name = name;
                     }
                     if (fn.contains("arguments")) {
                         // Arguments are conventionally a string, but tolerate
                         // already-parsed objects.
+                        std::string arguments;
                         if (fn["arguments"].is_string()) {
-                            call.arguments = fn["arguments"].get<std::string>();
+                            arguments = fn["arguments"].get<std::string>();
                         } else {
-                            call.arguments = fn["arguments"].dump();
+                            arguments = fn["arguments"].dump();
+                        }
+                        std::string error;
+                        if (!appendToolArgumentsWithinLimit(
+                                call, arguments, totalArgumentBytes, error)) {
+                            out.error = providerLimitError(error);
+                            return out;
                         }
                     }
                 }
@@ -433,6 +490,14 @@ CompletionResponse OpenAIProvider::parseFullResponse(const std::string& body) co
         out.error.message = std::string("failed to parse OpenAI response: ") + e.what();
     }
 
+    if (!out.error) {
+        std::string limitError;
+        if (!validateProviderMessageLimits(out.message, limitError)) {
+            out.error = providerLimitError(limitError);
+            out.message.content.clear();
+            out.message.toolCalls.clear();
+        }
+    }
     return out;
 }
 
@@ -466,9 +531,12 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
         auto toolCalls = std::make_shared<std::vector<ToolCall>>();
         auto mu = std::make_shared<std::mutex>();
         auto terminal = std::make_shared<StreamTerminalTracker>();
+        auto limitError = std::make_shared<ProviderError>();
+        auto totalToolArgumentBytes = std::make_shared<size_t>(0);
         auto requestCopy = std::make_shared<CompletionRequest>(request);
 
-        SSECallback sseCb = [this, content, toolCalls, mu, terminal, requestCopy](
+        SSECallback sseCb = [this, content, toolCalls, mu, terminal,
+                             limitError, totalToolArgumentBytes, requestCopy](
                                 const std::string& eventData) {
             terminal->observe(
                 InspectOpenAICompatibleStreamEvent(eventData, "OpenAI"));
@@ -484,7 +552,12 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
             std::lock_guard<std::mutex> lock(*mu);
 
             if (!delta.message.content.empty()) {
-                content->append(delta.message.content);
+                std::string error;
+                if (!appendAssistantContentWithinLimit(
+                        *content, delta.message.content, error)) {
+                    *limitError = providerLimitError(error);
+                    throw std::runtime_error(error);
+                }
                 deliverToken(*requestCopy, delta.message.content);
             }
 
@@ -496,21 +569,38 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
                     const ToolCall& src = delta.message.toolCalls[i];
                     ToolCall& dst = (*toolCalls)[i];
                     if (!src.id.empty()) {
+                        if (src.id.size() > Limits::kMaxToolCallIdBytes) {
+                            *limitError = providerLimitError(
+                                "tool call id exceeds 256-byte limit");
+                            throw std::runtime_error(limitError->message);
+                        }
                         dst.id = src.id;
                     }
                     if (!src.name.empty()) {
+                        if (src.name.size() > Limits::kMaxToolCallNameBytes) {
+                            *limitError = providerLimitError(
+                                "tool call name exceeds 64-byte limit");
+                            throw std::runtime_error(limitError->message);
+                        }
                         dst.name = src.name;
                     }
                     // Arguments arrive as incremental string fragments — append.
                     if (!src.arguments.empty()) {
-                        dst.arguments.append(src.arguments);
+                        std::string error;
+                        if (!appendToolArgumentsWithinLimit(
+                                dst, src.arguments, *totalToolArgumentBytes,
+                                error)) {
+                            *limitError = providerLimitError(error);
+                            throw std::runtime_error(error);
+                        }
                     }
                 }
             }
         };
 
-        HttpCompletionCallback doneCb = [content, toolCalls, mu, terminal, requestCopy](
-                                            HttpResponse httpResp) {
+        HttpCompletionCallback doneCb = [content, toolCalls, mu, terminal,
+                                         limitError, requestCopy](
+                                             HttpResponse httpResp) {
             CompletionResponse resp;
             resp.message.role = Role::Assistant;
 
@@ -524,11 +614,15 @@ void OpenAIProvider::sendCompletion(const CompletionRequest& request,
                 }
             }
 
-            ProviderError err = classifyHttpError(httpResp);
-            if (err) {
-                resp.error = std::move(err);
+            if (*limitError) {
+                resp.error = *limitError;
             } else {
-                terminal->applyValidation("OpenAI", resp);
+                ProviderError err = classifyHttpError(httpResp);
+                if (err) {
+                    resp.error = std::move(err);
+                } else {
+                    terminal->applyValidation("OpenAI", resp);
+                }
             }
 
             deliverCompletion(*requestCopy, std::move(resp));

@@ -1,6 +1,7 @@
 #ifdef HAVE_AI_CHAT
 
 #include "HttpClient.h"
+#include "AiLimits.h"
 #include "SSEParser.h"
 
 // cpp-httplib is header-only and provides HTTPS support when compiled with
@@ -379,6 +380,7 @@ uint64_t HttpClient::postAsync(const std::string& url,
         SSEParser parser(onSSE);
         std::string accumulated;
         bool aborted = false;
+        bool responseLimitExceeded = false;
 
         // cpp-httplib 没有直接暴露 "POST + response ContentReceiver" 的便捷重载，
         // 所以我们走低层 Request/send 路径：构造一个 Request、设置
@@ -398,10 +400,16 @@ uint64_t HttpClient::postAsync(const std::string& url,
                 aborted = true;
                 return false; // 通知 cpp-httplib 终止连接
             }
+            if (Limits::wouldExceed(accumulated.size(), dataLen,
+                                    Limits::kMaxHttpResponseBytes)) {
+                responseLimitExceeded = true;
+                parser.fail("HTTP response exceeds 16 MiB limit", true);
+                return false;
+            }
             accumulated.append(data, dataLen);
             if (onSSE) {
                 parser.feed(data, dataLen);
-                if (parser.callbackFailed()) {
+                if (parser.failed()) {
                     return false;
                 }
             }
@@ -412,16 +420,35 @@ uint64_t HttpClient::postAsync(const std::string& url,
         httplib::Error err = httplib::Error::Success;
         bool sendOk = client->send(req, res, err);
 
+        // A content receiver normally leaves res.body empty. Keep the same
+        // hard boundary on the fallback path in case a transport/backend
+        // returns a buffered body instead.
+        if (!responseLimitExceeded &&
+            res.body.size() > Limits::kMaxHttpResponseBytes) {
+            responseLimitExceeded = true;
+            parser.fail("HTTP response exceeds 16 MiB limit", true);
+        }
+
         // 流结束：刷出挂起的 SSE 事件
-        if (onSSE) {
+        if (onSSE && !parser.failed()) {
             parser.finish();
         }
 
-        if (parser.callbackFailed()) {
+        if (responseLimitExceeded || parser.limitExceeded()) {
+            response.statusCode = 0;
+            response.limitExceeded = true;
+            response.errorMessage = parser.error().empty()
+                ? "HTTP response exceeds configured limit"
+                : parser.error();
+            completeSafely(std::move(response));
+            return;
+        }
+
+        if (parser.failed()) {
             response.statusCode = 0;
             response.errorMessage = "SSE callback failed";
-            if (!parser.callbackError().empty()) {
-                response.errorMessage += ": " + parser.callbackError();
+            if (!parser.error().empty()) {
+                response.errorMessage += ": " + parser.error();
             }
             completeSafely(std::move(response));
             return;

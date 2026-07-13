@@ -28,7 +28,7 @@ public:
     ChatSession& operator=(const ChatSession&) = delete;
 
     // Message management
-    void addMessage(ChatMessage msg);
+    bool addMessage(ChatMessage msg);
     const std::vector<ChatMessage>& getMessages() const;
     void clearHistory();
 

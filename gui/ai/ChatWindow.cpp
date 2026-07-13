@@ -1223,7 +1223,10 @@ void ChatWindow::sendMessage() {
     userMsg.role = Role::User;
     userMsg.content = std::move(text);
     userMsg.timestamp = nowUnixSeconds();
-    session_.addMessage(userMsg);
+    if (!session_.addMessage(userMsg)) {
+        state_ = State::Idle;
+        return;
+    }
     touchActiveSession();
 
     std::memset(inputBuf_, 0, sizeof(inputBuf_));
@@ -1399,7 +1402,27 @@ void ChatWindow::pollMessages() {
                     persistedCalls.resize(static_cast<size_t>(maxCallsForHistory));
                 }
                 asstMsg.toolCalls = std::move(persistedCalls);
-                session_.addMessage(std::move(asstMsg));
+                if (!session_.addMessage(std::move(asstMsg))) {
+                    ChatMessage errMsg;
+                    errMsg.role = Role::System;
+                    errMsg.content =
+                        "[error] Session payload limit reached; the AI "
+                        "response was not saved and its tools were not executed.";
+                    errMsg.timestamp = nowUnixSeconds();
+                    if (session_.addMessage(std::move(errMsg))) {
+                        touchActiveSession();
+                    }
+                    Gui::log("[AI Chat] assistant response rejected by session payload limit");
+                    requestStartMs_ = 0;
+                    activeDispatchRunId_.clear();
+                    agentController_.addTraceEvent(
+                        AgentTraceType::ProviderError,
+                        "assistant response rejected by session payload limit");
+                    agentController_.finishFailed();
+                    clearActiveRunContext();
+                    state_ = State::Idle;
+                    break;
+                }
                 touchActiveSession();
                 activeDispatchRunId_.clear();
 
@@ -1875,7 +1898,26 @@ void ChatWindow::handleAgentOutcome(AgentController::ToolOutcome outcome) {
         Gui::log("%s", line.c_str());
     }
     for (auto& msg : outcome.messages) {
-        session_.addMessage(std::move(msg));
+        if (!session_.addMessage(std::move(msg))) {
+            ChatMessage errMsg;
+            errMsg.role = Role::System;
+            errMsg.content =
+                "[error] Session payload limit reached; remaining tool "
+                "results were not saved or sent back to the AI.";
+            errMsg.timestamp = nowUnixSeconds();
+            if (session_.addMessage(std::move(errMsg))) {
+                touchActiveSession();
+            }
+            Gui::log("[AI Chat] tool outcome rejected by session payload limit");
+            agentController_.addTraceEvent(
+                AgentTraceType::ToolFailed,
+                "tool outcome rejected by session payload limit");
+            requestStartMs_ = 0;
+            agentController_.finishFailed();
+            clearActiveRunContext();
+            state_ = State::Idle;
+            return;
+        }
         touchActiveSession();
     }
 

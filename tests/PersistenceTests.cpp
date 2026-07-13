@@ -1,4 +1,5 @@
 #include "gui/Gui.h"
+#include "gui/ai/AiLimits.h"
 #include "gui/ai/AiSettings.h"
 #include "gui/ai/ApiKeyStore.h"
 #include "gui/ai/ChatSession.h"
@@ -66,6 +67,16 @@ void writeText(const std::filesystem::path& path, const std::string& text) {
     output << text;
     output.flush();
     expect(output.good(), "could not write test file");
+}
+
+void writeSparseFile(const std::filesystem::path& path, size_t size) {
+    expect(size > 0, "sparse test file must not be empty");
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    expect(output.is_open(), "could not open sparse test file for writing");
+    output.seekp(static_cast<std::streamoff>(size - 1));
+    output.put('x');
+    output.flush();
+    expect(output.good(), "could not write sparse test file");
 }
 
 std::string readText(const std::filesystem::path& path) {
@@ -240,6 +251,174 @@ void testChatSessionLoadAndInstallAreTransactional() {
            "first message should persist to the missing session path");
 }
 
+void testPersistenceFileLimit() {
+    TempDirectory temp("file-limit");
+    const auto oversized = temp.path() / "oversized.json";
+    writeSparseFile(oversized, AI::Limits::kMaxPersistenceFileBytes + 1u);
+
+    const AI::JsonDocumentLoadResult loaded =
+        AI::loadJsonDocument(oversized);
+    expect(loaded.result.status == PersistenceLoadStatus::Invalid &&
+               loaded.result.message.find("32 MiB") != std::string::npos,
+           "persistence loader must reject a 32 MiB + 1 file before parsing");
+
+    const auto saveTarget = temp.path() / "escaped-session.json";
+    writeText(saveTarget, "preserve me");
+    AI::ChatSession escaped;
+    expect(escaped.addMessage(chatMessage(
+               AI::Role::User,
+               std::string(6u * AI::Limits::kMiB, '\0'))),
+           "escaped payload fixture should fit the in-memory session budget");
+    expect(!escaped.save(saveTarget.string()) &&
+               readText(saveTarget) == "preserve me" &&
+               !std::filesystem::exists(saveTarget.string() + ".tmp"),
+           "JSON escaping beyond 32 MiB must not replace the prior file");
+}
+
+void testChatSessionLoadLimitsAreTransactional() {
+    TempDirectory temp("session-limits");
+    const auto current = temp.path() / "current.json";
+    const auto oversizedMessage = temp.path() / "oversized-message.json";
+    const auto tooManyMessages = temp.path() / "too-many-messages.json";
+    const auto oversizedPayload = temp.path() / "oversized-payload.json";
+
+    AI::ChatSession session;
+    session.setSystemPrompt("retained prompt");
+    expect(session.addMessage(chatMessage(AI::Role::User, "retained")) &&
+               session.save(current.string()),
+           "could not create the retained session baseline");
+
+    {
+        json document = sessionDocument("unused");
+        document["messages"] = json::array({
+            {{"role", "user"},
+             {"content", std::string(
+                 AI::Limits::kMaxMessageContentBytes + 1u, 'x')}},
+        });
+        writeText(oversizedMessage, document.dump());
+    }
+    const auto messageResult = session.load(oversizedMessage.string());
+    expect(messageResult.status == PersistenceLoadStatus::Invalid &&
+               messageResult.message.find("8 MiB") != std::string::npos &&
+               session.getMessages().size() == 1 &&
+               session.getMessages().front().content == "retained" &&
+               session.getSystemPrompt() == "retained prompt",
+           "oversized message load must preserve the prior session snapshot");
+
+    {
+        json document = sessionDocument("unused");
+        document["messages"] = json::array();
+        for (size_t i = 0;
+             i < AI::Limits::kMaxSessionMessagesOnDisk + 1u; ++i) {
+            document["messages"].push_back(
+                {{"role", "user"}, {"content", "x"}});
+        }
+        writeText(tooManyMessages, document.dump());
+    }
+    const auto countResult = session.load(tooManyMessages.string());
+    expect(countResult.status == PersistenceLoadStatus::Invalid &&
+               countResult.message.find("10000") != std::string::npos &&
+               session.getMessages().size() == 1,
+           "session loader must reject a 10001st on-disk message transactionally");
+
+    {
+        json document = sessionDocument("unused");
+        document["messages"] = json::array({
+            {{"role", "user"},
+             {"content", std::string(
+                 AI::Limits::kMaxMessageContentBytes, 'a')}},
+            {{"role", "assistant"},
+             {"content", std::string(
+                 AI::Limits::kMaxMessageContentBytes, 'b')},
+             {"name", "x"}},
+        });
+        writeText(oversizedPayload, document.dump());
+    }
+    const auto payloadResult = session.load(oversizedPayload.string());
+    expect(payloadResult.status == PersistenceLoadStatus::Invalid &&
+               payloadResult.message.find("16 MiB") != std::string::npos &&
+               session.getMessages().size() == 1,
+           "retained session payload must reject the first byte beyond 16 MiB");
+
+    expect(session.addMessage(chatMessage(AI::Role::Assistant, "still bound")),
+           "valid message should still append after rejected session loads");
+    const json persisted = json::parse(readText(current));
+    expect(persisted["messages"].size() == 2 &&
+               persisted["messages"][1]["content"] == "still bound",
+           "invalid load targets must not replace the prior auto-save binding");
+}
+
+void testRuntimeSessionPayloadLimit() {
+    AI::ChatSession rejected;
+    expect(rejected.addMessage(chatMessage(
+               AI::Role::User,
+               std::string(AI::Limits::kMaxMessageContentBytes, 'u'))) &&
+               rejected.addMessage(chatMessage(
+                   AI::Role::Assistant,
+                   std::string(AI::Limits::kMaxMessageContentBytes, 'a'))),
+           "runtime session should accept exactly 16 MiB of retained payload");
+    expect(!rejected.addMessage(chatMessage(AI::Role::Tool, "x")) &&
+               rejected.getMessages().size() == 2 &&
+               rejected.getMessages().back().role == AI::Role::Assistant,
+           "runtime session must reject and roll back the first byte beyond the latest turn budget");
+
+    TempDirectory temp("session-group-eviction");
+    const auto source = temp.path() / "source.json";
+    const auto rejectedSource = temp.path() / "rejected-source.json";
+
+    {
+        json document = sessionDocument("unused");
+        document["tokenLimit"] = AI::ChatSession::kMaxTokenLimit;
+        document["messages"] = json::array({
+            {{"role", "user"},
+             {"content", std::string(2u * AI::Limits::kMiB, 'o')}},
+            {{"role", "user"},
+             {"content", std::string(7u * AI::Limits::kMiB, 'n')}},
+            {{"role", "assistant"},
+             {"content", std::string(7u * AI::Limits::kMiB, 'a')}},
+        });
+        writeText(rejectedSource, document.dump());
+    }
+    AI::ChatSession transactional;
+    expect(transactional.load(rejectedSource.string()).status ==
+               PersistenceLoadStatus::Loaded,
+           "could not load the rejection rollback fixture");
+    expect(!transactional.addMessage(chatMessage(
+               AI::Role::Assistant,
+               std::string(3u * AI::Limits::kMiB, 'x'))) &&
+               transactional.getMessages().size() == 3 &&
+               transactional.getMessages().front().content.front() == 'o',
+           "rejected latest-turn growth must preserve older conversation groups");
+
+    {
+        json document = sessionDocument("unused");
+        document["tokenLimit"] = AI::ChatSession::kMaxTokenLimit;
+        document["messages"] = json::array({
+            {{"role", "user"},
+             {"content", std::string(7u * AI::Limits::kMiB, 'o')}},
+            {{"role", "assistant"}, {"content", "old answer"}},
+            {{"role", "user"},
+             {"content", std::string(7u * AI::Limits::kMiB, 'n')}},
+        });
+        writeText(source, document.dump());
+    }
+
+    AI::ChatSession evicted;
+    expect(evicted.load(source.string()).status == PersistenceLoadStatus::Loaded,
+           "could not load the near-budget session fixture");
+    expect(evicted.addMessage(chatMessage(
+               AI::Role::Assistant,
+               std::string(3u * AI::Limits::kMiB, 'r'))),
+           "a new message should fit after evicting an old conversation group");
+    const auto& retained = evicted.getMessages();
+    expect(retained.size() == 2 &&
+               retained[0].role == AI::Role::User &&
+               retained[0].content.front() == 'n' &&
+               retained[1].role == AI::Role::Assistant &&
+               retained[1].content.front() == 'r',
+           "session payload eviction must remove the complete oldest conversation group");
+}
+
 } // namespace
 
 int main() {
@@ -248,6 +427,9 @@ int main() {
         {"API key transactional load", testApiKeyLoadIsTransactional},
         {"settings transactional load", testSettingsLoadIsTransactional},
         {"chat session transactional load", testChatSessionLoadAndInstallAreTransactional},
+        {"persistence file limit", testPersistenceFileLimit},
+        {"chat session load limits", testChatSessionLoadLimitsAreTransactional},
+        {"runtime session payload limit", testRuntimeSessionPayloadLimit},
     };
 
     size_t passed = 0;

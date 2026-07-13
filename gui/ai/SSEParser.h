@@ -14,9 +14,11 @@ public:
 
     void feed(const char* data, size_t length);
     void finish();
+    void fail(std::string error, bool limitExceeded = false);
 
-    bool callbackFailed() const;
-    const std::string& callbackError() const;
+    bool failed() const;
+    bool limitExceeded() const;
+    const std::string& error() const;
 
 private:
     void processLine(const std::string& line);
@@ -25,8 +27,9 @@ private:
     SSECallback callback_;
     std::string currentLine_;
     std::string eventBuffer_;
-    bool callbackFailed_ = false;
-    std::string callbackError_;
+    bool failed_ = false;
+    bool limitExceeded_ = false;
+    std::string error_;
 };
 
 } // namespace AI

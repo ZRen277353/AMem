@@ -20,6 +20,7 @@ struct HttpResponse {
     std::string errorMessage;
     bool cancelled = false;
     bool timedOut = false;
+    bool limitExceeded = false;
 };
 
 // HTTP 代理配置

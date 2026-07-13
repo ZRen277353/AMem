@@ -1,6 +1,8 @@
 #ifdef HAVE_AI_CHAT
 
 #include "ChatSession.h"
+#include "AiLimits.h"
+#include "ProviderResponseLimits.h"
 #include "ToolCallSecurity.h"
 
 #include "../Gui.h"
@@ -13,6 +15,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <unordered_set>
 #include <sstream>
@@ -155,7 +158,9 @@ ChatMessage messageFromJson(const nlohmann::json& j) {
 }
 
 bool validateMessageJson(const nlohmann::json& message,
-                         std::string& error) {
+                         std::string& error,
+                         size_t& payloadBytes) {
+    payloadBytes = 0;
     if (!message.is_object()) {
         error = "message entries must be objects";
         return false;
@@ -178,12 +183,36 @@ bool validateMessageJson(const nlohmann::json& message,
     }
 
     if (role != message.end()) {
-        const std::string value = role->get<std::string>();
+        const std::string& value = role->get_ref<const std::string&>();
         if (value != "system" && value != "user" &&
             value != "assistant" && value != "tool") {
             error = "message has an unknown role";
             return false;
         }
+    }
+    if (content != message.end()) {
+        const size_t bytes = content->get_ref<const std::string&>().size();
+        if (bytes > Limits::kMaxMessageContentBytes) {
+            error = "message content exceeds 8 MiB limit";
+            return false;
+        }
+        payloadBytes += bytes;
+    }
+    if (toolCallId != message.end()) {
+        const size_t bytes = toolCallId->get_ref<const std::string&>().size();
+        if (bytes > Limits::kMaxToolCallIdBytes) {
+            error = "tool result id exceeds 256-byte limit";
+            return false;
+        }
+        payloadBytes += bytes;
+    }
+    if (name != message.end()) {
+        const size_t bytes = name->get_ref<const std::string&>().size();
+        if (bytes > Limits::kMaxToolCallNameBytes) {
+            error = "message tool name exceeds 64-byte limit";
+            return false;
+        }
+        payloadBytes += bytes;
     }
 
     const auto toolCalls = message.find("toolCalls");
@@ -194,6 +223,12 @@ bool validateMessageJson(const nlohmann::json& message,
         error = "message 'toolCalls' must be an array";
         return false;
     }
+    if (toolCalls->size() > Limits::kMaxToolCallsPerMessage) {
+        error = "message exceeds 64 tool calls";
+        return false;
+    }
+
+    size_t totalArgumentBytes = 0;
     for (const auto& call : *toolCalls) {
         if (!call.is_object()) {
             error = "tool call entries must be objects";
@@ -206,8 +241,52 @@ bool validateMessageJson(const nlohmann::json& message,
                 return false;
             }
         }
+
+        const auto id = call.find("id");
+        const auto toolName = call.find("name");
+        const auto arguments = call.find("arguments");
+        if (id != call.end()) {
+            const size_t bytes = id->get_ref<const std::string&>().size();
+            if (bytes > Limits::kMaxToolCallIdBytes) {
+                error = "tool call id exceeds 256-byte limit";
+                return false;
+            }
+            payloadBytes += bytes;
+        }
+        if (toolName != call.end()) {
+            const size_t bytes = toolName->get_ref<const std::string&>().size();
+            if (bytes > Limits::kMaxToolCallNameBytes) {
+                error = "tool call name exceeds 64-byte limit";
+                return false;
+            }
+            payloadBytes += bytes;
+        }
+        if (arguments != call.end()) {
+            const size_t bytes =
+                arguments->get_ref<const std::string&>().size();
+            if (bytes > Limits::kMaxToolArgumentsPerCallBytes) {
+                error = "tool call arguments exceed 512 KiB limit";
+                return false;
+            }
+            if (Limits::wouldExceed(
+                    totalArgumentBytes, bytes,
+                    Limits::kMaxToolArgumentsPerMessageBytes)) {
+                error = "tool call arguments exceed 4 MiB message limit";
+                return false;
+            }
+            totalArgumentBytes += bytes;
+            payloadBytes += bytes;
+        }
     }
     return true;
+}
+
+size_t sessionPayloadBytes(const std::vector<ChatMessage>& messages) {
+    size_t total = 0;
+    for (const ChatMessage& message : messages) {
+        total += chatMessagePayloadBytes(message);
+    }
+    return total;
 }
 
 bool eraseOldestConversationGroup(std::vector<ChatMessage>& messages) {
@@ -256,10 +335,56 @@ bool eraseOldestConversationGroup(std::vector<ChatMessage>& messages) {
 
 ChatSession::ChatSession() = default;
 
-void ChatSession::addMessage(ChatMessage msg) {
+bool ChatSession::addMessage(ChatMessage msg) {
+    std::string validationError;
+    if (!validateChatMessageLimits(
+            msg, Limits::kMaxMessageContentBytes, validationError)) {
+        Gui::log("[ChatSession] rejected message: %s",
+                 validationError.c_str());
+        return false;
+    }
+
     std::string persistPath;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+
+        // The newest user turn is protected from truncation. Reject before
+        // mutating the session when that turn plus the incoming non-user
+        // message cannot satisfy a hard cap even after all older groups are
+        // removed. This keeps addMessage(false) transactional.
+        if (msg.role != Role::User) {
+            const auto latestUser = std::find_if(
+                messages_.rbegin(), messages_.rend(),
+                [](const ChatMessage& message) {
+                    return message.role == Role::User;
+                });
+            if (latestUser != messages_.rend()) {
+                const size_t protectedStart = static_cast<size_t>(
+                    std::distance(latestUser, messages_.rend()) - 1);
+                const size_t protectedCount =
+                    messages_.size() - protectedStart + 1u;
+                size_t protectedPayload = chatMessagePayloadBytes(msg);
+                for (size_t index = protectedStart;
+                     index < messages_.size(); ++index) {
+                    const size_t bytes =
+                        chatMessagePayloadBytes(messages_[index]);
+                    if (Limits::wouldExceed(
+                            protectedPayload, bytes,
+                            Limits::kMaxSessionPayloadBytes)) {
+                        Gui::log("[ChatSession] rejected message: latest "
+                                 "conversation exceeds 16 MiB limit");
+                        return false;
+                    }
+                    protectedPayload += bytes;
+                }
+                if (protectedCount > static_cast<size_t>(kMaxMessages)) {
+                    Gui::log("[ChatSession] rejected message: latest "
+                             "conversation exceeds 1000-message limit");
+                    return false;
+                }
+            }
+        }
+
         messages_.push_back(std::move(msg));
 
         // Enforce hard message cap (AC 8.1) by dropping complete oldest
@@ -268,6 +393,16 @@ void ChatSession::addMessage(ChatMessage msg) {
         while (messages_.size() > static_cast<size_t>(kMaxMessages)) {
             if (!eraseOldestConversationGroup(messages_)) {
                 break;
+            }
+        }
+
+        while (sessionPayloadBytes(messages_) >
+               Limits::kMaxSessionPayloadBytes) {
+            if (!eraseOldestConversationGroup(messages_)) {
+                messages_.pop_back();
+                Gui::log("[ChatSession] rejected message: session payload "
+                         "exceeds 16 MiB limit");
+                return false;
             }
         }
 
@@ -283,6 +418,7 @@ void ChatSession::addMessage(ChatMessage msg) {
     if (!persistPath.empty()) {
         save(persistPath);
     }
+    return true;
 }
 
 const std::vector<ChatMessage>& ChatSession::getMessages() const {
@@ -545,6 +681,20 @@ bool ChatSession::saveUnlocked(const std::string& filepath) const {
     }
     root["messages"] = std::move(arr);
 
+    std::string serialized;
+    try {
+        serialized = root.dump(2);
+    } catch (const std::exception& e) {
+        Gui::log("[ChatSession] failed to serialize '%s': %s",
+                 filepath.c_str(), e.what());
+        return false;
+    }
+    if (serialized.size() > Limits::kMaxPersistenceFileBytes) {
+        Gui::log("[ChatSession] refused to save '%s': JSON exceeds 32 MiB limit",
+                 filepath.c_str());
+        return false;
+    }
+
     // Write atomically: serialize to `<filepath>.tmp`, then rename over the
     // target. This prevents a crash mid-write from leaving a truncated JSON
     // file that would later be rejected by load().
@@ -567,7 +717,8 @@ bool ChatSession::saveUnlocked(const std::string& filepath) const {
                          tmpPath.string().c_str());
                 return false;
             }
-            ofs << root.dump(2);
+            ofs.write(serialized.data(),
+                      static_cast<std::streamsize>(serialized.size()));
             if (!ofs.good()) {
                 Gui::log("[ChatSession] write failed for '%s'",
                          tmpPath.string().c_str());
@@ -650,13 +801,34 @@ PersistenceLoadResult ChatSession::loadUnlocked(const std::string& filepath) {
                 throw std::runtime_error("messages must be an array");
             }
             const auto& arr = *messages;
-            loadedMessages.reserve(
-                std::min(arr.size(), static_cast<size_t>(kMaxMessages)));
-            for (const auto& mj : arr) {
+            if (arr.size() > Limits::kMaxSessionMessagesOnDisk) {
+                throw std::runtime_error(
+                    "session exceeds 10000 on-disk messages");
+            }
+            const size_t retainStart = arr.size() >
+                    static_cast<size_t>(kMaxMessages)
+                ? arr.size() - static_cast<size_t>(kMaxMessages)
+                : 0u;
+            loadedMessages.reserve(arr.size() - retainStart);
+            size_t retainedPayloadBytes = 0;
+            for (size_t index = 0; index < arr.size(); ++index) {
+                const auto& mj = arr[index];
                 std::string validationError;
-                if (!validateMessageJson(mj, validationError)) {
+                size_t payloadBytes = 0;
+                if (!validateMessageJson(
+                        mj, validationError, payloadBytes)) {
                     throw std::runtime_error(validationError);
                 }
+                if (index < retainStart) {
+                    continue;
+                }
+                if (Limits::wouldExceed(
+                        retainedPayloadBytes, payloadBytes,
+                        Limits::kMaxSessionPayloadBytes)) {
+                    throw std::runtime_error(
+                        "retained session payload exceeds 16 MiB limit");
+                }
+                retainedPayloadBytes += payloadBytes;
                 loadedMessages.push_back(messageFromJson(mj));
             }
             while (loadedMessages.size() >

@@ -44,7 +44,9 @@ private:
     // StreamTerminalTracker at the callback boundary.
     void parseSSEChunk(const std::string& eventData,
                        const CompletionRequest& request,
-                       ChatMessage& outMessage);
+                       ChatMessage& outMessage,
+                       size_t& totalArgumentBytes,
+                       std::string& limitError);
 
     // Parse a non-streaming full JSON response body into a CompletionResponse.
     CompletionResponse parseFullResponse(const std::string& body);

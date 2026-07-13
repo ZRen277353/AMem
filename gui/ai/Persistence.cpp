@@ -2,6 +2,9 @@
 
 #include "Persistence.h"
 
+#include "AiLimits.h"
+
+#include <array>
 #include <fstream>
 #include <system_error>
 
@@ -34,6 +37,19 @@ JsonDocumentLoadResult loadJsonDocument(
         return loaded;
     }
 
+    ec.clear();
+    const uintmax_t fileBytes = std::filesystem::file_size(filepath, ec);
+    if (ec) {
+        loaded.result.status = PersistenceLoadStatus::IoError;
+        loaded.result.message = "could not inspect file size: " + ec.message();
+        return loaded;
+    }
+    if (fileBytes > Limits::kMaxPersistenceFileBytes) {
+        loaded.result.status = PersistenceLoadStatus::Invalid;
+        loaded.result.message = "JSON file exceeds 32 MiB limit";
+        return loaded;
+    }
+
     std::ifstream input(filepath, std::ios::binary);
     if (!input.is_open()) {
         loaded.result.status = PersistenceLoadStatus::IoError;
@@ -41,16 +57,35 @@ JsonDocumentLoadResult loadJsonDocument(
         return loaded;
     }
 
-    try {
-        input >> loaded.document;
-    } catch (const nlohmann::json::exception& error) {
-        loaded.result.status = PersistenceLoadStatus::Invalid;
-        loaded.result.message = std::string("invalid JSON: ") + error.what();
-        return loaded;
+    std::string serialized;
+    serialized.reserve(static_cast<size_t>(fileBytes));
+    std::array<char, 64u * 1024u> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count <= 0) {
+            break;
+        }
+        const size_t bytes = static_cast<size_t>(count);
+        if (Limits::wouldExceed(serialized.size(), bytes,
+                                Limits::kMaxPersistenceFileBytes)) {
+            loaded.result.status = PersistenceLoadStatus::Invalid;
+            loaded.result.message = "JSON file exceeds 32 MiB limit";
+            return loaded;
+        }
+        serialized.append(buffer.data(), bytes);
     }
     if (input.bad()) {
         loaded.result.status = PersistenceLoadStatus::IoError;
         loaded.result.message = "I/O failure while reading file";
+        return loaded;
+    }
+
+    try {
+        loaded.document = nlohmann::json::parse(serialized);
+    } catch (const nlohmann::json::exception& error) {
+        loaded.result.status = PersistenceLoadStatus::Invalid;
+        loaded.result.message = std::string("invalid JSON: ") + error.what();
         return loaded;
     }
 
