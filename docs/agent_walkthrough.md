@@ -1,7 +1,7 @@
 # AMem AI Agent 代码走读
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-13
+最后更新：2026-07-14
 
 本文按实际调用顺序解释内置 AI Chat 如何启动、请求模型、审批并执行工具、回喂结果、取消和退出。组件清单见 [`agent_architecture.md`](./agent_architecture.md)，当前问题编号见 [`agent_project_issues.md`](./agent_project_issues.md)，目标重构步骤见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
@@ -212,11 +212,12 @@ ChatWindow::processToolCalls()
 
 `beginToolCalls()` 增加 step，应用 `maxAgentSteps` 和 `maxToolCallsPerTurn`。
 
-`runUntilBlocked()` 查 `ToolExecutor::getToolSafety(name)`：
+`runUntilBlocked()` 查 `ToolExecutor::getToolSafety(name)`，再由 `isAutomaticallyApproved()` 选择独立策略：
 
 - `ReadOnly`：返回 `NeedsExecution`。
-- `Write` + auto approve：记录 trace 后返回 `NeedsExecution`。
-- `Write` + 默认策略：返回 `NeedsConfirmation`。
+- 非 Lua `Write`：只读取默认 false 的 `autoApproveWrites`。
+- `lua_execute`：只读取默认 true 的 `autoApproveLuaExecution`，不受通用 YOLO 开关覆盖。
+- 对应策略允许时记录 `AutoApproved` trace 后返回 `NeedsExecution`；关闭时返回 `NeedsConfirmation`。
 
 ### 5.2 审批框
 
@@ -246,7 +247,7 @@ ChatWindow::processToolCalls()
   -> 当前状态仍等于返回 snapshot 时才更新 run
 ```
 
-driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 返回最新最多 100 项以及 `available/dropped`，没有 continuation cursor。旧名称已经从注册表和 JSON adapter 中删除。`lua_execute` 在 host 边界复核 target，把同一个审批 `OperationContext` 绑定到 Lua registry 直至脚本返回，因此内部 API 不能重新捕获另一个 target；它使用 Agent absolute deadline，并只把开始后的取消作为回执标记。
+driver、module/pointer/disassembly/symbol resolution、四个 canonical scan、五个 canonical breakpoint 和 raw/typed memory read/write 都已在 service 边界消费 context。`driver_initialize` 返回未发送/拒绝/完成未知/确认后取消或超时回执，并在显示、审计和持久化时脱敏 card。pointer/scan/symbol 保持 transaction/epoch 语义；breakpoint set/remove/suspend/resume 返回确认回执或 `completion_unknown`，hits 返回最新最多 100 项以及 `available/dropped`，没有 continuation cursor。旧名称已经从注册表和 JSON adapter 中删除。`lua_execute` 的一次授权对应一次完整脚本调用，脚本内部 API 不重复弹窗；host 边界先复核初始 target，再把已授权 context 的可变副本绑定到 Lua registry。generation、absolute deadline 和 cancellation 保持不变；`process.attach` 成功后仅以 service-confirmed snapshot 推进脚本 target，后续 API 使用新目标，脚本最终 snapshot 再推进 Agent/IPC baseline。外部目标变化不被视为脚本切换，开始后的取消仍只作为回执标记。
 
 GUI 的 `BreakpointWindow` 已完成 breakpoint 域迁移：窗口构造时注入 `IMemService`，添加、删除、启用、暂停、恢复和命中刷新均捕获当前 target/generation。命中读取在 DEBUG 端口排空一次无 cursor 响应，只保留最新 50,000 条；`BreakpointHit` 保存详情页所需的 GPR、`orig_x0`、syscall、FPSR/FPCR 和全部向量寄存器。超过上限时 GUI 显示丢弃较早命中的日志。
 
@@ -468,14 +469,17 @@ handler reader -> IpcRequestSession::run()
   -> lifetime request-id dedupe / one-active / IpcMethodCatalog capability
   -> owned dispatch worker -> IpcMemServiceDispatcher
        -> Observe: shared MemJsonTools -> IMemService(context)
-       -> privileged: bounded broker submission -> decision only
+       -> privileged: bounded broker submission
+            -> lua_execute + policy enabled: approved immediately
+            -> otherwise: wait for GUI decision
+            -> durable one-shot consume -> execute -> outcome audit
   -> validated Response {ok, completion, result|error}
 Cancel/deadline/invalidation/Stop -> same cooperative cancellation context
 ```
 
 `timeout_ms` 默认 30 秒、最大 5 分钟，接收 Request 时转换成 server `steady_clock` absolute deadline。client 不能在 payload 中声明 capability；dispatcher registry 决定 method 需要 Observe、TargetSelection、TargetMutation 或 HostExecution。handshake 只 grant Observe；缺失 privileged capability 的 method 仅在 dispatcher 明确支持 approval submission 时进入 worker，否则在 dispatch 前拒绝。每个连接最多接纳 1024 个 unique request id；id 终身不复用，达到上限后返回 Error 并断开要求重连。Cancel 只接受 `{}`，不单独返回成功 ack；active request 的最终 Response 给出 completion。
 
-完整 catalog 与内置 Agent 同为 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution。`MemJsonTools` 是 AI 和 IPC 共用的参数/结果 adapter；IPC 调用不直接读 `AppContext` 或 socket。`IpcMemServiceDispatcher` 在构造时固定 connection/target baseline，并在执行前后及 reader 每 250 ms 复核。generation、PID、handle 或 process revision 变化会发 session-level Error、取消 active context 并关闭 session。没有 broker/session binding 的 dispatcher 对 privileged method 仍返回 `approval_required`；runtime binding 后，request worker 只提交 method/client/session/target/deadline，原 params 留在 active request。reader 可继续处理 Cancel。批准后 dispatcher 消费 durable one-shot grant，再让 11 个 privileged method 进入 `MemJsonTools`/`MemService`；`lua_execute` 则进入注入的 host executor，并复用 `mem/LuaJsonTool`。
+完整 catalog 与内置 Agent 同为 24 个 canonical name：12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution。`MemJsonTools` 是 AI 和 IPC 共用的参数/结果 adapter；IPC 调用不直接读 `AppContext` 或 socket。`IpcMemServiceDispatcher` 在构造时固定 connection/target baseline，并在执行前后及 reader 每 250 ms 复核。generation、PID、handle 或 process revision 变化会发 session-level Error、取消 active context 并关闭 session。没有 broker/session binding 的 dispatcher 对 privileged method 仍返回 `approval_required`；runtime binding 后，request worker 只提交 method/client/session/target/deadline，原 params 留在 active request。reader 可继续处理 Cancel。`lua_execute` 在共享开关开启时创建 immediately-approved policy record，关闭时创建 pending record；broker 从接口层拒绝任何非 Lua 的 policy auto-approval。两条路径随后都消费 durable one-shot grant，再让 11 个 privileged method 进入 `MemJsonTools`/`MemService`；`lua_execute` 则进入注入的 host executor，并复用 `mem/LuaJsonTool`。
 
 直接测试 `NamedPipeServer::start()` 时的调用链是：
 
@@ -488,9 +492,9 @@ NativePipeSecurity -> protected current-user/SYSTEM read-write DACL
 Stop -> signal stop event -> CancelIoEx(active pipe) -> join
 ```
 
-`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 获得 server 单调 session id；stop/start 清诊断计数但不复用 id。snapshot 提供 phase、session count/id、活动 client identity/capability、最后状态和 request/response/cancel 计数，不保存 params/result。system owner 保证 audit、broker 和 host executor 都晚于 runtime 析构；窗口提供显式启停。编译与运行默认关闭，`main.cpp` 只在设备断连前 shutdown。handler 与 dispatch worker 都受管并 join。Hello 与 GUI 显示仍明确为 `Observe + 逐请求审批`，不会授予长期 privileged capability。
+`NamedPipeServer::snapshot()` 可观察 lifecycle state、accepted count、pipe name 和 last error。`NativeAgentRuntime` 为每个 accepted handle 串起 framed connection -> handshake -> `IpcMemServiceDispatcher` -> request session。成功 Hello 获得 server 单调 session id；stop/start 清诊断计数但不复用 id。snapshot 提供 phase、session count/id、活动 client identity/capability、最后状态和 request/response/cancel 计数，不保存 params/result。system owner 保证 audit、broker 和 host executor 都晚于 runtime 析构；窗口提供显式启停和共享 Lua 策略开关。编译与运行默认关闭，`main.cpp` 只在设备断连前 shutdown。handler 与 dispatch worker 都受管并 join。Hello 与 GUI 显示明确为 `Observe + 逐请求审批；Lua 可自动授权`，不会授予长期 privileged capability。
 
-privileged broker 已接入完整的 submission -> decision -> consume -> execution 产品链。worker 用 `{sessionId, requestId}` 提交 metadata 并保持 active request；Cancel/Stop/session 关闭产生精确终止状态。共享 `IpcApprovalAuditLog` 写 `native_ipc_approval_audit.jsonl`，轮转 `.1`，更新最近 100 条及成功/失败计数。schema 2 把 broker 转换记为 `approval_transition`，把每个 consumed grant 的最终摘要记为 `execution_outcome`；旧 schema 1 仍可加载。日志是明文，含 client/method/session/request、authorized/observed generation/target、success、completion 和 error code，但不含 params、result JSON 或 error message。GUI“特权安全审计”显示最近 20 条。
+privileged broker 已接入完整的 submission -> policy/manual decision -> consume -> execution 产品链。worker 用 `{sessionId, requestId}` 提交 metadata 并保持 active request；Cancel/Stop/session 关闭产生精确终止状态。共享 `IpcApprovalAuditLog` 写 `native_ipc_approval_audit.jsonl`，轮转 `.1`，更新最近 100 条及成功/失败计数。schema 2 把 broker 转换记为 `approval_transition`，把每个 consumed grant 的最终摘要记为 `execution_outcome`，并以 `auto_approved` 区分 policy/manual；旧 schema 1 仍可加载。日志是明文，含 client/method/session/request、authorized/observed generation/target、success、completion 和 error code，但不含 params、result JSON 或 error message。GUI“特权安全审计”显示最近 20 条。
 
 broker `consume()` 在锁内复核 session/request/deadline/generation/target 并烧毁 record，再在锁外审计；只有 durable success 返回 grant，失败不可重试复用。dispatcher 随后校验 grant metadata，在 adapter/send 前再次检查 Cancel/deadline，并在返回 response 前同步记录一次 outcome。consume 审计失败可阻止执行；outcome 审计发生在可能已发送的 mutation 之后，因此失败只进入可见 health，不覆盖真实 completion。deny、expire 或 consume 前 Cancel 没有 execution outcome。
 
@@ -504,7 +508,7 @@ FastMCP package、配置、安装入口和旧 loopback HTTP server 已从 `Nativ
 
 | 维度 | 内置 Agent | Native IPC |
 |------|------------|------------|
-| 授权 | `AgentRunner` 写审批 | Hello 仅 Observe；每个 privileged request 使用 GUI one-shot grant |
+| 授权 | 非 Lua write 与 Lua 分开设置；Lua 默认自动批准 | Hello 仅 Observe；每个 privileged request 都用 one-shot grant，Lua 默认 policy-approved |
 | 业务 adapter | `MemJsonTools` / `LuaJsonTool` | 同一套 `MemJsonTools` / `LuaJsonTool` |
 | 地址字符串 `"1234"` | 拒绝，必须显式 `0x` | 拒绝，必须显式 `0x` |
 | 生命周期 | run context + cancellation + owned tool worker | session/request id + cancellation + owned pipe/worker |
@@ -514,7 +518,7 @@ FastMCP package、配置、安装入口和旧 loopback HTTP server 已从 `Nativ
 
 ### 9.4 Native IPC 安全与响应
 
-Native IPC 编译和运行均默认关闭。显式启用后，Named Pipe 使用当前用户/SYSTEM DACL、拒绝 remote client、单实例、严格 Hello、payload 上限、绝对 deadline、request id 和 Cancel。Hello 不授予长期 privileged capability；目标选择、目标修改和 host execution 必须逐请求审批，并在执行前消费 durable one-shot grant。
+Native IPC 编译和运行均默认关闭。显式启用后，Named Pipe 使用当前用户/SYSTEM DACL、拒绝 remote client、单实例、严格 Hello、payload 上限、绝对 deadline、request id 和 Cancel。Hello 不授予长期 privileged capability；目标选择、目标修改和 host execution 都必须逐请求生成并消费 durable one-shot grant。除 `lua_execute` 可按默认开启的共享策略省略人工决策外，其余 privileged request 仍等待 GUI；关闭 Lua 策略也会恢复其 GUI 审批。
 
 framed writer 使用 overlapped exact write 处理 short write；Stop 通过 stop event 和 `CancelIoEx` 中断等待并 join owner。客户端 timeout 通过 request deadline/cancellation 进入同一状态机，但不能撤销已发送到 Android 设备的副作用。不同 Windows 用户/session 与真实 remote client 的负向验证仍需补齐。
 
@@ -585,7 +589,7 @@ framed writer 使用 overlapped exact write 处理 short write；Stop 通过 sto
 
 ## 12. 建议的自动测试起点
 
-当前 `native_agent_mem_service` 的 31 个测试组覆盖既有 service/Agent 边界、connection generation、批量读取、冻结 completion、ToolExecutor schema 矩阵、AgentRunner 审批组合、tool history 配对与 JSON 结构限制；`native_app_context_state` 覆盖目标发布、cache invalidation 与 disconnect。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、7 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation；provider/SSE 有 19 组，本机 HTTPS/full-response 有 6 组，context budget 有 5 组，provider trust 有 3 组，persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组，HTTP lifecycle/response limit 有 5 组。九个静态 gate 加入 GUI/Lua/main service boundary、context dispatch、endpoint trust 和 session protection integration 后，当前共 30 项 CTest；fresh mandatory-feature + Native IPC Release 证据记录在重构计划。剩余验收集中在真实环境：
+当前 `native_agent_mem_service` 的 33 个测试组覆盖既有 service/Agent 边界、connection generation、批量读取、冻结 completion、真实 LuaJIT 脚本的受控目标推进与失败后 run target 同步、ToolExecutor schema 矩阵、AgentRunner 审批组合、tool history 配对与 JSON 结构限制；`native_app_context_state` 覆盖目标发布、cache invalidation 与 disconnect。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、7 组 request-contract、9 组 request-session、4 组 method-catalog、16 组 dispatcher 和 10 组 runtime 测试。socket client 的 4 组与 multi-port manager 的 6 组覆盖真实 Winsock loopback、partial I/O、timeout/EOF poison、三端口回滚、request/disconnect exclusion 和 reconnect generation；provider/SSE 有 19 组，本机 HTTPS/full-response 有 6 组，context budget 有 5 组，provider trust 有 3 组，persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组，HTTP lifecycle/response limit 有 5 组。九个静态 gate 加入 GUI/Lua/main service boundary、context dispatch、endpoint trust 和 session protection integration 后，当前共 30 项 CTest；隔离 mandatory-feature + Native IPC Release 证据记录在重构计划。剩余验收集中在真实环境：
 
 1. 用真实 Android 设备记录三端口 timeout/reconnect 与 driver/process/scan/breakpoint 恢复结果。
 2. 用真实 GUI approval click 与 Android device 覆盖 privileged adapter/send-boundary；persistent security audit、fail-closed consume、execution outcome、session/request cancel 与 GUI status gate 已有无设备测试。

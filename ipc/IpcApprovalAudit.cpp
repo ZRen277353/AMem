@@ -132,6 +132,7 @@ IpcApprovalAuditEntry entryFromJson(const json &record) {
   }
   entry.completion = record.value("completion", std::string{});
   entry.errorCode = record.value("error_code", std::string{});
+  entry.autoApproved = record.value("auto_approved", false);
   return entry;
 }
 
@@ -148,6 +149,7 @@ json recordJson(const IpcApprovalRecord &record) {
                 {"capability", CapabilityName(record.capability)},
                 {"target_policy", targetPolicyName(record.targetPolicy)},
                 {"state", stateName(record.state)},
+                {"auto_approved", record.autoApproved},
                 {"connection_generation", record.connectionGeneration},
                 {"deadline_remaining_ms",
                  deadlineRemainingMilliseconds(record.deadline)}};
@@ -175,6 +177,7 @@ json recordJson(const IpcExecutionAuditRecord &record) {
        record.observedConnectionGeneration},
       {"success", record.success},
       {"completion", RequestCompletionName(record.completion)},
+      {"auto_approved", record.autoApproved},
   };
   if (record.authorizedTarget) {
     value["target"] = targetJson(*record.authorizedTarget);

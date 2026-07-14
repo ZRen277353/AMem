@@ -32,6 +32,7 @@ struct IpcApprovalAuditEntry {
   std::optional<bool> success;
   std::string completion;
   std::string errorCode;
+  bool autoApproved = false;
 };
 
 struct IpcApprovalAuditSnapshot {

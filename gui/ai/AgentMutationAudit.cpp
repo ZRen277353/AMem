@@ -274,6 +274,10 @@ bool AgentMutationAuditLog::append(const AgentMutationAuditEvent& event,
     if (event.context.target) {
         record["target"] = targetJson(*event.context.target);
     }
+    if (event.result.selectedTarget) {
+        record["observed_target"] =
+            targetJson(*event.result.selectedTarget);
+    }
     record["arguments"] = parseAndSanitize(
         toolCallArgumentsForDisplay(event.call));
     const bool redactMessages =

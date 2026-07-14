@@ -25,6 +25,7 @@ struct IpcExecutionAuditRecord {
   std::optional<Mem::TargetSnapshot> authorizedTarget;
   uint64_t observedConnectionGeneration = 0;
   std::optional<Mem::TargetSnapshot> observedTarget;
+  bool autoApproved = false;
   bool success = false;
   RequestCompletion completion = RequestCompletion::CompletionUnknown;
   std::string errorCode;

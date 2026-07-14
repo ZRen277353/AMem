@@ -1,11 +1,11 @@
 # AMem AI Agent 架构文档
 
 适用分支：`NativeAgent`（基线来自 `AIChat`）
-最后更新：2026-07-13
+最后更新：2026-07-14
 
-本文描述当前工作区中的内置 AI Chat、统一的 GUI/Lua `IMemService` 边界、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求审批 dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
+本文描述当前工作区中的内置 AI Chat、统一的 GUI/Lua `IMemService` 边界、Lua 独立授权策略、compile-time opt-in 且 runtime default-stopped 的 native IPC framing/Hello/request-session/catalog/逐请求 one-shot grant dispatch/transport/runtime/GUI control，以及它们共享的设备协议层。Python MCP 与 legacy HTTP IPC 已删除。代码走读见 [`agent_walkthrough.md`](./agent_walkthrough.md)，已确认风险和修复优先级见 [`agent_project_issues.md`](./agent_project_issues.md)，NativeAgent 的目标设计和迁移顺序见 [`native_agent_refactor_plan.md`](./native_agent_refactor_plan.md)。
 
-> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。`NativeAgent` 固定构建 AI Chat、Capstone 和 Keystone，缺少任一依赖时 CMake 配置失败；`HAVE_AI_CHAT`/`HAVE_CAPSTONE`/`HAVE_KEYSTONE` 不再对应受支持的 OFF 组合。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged approval 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 逐请求审批`。Hello 不授予长期 privileged capability；批准后的单个请求可消费一次性 grant 并执行。
+> 本文中的“内置 Agent”指 `gui/ai/` 中由 `ChatWindow` 驱动的 model -> tool -> model 循环。`NativeAgent` 固定构建 AI Chat、Capstone 和 Keystone，缺少任一依赖时 CMake 配置失败；`HAVE_AI_CHAT`/`HAVE_CAPSTONE`/`HAVE_KEYSTONE` 不再对应受支持的 OFF 组合。native codec、bounded framed I/O、Observe-only Hello、严格 request/session、安全 Named Pipe、完整 `MemService` dispatch、owned runtime、显式 GUI control 和逐请求 privileged one-shot grant 已落地。`ENABLE_NATIVE_IPC` 默认 OFF；即使编译，应用启动时也不监听，只有用户点击才启用 `Observe + 特权策略审批`。Hello 不授予长期 privileged capability；非 Lua 请求等待 GUI 决策，`lua_execute` 默认由独立 Lua 策略立即批准，但仍只消费当前请求的一次性 grant。
 
 ## 1. 系统总览
 
@@ -31,7 +31,7 @@ Native Named Pipe IPC ----------+
 3. 模型返回 tool call 时，执行预算控制、写类审批、工具调用和结果回喂。
 4. 保存会话并记录 run trace。
 
-Native IPC 不经过模型编排，但复用 server-owned catalog、`MemJsonTools`、target binding、逐请求审批和 outcome audit；它不是绕过内置安全边界的第二套设备实现。
+Native IPC 不经过模型编排，但复用 server-owned catalog、`MemJsonTools`、target binding、逐请求 one-shot grant 和 outcome audit；Lua 默认策略只省略人工弹窗，不省略 broker、target 校验、durable consume 或审计。它不是绕过内置安全边界的第二套设备实现。
 
 ## 2. 目录与职责
 
@@ -49,7 +49,7 @@ Native IPC 不经过模型编排，但复用 server-owned catalog、`MemJsonTool
 | 配置 | `ApiKeyStore`, `AiSettings`, `DefaultSystemPrompt.h` | provider 配置、DPAPI key、全局设置、默认 prompt |
 | UI 桥 | `UIMessageQueue` | 内置 Agent 后台线程向 ImGui 主线程投递消息 |
 | 目标/展示状态 | `AppContext`, `TargetMutation` | 单一发布 PID/handle/name/奇偶 revision，目标切换时原子失效模块/符号展示缓存 |
-| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity` | native frame/I/O/Hello/request runtime、逐请求 privileged approval/execution |
+| IPC | `IpcProtocol`, `IpcFramedConnection`, `IpcHandshakeSession`, `IpcRequestProtocol`, `IpcRequestSession`, `IpcMemServiceDispatcher`, `IpcApprovalBroker`, `IpcApprovalAuditLog`, `NamedPipeServer`, `NativeAgentRuntime`, `NativePipeSecurity` | native frame/I/O/Hello/request runtime、逐请求 privileged policy/grant/execution |
 | 协议排障 | `tools/protocol_reference/` | 可选标准库脚本；不参与产品运行，也不是协议真相源 |
 | 协议 | `client_singleton.h`, `*Commands.cpp`, `SocketCommand.h` | Android 请求/响应、端口锁、超时和结果校验 |
 
@@ -153,7 +153,8 @@ User send
 
 - `maxAgentSteps`：默认 12，范围 `[1, 64]`。
 - `maxToolCallsPerTurn`：默认 16，范围 `[1, 64]`。
-- `autoApproveWrites`：默认 false。
+- `autoApproveWrites`：非 Lua write 的自动批准，默认 false。
+- `autoApproveLuaExecution`：`lua_execute` 的独立自动批准，默认 true；同时供 Native IPC 读取。
 
 单个工具失败后，本批剩余工具会标记为 skipped，再把失败审计回喂模型。工具 executor 返回的顶层 `error` 或 `success=false` 会由 `ToolExecutor` 转为失败。
 
@@ -274,11 +275,11 @@ Idle
 | 符号 | `symbol_resolve` R, `symbol_list` R |
 | 脚本 | `lua_execute` W（受 `HAVE_LUAJIT` 约束） |
 
-当前二元安全模型把 `Write` 定义为需要审批的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称需要写审批。33 个旧名称已经退役，不在注册表中；旧会话中的完整调用组由 `getMessagesForRequest()` 转为不可执行的 assistant 历史文本。未来扩展 effect 元数据时应把 symbol 操作标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
+当前二元安全模型把 `Write` 定义为受授权策略控制的目标/主机 mutation。规范 `symbol_resolve`/`symbol_list` 不修改目标内存，因此保持 ReadOnly；它们内部的 active-table session mutation 由 transaction + epoch 约束。默认 prompt 已只列规范名称且不再错误声称每次 write 都必然弹窗。33 个旧名称已经退役，不在注册表中；旧会话中的完整调用组由 `getMessagesForRequest()` 转为不可执行的 assistant 历史文本。未来扩展 effect 元数据时应把 symbol 操作标为 `SessionMutation`，但不重新暴露 `symbol_init` 前置步骤。
 
 ### 7.2 审批边界
 
-`ToolSafety::Write` 且 `autoApproveWrites=false` 时，`AgentRunner` 产生 `NeedsConfirmation`。审批框展示工具名、arguments、预期 connection generation、PID 和 process revision。
+非 Lua `ToolSafety::Write` 在 `autoApproveWrites=false` 时产生 `NeedsConfirmation`。`lua_execute` 不读取这个通用开关，而由 `autoApproveLuaExecution` 独立控制：默认 true 时直接记录 `AutoApproved` 并执行，关闭时才进入同一审批框。审批框展示工具名、arguments、预期 connection generation、PID 和 process revision。
 
 `ToolRegistration::targetPolicy` 进一步区分：
 
@@ -292,7 +293,7 @@ Idle
 - catalog-owned effect/resource metadata（当前独立审计按 canonical/alias 名称归类）
 - endpoint/provider 数据去向
 
-二十三个非 Lua canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 在 host 执行前复核 target/generation，并把同一个审批 `OperationContext` 写入 Lua registry，整段脚本中的 memory/process/module/scan/breakpoint API 都沿用原 generation、target、deadline 和 cancellation；开始后仍不能硬取消。内置目录已无 legacy executor，新增 process-bound 工具仍必须在实际 service/host/send 边界消费相同 context。
+二十三个非 Lua canonical 工具（`status`、`driver_initialize`、`process_list`、`process_open`、module/pointer/disassembly resolution、四个 canonical scan、两个 canonical symbol、五个 canonical breakpoint、raw/typed memory read/write）在 service 边界消费 `OperationContext`。driver 初始化区分未发送、服务端拒绝、发送后未知及确认后 cancel/deadline，且卡密不会进入审批显示、tool audit 或 session JSON。pointer、scan 和 symbol 保持各自事务/epoch 语义；breakpoint mutation 统一区分未发送、设备拒绝、发送后未知和确认后 cancel/deadline，hit batch 在 Agent 边界限制为最新 100 项并报告丢弃数。`lua_execute` 的授权单元就是一次完整脚本调用；脚本内部多次调用 memory/process/module/scan/breakpoint API 不应再次弹窗，因此“一个 Lua 授权覆盖脚本内多操作”本身不是授权扩张。host 执行前仍复核 target/generation，并把已授权 context 的脚本作用域副本写入 Lua registry。generation、deadline 和 cancellation 始终固定；target 只允许由脚本内成功的 `process.attach` 按 service-confirmed snapshot 推进，外部目标变化仍拒绝。最终 target 会返回并推进 Agent/IPC baseline；开始后仍不能硬取消。内置目录已无 legacy executor，新增 process-bound 工具仍必须在实际 service/host/send 边界消费相同 context。
 
 ### 7.3 独立 mutation audit
 
@@ -417,17 +418,17 @@ format v1 仍可迁移；旧文件中的 `systemPrompt`/`tokenLimit` 无论类�
 
 handler/caller thread 持续读取 Request/Cancel，一个 owned joinable worker 串行调用 dispatcher。相对 `timeout_ms` 在接收时固定为 `steady_clock` absolute deadline；deadline、client Cancel、session invalidation 和 server Stop 向同一个 cancellation context 发信号。Cancel 没有独立成功 ack，active request 的最终 Response 承载真实 completion；unknown/invalid Cancel 返回 Error。取消仍是 cooperative。session idle timeout 为 5 分钟，response write timeout 为 5 秒，dispatcher validity 默认每 250 ms 复核。session invalidation、request-limit 或 protocol-error 在发送终止 Error 后做最多 100 ms、可由 Stop 取消的 drain，避免立即 disconnect 截断已写 payload；它不是无限 `FlushFileBuffers`。
 
-`IpcMethodCatalog` 与内置 Agent 的 24 个 canonical name 由 `native_agent_catalog` 同时校验。分类固定为 12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution；target policy 为 3 None、20 Bound、1 Selection。只有 12 个 Observe descriptor 标记为 `executableWithoutApproval`；`driver_initialize` 与 Lua 归入 HostExecution，scan mutation 与 breakpoint/memory write 归入 TargetMutation。
+`IpcMethodCatalog` 与内置 Agent 的 24 个 canonical name 由 `native_agent_catalog` 同时校验。capability 固定为 12 Observe、1 TargetSelection、9 TargetMutation、2 HostExecution；target policy 为 3 None、19 Bound、2 Selection，其中 `process_open` 与 `lua_execute` 都可受控推进最终 target。只有 12 个 Observe descriptor 标记为 `executableWithoutApproval`，即它们可以绕过 broker；`driver_initialize` 与 Lua 归入 HostExecution，scan mutation 与 breakpoint/memory write 归入 TargetMutation。Lua 的默认自动批准仍经过 broker，不能把它改成 catalog 级免审批。
 
-原 `AgentMemTools` 实现已提升为 `mem/MemJsonTools`，AI 保留 type alias。`IpcMemServiceDispatcher` 复用这一单一 parser/result adapter 执行 12 个 Observe method 和 11 个 privileged `MemService` method，不复制地址、scalar、分页或结果格式。`lua_execute` 的参数、target 复核和结果格式提取到共享 `mem/LuaJsonTool`；产品通过注入的 `IIpcHostMethodExecutor` 调用它，未启用 LuaJIT 时该方法不具备可执行 adapter。dispatcher 建立时用 `IMemService::captureContext(true)` 固定 `{connectionGeneration, target}`，在 request 前后和 reader polling 边界比较当前 snapshot；变化时发送 request-id 0 的 session Error、以 `SessionInvalidated` signal 取消 active `OperationContext` 并 join worker。deadline 和 cancellation 通过同一个原子 token 进入 service。未绑定 broker/session 的 direct dispatcher 对 privileged method 返回 `approval_required`。
+原 `AgentMemTools` 实现已提升为 `mem/MemJsonTools`，AI 保留 type alias。`IpcMemServiceDispatcher` 复用这一单一 parser/result adapter 执行 12 个 Observe method 和 11 个 privileged `MemService` method，不复制地址、scalar、分页或结果格式。`lua_execute` 的参数、target 复核和结果格式提取到共享 `mem/LuaJsonTool`；产品通过注入的 `IIpcHostMethodExecutor` 调用它，未启用 LuaJIT 时该方法不具备可执行 adapter。dispatcher 建立时用 `IMemService::captureContext(true)` 固定 `{connectionGeneration, target}`，在 request 前后和 reader polling 边界比较当前 snapshot；变化时发送 request-id 0 的 session Error、以 `SessionInvalidated` signal 取消 active `OperationContext` 并 join worker。deadline 和 cancellation 通过同一个原子 token 进入 service。未绑定 broker/session 的 direct dispatcher 对 privileged method 返回 `approval_required`。产品 runtime 注入线程安全的 `autoApproveLuaExecution` 读取函数；true 时只把当前 `lua_execute` submission 标为 policy-approved，false 或读取异常时进入人工 pending 路径。
 
 `NativePipeSecurity` 生成 protected DACL，仅向当前进程用户 SID 和 SYSTEM 授予 pipe read/write，不授予 owner/DACL 修改权。`NamedPipeServer` 固定 `\\.\pipe\AMem.NativeAgent.v1`，使用 `PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE` 和 `nMaxInstances=1`；同一个 server handle 在连接间复用。overlapped accept 与 client handler 串行运行在一个 owned thread 上，`stop()` 先发 stop event、对活动 handle 调用 `CancelIoEx`，再 join。状态快照提供 stopped/listening/connected/stopping/failed、累计连接数、名称和错误。
 
-`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> host executor -> broker -> security audit；同一个 `IpcApprovalAuditLog` 同步写 `native_ipc_approval_audit.jsonl`。schema 2 用 `approval_transition` 与 `execution_outcome` 区分授权状态和最终执行摘要；后者保存 authorized/observed generation/target、success、completion 与 bounded error code，不保存 params、result JSON 或 error message。loader 继续接受 schema 1 approval 记录。单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 的“特权安全审计”表显示最近 20 条、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。
+`NativeAgentRuntime` 已持有 server，并为每个客户端装配 handshake、dispatcher 与 request session。成功 Hello 分配单调 session id。system owner 的析构顺序为 runtime -> host executor -> broker -> security audit；同一个 `IpcApprovalAuditLog` 同步写 `native_ipc_approval_audit.jsonl`。schema 2 用 `approval_transition` 与 `execution_outcome` 区分授权状态和最终执行摘要，两类记录都带 `auto_approved`；后者保存 authorized/observed generation/target、success、completion 与 bounded error code，不保存 params、result JSON 或 error message。loader 继续接受 schema 1 approval 记录，缺少新字段的旧记录按 false 处理。单条 16 KiB，active 4 MiB + 一个备份，加载仅扫描有界尾部并忽略损坏/超大行。GUI 的“特权安全审计”表显示最近 20 条、policy 标记、路径、本次成功写入、失败数和 last error。`ENABLE_NATIVE_IPC` 默认 OFF。
 
-`IpcApprovalBroker` 已固定 privileged authorization 的纯状态机。submission 只接受 server session/request id、bounded client identity、catalog method 和显式 operation snapshot/deadline；capability/target policy 由 `IpcMethodCatalog` 决定，Observe 与 unknown method 不能入队。record 不含 params/result，live/history 各自有界。pending 可转 approved/denied/invalidated/expired/cancelled；approved 仍是 live/revocable 状态。`consume()` 在 mutex 内重新匹配 session/request/deadline/generation/target 并先把 record 置为 consumed；随后在锁外同步审计，只有 durable success 才构造 grant。失败返回 `approval_audit_failed`，record 保持 consumed，重试只得到 `approval_not_approved`。consume 与 session Cancel 的竞态只有一个 terminal winner。
+`IpcApprovalBroker` 已固定 privileged authorization 的纯状态机。submission 只接受 server session/request id、bounded client identity、catalog method 和显式 operation snapshot/deadline；capability/target policy 由 `IpcMethodCatalog` 决定，Observe 与 unknown method 不能入队。普通 submission 从 pending 开始；policy submission 只能用于 `lua_execute` 并从 approved 开始，任何其他 method 请求该模式都会以 `auto_approval_not_allowed` 拒绝。record 不含 params/result，live/history 各自有界。pending 可转 approved/denied/invalidated/expired/cancelled；approved 仍是 live/revocable 状态。`consume()` 在 mutex 内重新匹配 session/request/deadline/generation/target 并先把 record 置为 consumed；随后在锁外同步审计，只有 durable success 才构造 grant。失败返回 `approval_audit_failed`，record 保持 consumed，重试只得到 `approval_not_approved`。无论人工还是 policy approval，grant 都只能消费一次；consume 与 session Cancel 的竞态只有一个 terminal winner。
 
-system owner 延迟持有 audit、broker、host executor 和 runtime。控制窗口先 expire/invalidate，再显示 pending decision 与 persistent audit health；Stop/session/request cancellation 均产生状态转换。submit/decide/cancel 的 audit failure 保持既有 safe authorization 结论并进入可见计数，只有 consume 把 durability 作为 grant 的必要条件。静态 gate 固定 fail-closed consume、grant-bound dispatcher execution、共享 Lua target 复核和 Observe-only Hello。Hello 的 capability 面未扩大，授权粒度改为逐请求。
+system owner 延迟持有 audit、broker、host executor 和 runtime。控制窗口先 expire/invalidate，再显示 pending decision、共享 Lua 自动批准开关与 persistent audit health；Stop/session/request cancellation 均产生状态转换。submit/decide/cancel 的 audit failure 保持既有 safe authorization 结论并进入可见计数，只有 consume 把 durability 作为 grant 的必要条件。静态 gate 固定 Lua-only policy mode、默认开启的持久设置、fail-closed consume、grant-bound dispatcher execution、共享 Lua target 复核和 Observe-only Hello。Hello 的 capability 面未扩大，授权粒度仍是逐请求。
 
 dispatcher 对每个成功消费的 grant 在返回 response 前同步调用一次 `IIpcExecutionAuditSink`。consume audit 发生在执行前，因此写盘失败可以 fail closed；execution outcome 发生在 adapter 之后，可能已经发送或完成设备 mutation，因此持久化失败只能更新 audit health，不能把 confirmed success、`completion_unknown` 或其他真实 completion 改写成审计错误。未消费 grant 的 deny/expire/cancel 不产生 execution outcome。
 
@@ -451,7 +452,7 @@ FastMCP package、`.mcp.json`、安装元数据、IDE 配置、`ipc/IpcServer.*`
 
 ### 10.3 当前 IPC 安全边界
 
-Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实例 pipe、Observe-only Hello 与逐请求 privileged approval 建立本机身份和 capability 边界。它没有网络/CORS 暴露面，也没有长期 privileged grant。client timeout/Cancel 通过 request id 发 cooperative cancellation；已发送 mutation 仍必须按 completion receipt 判断，不得自动重试不具备幂等性的操作。
+Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实例 pipe、Observe-only Hello 与逐请求 privileged one-shot grant 建立本机身份和 capability 边界。Lua policy 默认免人工弹窗，但每次请求仍独立 submission、target/deadline/session 复核、durable consume 和 outcome audit；它不是长期 privileged grant，也不能自动批准其他方法。client timeout/Cancel 通过 request id 发 cooperative cancellation；已发送 mutation 仍必须按 completion receipt 判断，不得自动重试不具备幂等性的操作。
 
 ## 11. 维护不变量与当前缺口
 
@@ -513,7 +514,7 @@ Native IPC 依靠 Windows 当前用户/SYSTEM DACL、remote rejection、单实�
 
 ## 13. 测试边界
 
-当前无设备 CTest `native_agent_mem_service` 的 31 个测试组覆盖 service/Agent 边界、连接 generation、批量读取完整性、冻结 completion、ToolExecutor schema 矩阵、AgentRunner 审批组合、tool history 配对、JSON 结构限制和 4 MiB tool-result 语义；`native_app_context_state` 覆盖 target mutation、cache invalidation 和 disconnect publication。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、7 组 request-contract、9 组 request-session、4 组 method-catalog、15 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 19 组；本机 HTTPS/full-response 有 6 组；context budget 有 5 组；provider trust 有 3 组；persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组；HTTP lifecycle/receiver limit 有 5 组。连同九个静态 gate，当前共 30 项 CTest。最新 fresh mandatory-feature + Native IPC Release 产品链接证据见重构计划。以下真实环境路径仍缺验收：
+当前无设备 CTest `native_agent_mem_service` 的 33 个测试组覆盖 service/Agent 边界、连接 generation、批量读取完整性、冻结 completion、真实 LuaJIT 脚本的受控目标推进与失败后 run target 同步、ToolExecutor schema 矩阵、AgentRunner 审批组合、tool history 配对、JSON 结构限制和 4 MiB tool-result 语义；`native_app_context_state` 覆盖 target mutation、cache invalidation 和 disconnect publication。Native IPC 另有 6 组 security-audit、12 组 approval-broker、5 组 protocol、5 组 transport、8 组 framed-I/O、8 组 handshake、7 组 request-contract、9 组 request-session、4 组 method-catalog、16 组 dispatcher 与 10 组 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 19 组；本机 HTTPS/full-response 有 6 组；context budget 有 5 组；provider trust 有 3 组；persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组；HTTP lifecycle/receiver limit 有 5 组。连同九个静态 gate，当前共 30 项 CTest。最新隔离 mandatory-feature + Native IPC Release 产品链接证据见重构计划。以下真实环境路径仍缺验收：
 
 - Native IPC GUI approval click 与真实 Android privileged device/host operation
 - 不同 Windows 用户/session 与真实 remote client 的负向身份测试

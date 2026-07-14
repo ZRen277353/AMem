@@ -276,22 +276,29 @@ AgentController::ToolOutcome AgentController::completeToolExecution(
     const ToolTargetPolicy policy =
         ToolExecutor::getInstance().getToolTargetPolicy(call.name);
 
-    if (effectiveResult.success) {
+    if (effectiveResult.success ||
+        policy == ToolTargetPolicy::Selection) {
         const Mem::OperationContext current =
             memService_.captureContext(policy != ToolTargetPolicy::None);
         std::optional<Mem::Error> contextError;
         if (policy == ToolTargetPolicy::Selection) {
-            if (!effectiveResult.selectedTarget) {
+            if (effectiveResult.selectedTarget) {
+                contextError = validateTargetSelectionResult(
+                    run_.context.operation, current,
+                    *effectiveResult.selectedTarget);
+                if (!contextError) {
+                    selectedTarget = effectiveResult.selectedTarget;
+                }
+            } else if (effectiveResult.success) {
                 contextError = Mem::Error{
                     Mem::ErrorCode::InternalError,
                     "target-selection result is missing its target snapshot",
                     false};
             } else {
-                selectedTarget = effectiveResult.selectedTarget;
-                contextError = validateTargetSelectionResult(
-                    run_.context.operation, current, *selectedTarget);
+                contextError = validateAgentRunContext(
+                    run_.context.operation, current, policy);
             }
-        } else {
+        } else if (effectiveResult.success) {
             contextError = validateAgentRunContext(
                 run_.context.operation, current, policy);
         }
@@ -304,7 +311,7 @@ AgentController::ToolOutcome AgentController::completeToolExecution(
 
     AgentRunner::Outcome outcome = runner_.completeToolExecution(
         call, effectiveResult, durationMs, config);
-    if (effectiveResult.success && selectedTarget &&
+    if (selectedTarget &&
         outcome.kind != AgentRunner::OutcomeKind::Stopped) {
         run_.context.operation.target = *selectedTarget;
     }

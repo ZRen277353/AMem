@@ -42,6 +42,7 @@ void ChatSettingsDraft::clear() noexcept {
     maxToolCallsPerTurn = 0;
     proxyPort = 0;
     autoApproveWrites = false;
+    autoApproveLuaExecution = true;
     proxyEnabled = false;
     loaded = false;
 }

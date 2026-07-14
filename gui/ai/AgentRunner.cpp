@@ -42,6 +42,17 @@ void AgentRunner::reset() {
     awaitingConfirmation_ = false;
 }
 
+bool AgentRunner::isAutomaticallyApproved(const std::string& toolName,
+                                           ToolSafety safety,
+                                           const Config& config) {
+    if (safety != ToolSafety::Write) {
+        return false;
+    }
+    return toolName == "lua_execute"
+        ? config.autoApproveLuaExecution
+        : config.autoApproveWrites;
+}
+
 AgentRunner::Outcome AgentRunner::beginToolCalls(const std::vector<ToolCall>& calls,
                                                  const Config& config) {
     Outcome out;
@@ -245,8 +256,10 @@ AgentRunner::Outcome AgentRunner::runUntilBlocked(const Config& config) {
     while (currentToolCallIndex_ < static_cast<int>(pendingToolCalls_.size())) {
         const ToolCall& tc = pendingToolCalls_[currentToolCallIndex_];
         const ToolSafety safety = ToolExecutor::getInstance().getToolSafety(tc.name);
+        const bool automaticallyApproved =
+            isAutomaticallyApproved(tc.name, safety, config);
 
-        if (safety == ToolSafety::Write && !config.autoApproveWrites) {
+        if (safety == ToolSafety::Write && !automaticallyApproved) {
             awaitingConfirmation_ = true;
             appendTrace(out,
                         AgentTraceType::AwaitingApproval,
@@ -257,7 +270,7 @@ AgentRunner::Outcome AgentRunner::runUntilBlocked(const Config& config) {
             return out;
         }
 
-        if (safety == ToolSafety::Write && config.autoApproveWrites) {
+        if (automaticallyApproved) {
             out.logs.push_back("[AI Chat] auto-approving write tool '" + tc.name + "'");
             appendTrace(out, AgentTraceType::AutoApproved, &tc);
         }

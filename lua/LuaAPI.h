@@ -29,8 +29,8 @@ public:
     static Mem::IMemService& GetMemService(lua_State* L);
     static Mem::OperationContext GetOperationContext(
         lua_State* L, bool includeTarget);
-    static const Mem::OperationContext* BindOperationContext(
-        lua_State* L, const Mem::OperationContext* context);
+    static Mem::OperationContext* BindOperationContext(
+        lua_State* L, Mem::OperationContext* context);
 
     // ==================== 内存操作API ====================
     // 已移至 LuaAPI_Memory.h

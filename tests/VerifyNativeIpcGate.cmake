@@ -15,6 +15,7 @@ file(READ "${SOURCE_ROOT}/ipc/IpcMemServiceDispatcher.cpp" dispatcher_source)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalAudit.h" approval_audit_header)
 file(READ "${SOURCE_ROOT}/ipc/IpcExecutionAudit.h" execution_audit_header)
 file(READ "${SOURCE_ROOT}/ipc/IpcApprovalBroker.cpp" approval_broker_source)
+file(READ "${SOURCE_ROOT}/gui/ai/AiSettings.h" ai_settings_header)
 file(READ "${SOURCE_ROOT}/gui/ai/ToolDefinitions.cpp" tool_source)
 file(READ "${SOURCE_ROOT}/mem/LuaJsonTool.cpp" lua_tool_source)
 
@@ -48,8 +49,10 @@ forbid_text("${main_source}" "native IPC automatic startup"
     "GetSystemNativeAgentRuntime().start")
 require_text("${control_source}" "user-initiated native IPC startup"
     "if (runtime.start(error))")
-require_text("${control_source}" "visible per-request privileged approval"
-    "textRow(\"特权能力\", \"逐请求审批\")")
+require_text("${control_source}" "visible privileged approval policy"
+    "textRow(\"特权能力\", \"逐请求审批；Lua 可自动授权\")")
+require_text("${control_source}" "visible Lua policy control"
+    "setAutoApproveLuaExecution(autoApproveLua)")
 require_text("${control_source}" "bounded GUI approval decision"
     "NativeIpc::DecideSystemIpcApproval(")
 require_text("${control_source}" "approval-aware runtime stop"
@@ -61,7 +64,9 @@ forbid_text("${control_source}" "raw approval result in GUI"
 require_text("${owner_source}" "stop-time approval invalidation"
     "approvalBroker->cancelAll();")
 require_text("${owner_source}" "runtime receives the system broker"
-    "RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get(),\n          approvalAudit_.get())")
+    "RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get(),\n          approvalAudit_.get(), [] {")
+require_text("${owner_source}" "runtime receives live Lua policy"
+    ".autoApproveLuaExecution")
 require_text("${owner_source}" "runtime receives shared Lua host execution"
     "Mem::executeLuaJson(service_, paramsJson, context)")
 require_text("${owner_source}" "persistent approval audit injection"
@@ -86,6 +91,10 @@ require_text("${approval_broker_source}" "fail-closed consumed grant"
     "changed.state == IpcApprovalState::Consumed && durable")
 require_text("${approval_broker_source}" "stable consumed audit failure"
     "approval_audit_failed")
+require_text("${approval_broker_source}" "Lua-only policy auto-approval"
+    "submission.method != \"lua_execute\"")
+require_text("${ai_settings_header}" "default-enabled Lua permission"
+    "bool autoApproveLuaExecution = true;")
 require_text("${runtime_source}" "session-scoped approval cancellation"
     "approvalBroker_->cancelSession(sessionId);")
 forbid_text("${runtime_source}" "runtime privileged submission"
@@ -93,7 +102,9 @@ forbid_text("${runtime_source}" "runtime privileged submission"
 require_text("${request_session_source}" "server-owned approval submission gate"
     "dispatcher_.canSubmitForApproval(")
 require_text("${dispatcher_source}" "privileged request submission"
-    "approvalBroker_->submit(submission)")
+    "approvalBroker_->submit(submission, submissionMode)")
+require_text("${dispatcher_source}" "Lua policy approval submission"
+    "IpcApprovalSubmissionMode::AutoApproved")
 require_text("${dispatcher_source}" "privileged approval consumption"
     "approvalBroker_->consume(")
 require_text("${dispatcher_source}" "grant-bound privileged execution"
@@ -105,7 +116,9 @@ forbid_text("${dispatcher_source}" "obsolete disabled execution response"
 require_text("${tool_source}" "in-app shared Lua host tool"
     "Mem::executeLuaJson(")
 require_text("${lua_tool_source}" "shared Lua target revalidation"
-    "return contextErrorJson(context, service.captureContext(true));")
+    "validateLuaOperationContext(service, context, true)")
+require_text("${dispatcher_source}" "Lua selection baseline advancement"
+    "result = finishSelection(result, operation)")
 require_text("${handshake_source}" "Observe-only grant remains fixed"
     "if (capability == IpcCapability::Observe) {\n            result.grantedCapabilities.push_back(capability);")
 
@@ -119,4 +132,4 @@ if(shutdown_position EQUAL -1 OR disconnect_position EQUAL -1 OR
 endif()
 
 message(STATUS
-    "Verified native IPC is opt-in with Observe and per-request privileged approval")
+    "Verified native IPC is opt-in with Observe and one-shot privileged policy control")

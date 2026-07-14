@@ -390,12 +390,16 @@ void testSettingsDraftClearsSensitiveBuffers() {
     std::memcpy(draft.proxyHost, "proxy.invalid", 14);
     std::memcpy(draft.provider("openai").apiKey, "another-key", 12);
     draft.tokenLimit = 64000;
+    draft.autoApproveWrites = true;
+    draft.autoApproveLuaExecution = false;
     draft.loaded = true;
     draft.clear();
     expect(draft.providers.empty() &&
                allZero(draft.systemPrompt) &&
                allZero(draft.proxyHost) &&
                draft.tokenLimit == 0 &&
+               !draft.autoApproveWrites &&
+               draft.autoApproveLuaExecution &&
                !draft.loaded,
            "discarding the settings draft must wipe the complete edit snapshot");
 }
@@ -412,7 +416,27 @@ void testSettingsLoadIsTransactional() {
     expected.executionTimeout = 77;
     expected.tokenLimit = 42000;
     expected.systemPrompt = "transactional prompt";
+    expected.autoApproveLuaExecution = false;
     settings.set(expected);
+
+    const auto roundTrip = settings.loadFromFile(good.string());
+    const auto roundTrippedSettings = settings.get();
+    const json persistedSettings = json::parse(readText(good));
+    expect(roundTrip.status == PersistenceLoadStatus::Loaded &&
+               !roundTrippedSettings.autoApproveLuaExecution &&
+               persistedSettings.at("autoApproveLuaExecution") == false,
+           "disabled Lua auto-approval must round-trip through settings persistence");
+
+    const auto legacy = temp.path() / "legacy.json";
+    writeText(legacy, R"({"version":1,"autoApproveWrites":false})");
+    const auto legacyResult = settings.loadFromFile(legacy.string());
+    expect(legacyResult.status == PersistenceLoadStatus::Loaded &&
+               settings.get().autoApproveLuaExecution,
+           "settings without the Lua permission field must retain the default allow policy");
+    expect(settings.loadFromFile(good.string()).status ==
+                   PersistenceLoadStatus::Loaded &&
+               !settings.get().autoApproveLuaExecution,
+           "explicitly disabled Lua permission must remain loadable after legacy defaults");
 
     const auto corrupt = temp.path() / "corrupt.json";
     writeText(corrupt, R"({"tokenLimit":"wrong"})");
@@ -422,7 +446,8 @@ void testSettingsLoadIsTransactional() {
     expect(result.status == PersistenceLoadStatus::Invalid &&
                retained.activeProvider == expected.activeProvider &&
                retained.executionTimeout == expected.executionTimeout &&
-               retained.systemPrompt == expected.systemPrompt,
+               retained.systemPrompt == expected.systemPrompt &&
+               !retained.autoApproveLuaExecution,
            "invalid settings must preserve the prior snapshot");
 
     settings.setTokenLimit(43000);

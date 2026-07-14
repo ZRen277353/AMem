@@ -15,9 +15,11 @@ NativeAgentRuntime::NativeAgentRuntime(Mem::IMemService &service,
                                        RequestSessionConfig requestConfig,
                                        IpcApprovalBroker *approvalBroker,
                                        IIpcHostMethodExecutor *hostExecutor,
-                                       IIpcExecutionAuditSink *executionAuditSink)
+                                       IIpcExecutionAuditSink *executionAuditSink,
+                                       std::function<bool()> autoApproveLuaExecution)
     : service_(service), approvalBroker_(approvalBroker),
       hostExecutor_(hostExecutor), executionAuditSink_(executionAuditSink),
+      autoApproveLuaExecution_(std::move(autoApproveLuaExecution)),
       handshakeConfig_(handshakeConfig), requestConfig_(requestConfig),
       server_(std::move(pipeName), [this](HANDLE pipe, HANDLE stopEvent) {
         handleClient(pipe, stopEvent);
@@ -117,7 +119,7 @@ void NativeAgentRuntime::handleClient(HANDLE pipe, HANDLE stopEvent) {
     IpcMemServiceDispatcher dispatcher(
         service_, approvalBroker_,
         {sessionId, handshakeResult.clientName, handshakeResult.clientVersion},
-        hostExecutor_, executionAuditSink_);
+        hostExecutor_, executionAuditSink_, autoApproveLuaExecution_);
     IpcRequestSession session(connection, dispatcher,
                               handshakeResult.grantedCapabilities,
                               requestConfig_);

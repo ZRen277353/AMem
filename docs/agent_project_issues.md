@@ -1,6 +1,6 @@
 # Agent 业务代码审计与问题清单
 
-审计日期：2026-07-13
+审计日期：2026-07-14
 适用分支：`NativeAgent`（基线来自 `AIChat`）
 审计范围：`gui/`、`lua/`、`mem/`、`gui/ai/`、native `ipc/`、`socket/` 中被产品调用的命令层、`gui/AppContext.*`、`main.cpp` 和对应 CTest/static gate。
 
@@ -17,7 +17,7 @@
 
 | ID | 优先级 | 状态 | 问题 |
 |----|--------|------|------|
-| A-01 | P0 | 已修复 | legacy HTTP/CORS 控制面已删除；Native IPC 使用 DACL、Observe-only Hello 与逐请求审批 |
+| A-01 | P0 | 已修复 | legacy HTTP/CORS 控制面已删除；Native IPC 使用 DACL、Observe-only Hello 与逐请求 one-shot grant；Lua 可由独立策略自动批准 |
 | A-02 | P0 | 已修复 | 当前内置工具均在 service/host send 边界消费 run target；退役 executor 已删除 |
 | A-03 | P0 | 已修复 | 工具执行由单个 joinable worker 所有，shutdown 有 join 测试 |
 | A-04 | P0 | 已修复 | 配置/会话事务式加载；损坏索引可保留并扫描重建，失败绑定不会写回 |
@@ -51,7 +51,9 @@
 - `ToolRegistration` 已声明 `None`、`Bound` 或 `Selection`；`AgentController` 在等待审批前、批准出队前和成功结果接收前复核快照。
 - 审批框显示预期 connection generation、PID 和 process revision。
 - 23 个非 Lua canonical 工具的 adapter 均消费显式 `OperationContext` 并在 `MemService` 边界复核；`process_open` 在 send 前再次比较旧 selection，并只在返回快照与当前状态一致时推进 run target。
-- `lua_execute` 在 host 执行前复核 target/generation，并把审批 `OperationContext` 绑定到完整 Lua 调用；脚本内部 API 沿用原 target/generation/deadline/cancellation。`ToolDefinitions.cpp` 已删除全部 33 个 hidden alias 和 direct-socket executor，并由 `native_agent_catalog` CTest 阻止重新依赖 `client_singleton.h`/`AppContext.h`。
+- `lua_execute` 在 host 执行前复核 target/generation，并把审批 context 的脚本作用域副本绑定到完整 Lua 调用；脚本内部 API 沿用原 generation/deadline/cancellation，target 只能由成功的 `process.attach` 以 service-confirmed snapshot 推进。`ToolDefinitions.cpp` 已删除全部 33 个 hidden alias 和 direct-socket executor，并由 `native_agent_catalog` CTest 阻止重新依赖 `client_singleton.h`/`AppContext.h`。
+- 一次 `lua_execute` 的预期授权范围就是整段脚本。脚本内部多次、跨 API、跨目标操作不需要分别弹窗，因此“单次 Lua 授权可执行脚本内持续/跨目标意图”这一 P0 报告按产品权限模型属于误报；安全边界是 connection generation、deadline 与 cancellation 始终固定，只有脚本自身 `process.attach` 的确认结果能推进 target，外部目标变化仍会拒绝。最终 snapshot 会同步推进 Agent/Native IPC baseline。
+- `autoApproveLuaExecution` 是独立持久设置，默认 true，并同时控制内置 Agent 与 Native IPC；关闭后两条入口都恢复 `lua_execute` 的逐请求人工审批。通用 `autoApproveWrites` 不覆盖它。
 - GUI `BreakpointWindow` 的 set/remove/enable/suspend/resume 与 hit refresh 已显式注入 `IMemService`，每次调用捕获 target context；命中 batch 保留完整 GPR/FPSIMD，按最新 50,000 条有界。
 - GUI `ScanWindow` 的 start/refine/results/clear/remove 已显式注入 `IMemService`，每次调用捕获 target context 并携带最新 scan epoch；Stop 通过共享 cancellation token 进入同一 service/backend 调用。
 - `Gui.cpp` 向连接、进程、模块、版本、扫描、Memory Viewer、断点和 Lua 窗口显式注入同一 `IMemService`；GUI/Lua/main 静态门禁拒绝 direct protocol 和非 `AppContext` 目标写入。
@@ -138,7 +140,7 @@ A-04 只关闭“损坏加载覆盖原件/异常逃逸”问题。持久化文�
 - `HttpClient` 在 append 前拒绝超限 chunk，`SSEParser::fail()` 清理 line/event buffer；三个 provider 把网络、流式和非流式超限统一归类为 `InvalidResponse`。非流式解析在复制超长字段或物化第 65 个 tool call 前返回。
 - `ToolExecutor` 丢弃并释放超限结果。mutation 已可能发出，因此返回 `completion_unknown`；`AgentRunner` 把 tool audit 收缩到 8 MiB。assistant/tool outcome 无法进入会话时，`ChatWindow` fail closed，不执行未记录工具，也不发送缺失结果的 follow-up。
 - 所有持久化 JSON 在 parse 前受 32 MiB 文件限制；`ChatSession` 写盘也检查最终转义后的 32 MiB。磁盘消息最多 10,000 条，只 reserve/物化最后 1,000 条；单消息/tool 字段逐项校验，retained payload 上限 16 MiB。
-- runtime `addMessage()` 预检受保护的最新用户回合，按完整对话组裁剪；拒绝时不先删除旧历史。所有不可信 JSON 在 DOM 前还限制深度、节点、单容器元素、单字符串与累计字符串，并对分配失败 fail closed。`native_persistence_recovery` 的 13 组、`native_provider_stream_terminal` 的 19 组、`native_provider_http_integration` 的 6 组、`native_http_client_lifecycle` 的 5 组和 `native_agent_mem_service` 的 31 组均通过；完整 CTest 当前为 30/30。
+- runtime `addMessage()` 预检受保护的最新用户回合，按完整对话组裁剪；拒绝时不先删除旧历史。所有不可信 JSON 在 DOM 前还限制深度、节点、单容器元素、单字符串与累计字符串，并对分配失败 fail closed。`native_persistence_recovery` 的 13 组、`native_provider_stream_terminal` 的 19 组、`native_provider_http_integration` 的 6 组、`native_http_client_lifecycle` 的 5 组和 `native_agent_mem_service` 的 33 组均通过；完整 CTest 当前为 30/30。
 
 **剩余边界**
 
@@ -207,7 +209,7 @@ DPAPI 绑定 Windows 用户，不防御已能以同一用户运行并调用 DPAP
 
 ### A-16：`approvalDecision` 在运行快照中几乎不可观测（已修复）
 
-`AgentApprovalDecision`、`AgentRun::approvalDecision` 和 snapshot 同名字段已删除，Controller 不再写入后立即重置一个误导性状态。`pendingApproval` 只表达当前是否等待决策；批准、拒绝和自动批准事实由 `AgentTraceType::Approved`/`Denied`/`AutoApproved`、生成的 tool message 以及 mutation audit 表达，生命周期明确且 UI 已消费。源码 gate 搜索确认运行代码不再含该字段，31 组 Agent/MemService 测试中的审批矩阵覆盖 read-only、manual approve/deny、auto-approve、auto-approved failure、后续 skipped、tool pairing 与 trace/batch 顺序。
+`AgentApprovalDecision`、`AgentRun::approvalDecision` 和 snapshot 同名字段已删除，Controller 不再写入后立即重置一个误导性状态。`pendingApproval` 只表达当前是否等待决策；批准、拒绝和自动批准事实由 `AgentTraceType::Approved`/`Denied`/`AutoApproved`、生成的 tool message 以及 mutation audit 表达，生命周期明确且 UI 已消费。源码 gate 搜索确认运行代码不再含该字段，33 组 Agent/MemService 测试中的审批矩阵覆盖 read-only、manual approve/deny、auto-approve、auto-approved failure、后续 skipped、tool pairing 与 trace/batch 顺序。
 
 快照不是永久审计存储；trace 仍按 128 条有界。需要跨运行长期追踪 write decision 时读取独立 mutation audit，而不是重新给 run snapshot 添加无期限“最近一次”字段。
 
@@ -247,7 +249,7 @@ DPAPI 绑定 Windows 用户，不防御已能以同一用户运行并调用 DPAP
 
 ### A-22：核心路径缺少自动回归测试
 
-仓库已有 `native_agent_mem_service` 的 31 个测试组和独立 `native_app_context_state`。覆盖连接 generation、批量读取完整性/失败、冻结 completion receipt、奇偶 revision、stale mutation、cache invalidation、disconnect publication、ToolExecutor schema 矩阵、AgentRunner 审批矩阵、tool history pairing 和 JSON 结构限制。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、7 request-contract、9 request-session、4 catalog、15 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 19 组；本机 HTTPS/full-response 有 6 组；context budget 有 5 组；provider trust 有 3 组；persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组；HTTP lifecycle/response limit 有 5 组。九个静态 gate 包含完整 GUI/Lua/main service boundary、context dispatch、endpoint trust 和 session protection integration，当前共 30 项 CTest；fresh mandatory-feature + Native IPC Release 的产品链接证据记录在重构计划。
+仓库已有 `native_agent_mem_service` 的 33 个测试组和独立 `native_app_context_state`。覆盖连接 generation、批量读取完整性/失败、冻结 completion receipt、真实 LuaJIT 脚本的受控目标推进与失败后 run target 同步、奇偶 revision、stale mutation、cache invalidation、disconnect publication、ToolExecutor schema 矩阵、AgentRunner 审批矩阵、tool history pairing 和 JSON 结构限制。Native IPC 有 6 组 security-audit、12 组 approval-broker、5 protocol、5 transport、8 framed-I/O、8 handshake、7 request-contract、9 request-session、4 catalog、16 dispatcher 和 10 runtime 测试。socket client 有 4 组，multi-port manager 有 6 组；provider/SSE 有 19 组；本机 HTTPS/full-response 有 6 组；context budget 有 5 组；provider trust 有 3 组；persistence recovery/limits/session protection/global-settings/设置草稿/原子安装/JSON 结构有 13 组；HTTP lifecycle/response limit 有 5 组。九个静态 gate 包含完整 GUI/Lua/main service boundary、context dispatch、endpoint trust 和 session protection integration，当前共 30 项 CTest；隔离 mandatory-feature + Native IPC Release 的产品链接证据记录在重构计划。
 
 **2026-07-13 真实验收证据**
 
@@ -304,7 +306,7 @@ DPAPI 绑定 Windows 用户，不防御已能以同一用户运行并调用 DPAP
 | Native IPC wire contract 未固定 | `IpcProtocol` 使用显式 24-byte little-endian header、精确版本与 request-id 规则、UTF-8 和 payload 硬上限；跨 polling timeout 的 partial frame 会有界保留并继续读取，partial close 仍是 protocol error；终止 Error 后做 100 ms 可取消 drain |
 | Native IPC 身份与 handler 生命周期没有基础边界 | protected DACL 只允许当前进程用户和 SYSTEM read/write；拒绝 remote client，单实例 handle 持续占有名称；accept/handler 同属一个 joinable thread，stop event + `CancelIoEx` 后 join；产品仍不启动 |
 | Native IPC 协议阶段缺少统一 runtime owner | `NativeAgentRuntime` 持有 server，串起 framed connection/Hello/Observe dispatcher/request session；Stop 取消并 join handler/worker，线程安全 snapshot 不保存请求参数或结果；server session id 跨 restart 单调且退出时精确取消绑定审批；产品默认 stopped，仅允许用户显式启用 Observe |
-| Native IPC privileged approval 没有可验证状态机 | broker management、session/request cancel、worker submission、bounded persistent security audit、fail-closed consume、dispatcher/send-boundary 与最终 outcome 已接产品链；consume 写盘失败烧毁授权且不返回 grant，post-effect outcome 写盘失败保持真实回执并进入可见 health |
+| Native IPC privileged approval 没有可验证状态机 | broker management、session/request cancel、worker submission、bounded persistent security audit、fail-closed consume、dispatcher/send-boundary 与最终 outcome 已接产品链；Lua policy 只能立即批准 `lua_execute`，仍逐请求消费并审计；consume 写盘失败烧毁授权且不返回 grant，post-effect outcome 写盘失败保持真实回执并进入可见 health |
 | Agent breakpoint 直连 socket 且回执/本地 tracker 分离 | 五个规范工具经 `MemService` 绑定 target；mutation 区分未发送/拒绝/完成未知/确认完成，设备确认与 cleanup tracker 在同一 transaction 更新，hits 使用有界最新批次且不伪造 cursor |
 | Agent symbol 依赖 active table 前置状态 | `symbol_resolve`/`symbol_list` 在一个事务内完成 module resolve + init + find/page；续页绑定 epoch，旧前端 init 会使其失效 |
 | Agent scan 依赖 set-range 前置状态且跨前端不可检测 | `scan_start` 一次提交完整请求；refine/results/clear 绑定 epoch，所有旧 scan mutation 也推进 epoch；sent-without-terminal 返回 `completion_unknown` |
@@ -325,7 +327,7 @@ DPAPI 绑定 Windows 用户，不防御已能以同一用户运行并调用 DPAP
 - `SocketIoTimeout` 现在消费 task absolute deadline，但不提供事务回滚或撤回已经发送的写命令。
 - `AgentTaskExecutor` 与 `HttpClient` shutdown 都会 join；HTTP transport stop 不保证静默 read 立即结束，因此退出可能等待配置的 I/O timeout。
 - DPAPI 保护 provider API key 与可用 session/index 的静态文件，但不保护同用户恶意进程、运行时内存、明文审计或远端 provider 数据。
-- Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求审批与 durable one-shot grant 授权；尚未完成跨用户/session 与真实 remote client 负向验证。
+- Native DACL/remote rejection 提供身份边界，Hello 只授予 Observe，privileged operation 通过逐请求 durable one-shot grant 授权；Lua 默认 policy approval 仅省略人工点击，不省略 target/session/deadline 校验、durable consume 或 outcome audit。尚未完成跨用户/session 与真实 remote client 负向验证。
 - execution outcome audit 是同步 best-effort 的事后记录：它覆盖正常返回路径，但进程在设备 effect 与日志 flush 之间崩溃时仍可能缺失 outcome；不能把它描述为设备事务日志。
 - 四类持久化 loader 已事务化且 `ChatSession` 已统一使用 `installTempFile()`；A-09 的文件/消息/session 上限与 A-12 的全局设置所有权已落地，但 JSON DOM allocator 开销仍不等于源字节。
 - `DeviceSession` 已删除待处理字节清理恢复路径；client 与 multi-port manager 测试证明 partial I/O、timeout/EOF、迟到字节隔离和 lifecycle 互斥，但 Android 端 driver/process/scan/breakpoint 状态恢复仍没有自动承诺。
@@ -333,7 +335,7 @@ DPAPI 绑定 Windows 用户，不防御已能以同一用户运行并调用 DPAP
 
 ## 建议修复顺序
 
-1. 保持 Native IPC compile/runtime default-off；补 GUI click 和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability。
+1. 保持 Native IPC compile/runtime default-off；补 GUI click、Lua policy 开/关和真实设备验证。不得把逐请求 grant 扩大成 Hello 级长期 privileged capability，也不得把 Lua policy 扩展给其他 method。
 2. 为已落地的 poison/lifecycle gate 增加真实 Android 设备压力与恢复记录。
 3. 为 Stop、写工具晚到结果和复合设备操作继续保持明确状态/事务边界。
 4. 继续为大型列表增加 service 分页；provider-aware context 预算已由 A-21 固定。

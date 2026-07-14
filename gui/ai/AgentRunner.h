@@ -20,6 +20,7 @@ public:
         int maxAgentSteps = 12;
         int maxToolCallsPerTurn = 16;
         bool autoApproveWrites = false;
+        bool autoApproveLuaExecution = true;
     };
 
     enum class OutcomeKind {
@@ -54,6 +55,9 @@ public:
 
     int stepCount() const { return stepCount_; }
     bool hasPendingConfirmation() const { return awaitingConfirmation_; }
+    static bool isAutomaticallyApproved(const std::string& toolName,
+                                         ToolSafety safety,
+                                         const Config& config);
 
 private:
     Outcome runUntilBlocked(const Config& config);

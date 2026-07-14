@@ -848,11 +848,11 @@ void ToolExecutor::initBuiltinTools() {
 #ifdef HAVE_LUAJIT
     registerTool(
         "lua_execute",
-        "Execute Lua code inside AMem. Requires user confirmation; execution cannot be retracted after it starts.",
+        "Execute Lua code inside AMem under the configured Lua permission. The script may attach to another process and cannot be retracted after it starts.",
         kSchemaLuaExecute,
         ToolSafety::Write,
         &execLuaExecute,
-        ToolTargetPolicy::Bound);
+        ToolTargetPolicy::Selection);
 
 #endif
 }

@@ -29,6 +29,11 @@ enum class IpcApprovalDecision {
   Deny,
 };
 
+enum class IpcApprovalSubmissionMode {
+  Pending,
+  AutoApproved,
+};
+
 struct IpcApprovalSubmission {
   uint64_t sessionId = 0;
   uint64_t requestId = 0;
@@ -54,6 +59,7 @@ struct IpcApprovalRecord {
   uint64_t connectionGeneration = 0;
   std::optional<Mem::TargetSnapshot> target;
   IpcApprovalState state = IpcApprovalState::Pending;
+  bool autoApproved = false;
   std::chrono::steady_clock::time_point createdAt{};
   std::chrono::steady_clock::time_point deadline =
       (std::chrono::steady_clock::time_point::max)();
@@ -68,6 +74,7 @@ struct IpcApprovalGrant {
   IpcMethodTargetPolicy targetPolicy = IpcMethodTargetPolicy::None;
   uint64_t connectionGeneration = 0;
   std::optional<Mem::TargetSnapshot> target;
+  bool autoApproved = false;
 };
 
 struct IpcApprovalResult {
@@ -97,7 +104,9 @@ public:
   explicit IpcApprovalBroker(IpcApprovalBrokerConfig config = {},
                              IIpcApprovalAuditSink *auditSink = nullptr);
 
-  IpcApprovalResult submit(const IpcApprovalSubmission &submission);
+  IpcApprovalResult submit(
+      const IpcApprovalSubmission &submission,
+      IpcApprovalSubmissionMode mode = IpcApprovalSubmissionMode::Pending);
   IpcApprovalResult decide(uint64_t approvalId, IpcApprovalDecision decision,
                            const Mem::OperationContext &current);
   // The record is burned before the unlocked audit call. A grant is returned

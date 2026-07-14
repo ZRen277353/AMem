@@ -74,7 +74,9 @@ PersistenceLoadResult AiSettings::loadFromFile(const std::string& filepath) {
             !readInt("maxToolCallsPerTurn", loaded.maxToolCallsPerTurn) ||
             !readInt("tokenLimit", loaded.tokenLimit) ||
             !readString("systemPrompt", loaded.systemPrompt) ||
-            !readBool("autoApproveWrites", loaded.autoApproveWrites)) {
+            !readBool("autoApproveWrites", loaded.autoApproveWrites) ||
+            !readBool("autoApproveLuaExecution",
+                      loaded.autoApproveLuaExecution)) {
             return {PersistenceLoadStatus::Invalid,
                     "settings fields have invalid types"};
         }
@@ -136,6 +138,7 @@ bool AiSettings::saveToFile(const std::string& filepath) {
     root["tokenLimit"]         = data_.tokenLimit;
     root["systemPrompt"]       = data_.systemPrompt;
     root["autoApproveWrites"]  = data_.autoApproveWrites;
+    root["autoApproveLuaExecution"] = data_.autoApproveLuaExecution;
 
     nlohmann::json proxy = nlohmann::json::object();
     proxy["enabled"] = data_.proxy.enabled;
@@ -218,6 +221,14 @@ void AiSettings::setProxy(const ProxyConfig& proxy) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.proxy = proxy;
         data_.proxy.port = clamp(data_.proxy.port, 0, 65535);
+    }
+    persistLastPath();
+}
+
+void AiSettings::setAutoApproveLuaExecution(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        data_.autoApproveLuaExecution = enabled;
     }
     persistLastPath();
 }

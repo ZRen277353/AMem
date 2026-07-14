@@ -1,5 +1,6 @@
 #include "LuaJsonTool.h"
 
+#include "LuaOperationContext.h"
 #include "../lua/LuaEngine.h"
 #include "../socket/socket_io_timeout.h"
 
@@ -37,30 +38,6 @@ std::string errorJson(const std::string &code, const std::string &message,
   return value.dump();
 }
 
-std::string contextErrorJson(const Mem::OperationContext &expected,
-                             const Mem::OperationContext &current) {
-  if (current.connectionGeneration != expected.connectionGeneration) {
-    return errorJson("connection_changed",
-                     "connection changed before Lua execution", true,
-                     "rejected_before_start");
-  }
-  if (!expected.target || !expected.target->isAttached()) {
-    return errorJson("no_target",
-                     "Lua execution requires an attached target process", false,
-                     "rejected_before_start");
-  }
-  if (expected.target->connectionGeneration != expected.connectionGeneration) {
-    return errorJson("connection_changed",
-                     "Lua target belongs to another connection generation",
-                     true, "rejected_before_start");
-  }
-  if (!current.target || *current.target != *expected.target) {
-    return errorJson("target_changed", "target changed before Lua execution",
-                     false, "rejected_before_start");
-  }
-  return {};
-}
-
 std::string preflightJson(IMemService &service,
                           const OperationContext &context) {
   if (context.cancellation &&
@@ -74,7 +51,23 @@ std::string preflightJson(IMemService &service,
                      "Lua execution deadline expired before it started", false,
                      "timed_out_before_start");
   }
-  return contextErrorJson(context, service.captureContext(true));
+  if (const auto error =
+          validateLuaOperationContext(service, context, true)) {
+    return errorJson(errorCodeName(error->code), error->message,
+                     error->retryable, "rejected_before_start");
+  }
+  return {};
+}
+
+void addFinalTarget(json &result, const OperationContext &context) {
+  if (!context.target || !context.target->isAttached()) {
+    return;
+  }
+  result["pid"] = context.target->pid;
+  result["handle"] = context.target->processHandle;
+  result["process_revision"] = context.target->processRevision;
+  result["connection_generation"] =
+      context.target->connectionGeneration;
 }
 
 std::string luaCode(const json &args) {
@@ -114,6 +107,7 @@ int luaTimeoutSeconds(const json &args) {
 std::string executeLuaJson(IMemService &service, const std::string &argsJson,
                            const OperationContext &context) {
   try {
+    OperationContext scriptContext = context;
     const json args = json::parse(argsJson.empty() ? "{}" : argsJson);
     if (!args.is_object()) {
       throw std::runtime_error("arguments must be an object");
@@ -153,21 +147,34 @@ std::string executeLuaJson(IMemService &service, const std::string &argsJson,
     if (!engine.ExecuteStringCapture(
             code, "agent_tool", output,
             static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()),
-            &context)) {
+            &scriptContext)) {
       const bool timedOut = engine.GetLastError() == "Lua execution timed out";
-      return errorJson(timedOut ? "timeout" : "internal_error",
-                       engine.GetLastError(), false,
-                       timedOut ? "timed_out" : "completed", &output);
+      json failure = json::parse(errorJson(
+          timedOut ? "timeout" : "internal_error", engine.GetLastError(),
+          false, timedOut ? "timed_out" : "completed", &output));
+      addFinalTarget(failure, scriptContext);
+      return failure.dump();
     }
 
     const bool completedAfterCancel =
-        context.cancellation &&
-        context.cancellation->load(std::memory_order_acquire);
+        scriptContext.cancellation &&
+        scriptContext.cancellation->load(std::memory_order_acquire);
     const bool completedAfterDeadline =
-        std::chrono::steady_clock::now() >= context.deadline;
+        std::chrono::steady_clock::now() >= scriptContext.deadline;
+    if (!completedAfterCancel && !completedAfterDeadline) {
+      if (const auto error =
+              validateLuaOperationContext(service, scriptContext, true)) {
+        json failure = json::parse(errorJson(
+            errorCodeName(error->code), error->message, error->retryable,
+            "completion_unknown", &output));
+        addFinalTarget(failure, scriptContext);
+        return failure.dump();
+      }
+    }
     json result;
     result["success"] = true;
     result["output"] = output;
+    addFinalTarget(result, scriptContext);
     result["completed_after_cancel_request"] = completedAfterCancel;
     result["completed_after_deadline"] = completedAfterDeadline;
     result["completion"] = completedAfterCancel

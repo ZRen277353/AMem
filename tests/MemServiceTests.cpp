@@ -7,7 +7,12 @@
 #include "../gui/ai/ProviderRegistry.h"
 #include "../gui/ai/ToolExecutor.h"
 #include "../gui/ai/ToolCallSecurity.h"
+#include "../lua/LuaAPI_Assembly.h"
+#include "../lua/LuaAPI_ImGui.h"
+#include "../lua/LuaEngine.h"
 #include "../mem/Address.h"
+#include "../mem/LuaJsonTool.h"
+#include "../mem/LuaOperationContext.h"
 #include "../mem/MemService.h"
 #include "../mem/ValueCodec.h"
 #include "../socket/DeviceSession.h"
@@ -50,6 +55,11 @@ std::list<std::pair<std::string, int>> logs;
 std::mutex logsMutex;
 
 } // namespace Gui
+
+// The no-device test exercises the production Lua process and memory APIs.
+// ImGui and assembly bindings are unrelated to that contract and stay inert.
+void LuaAPI_ImGui::Register(lua_State*) {}
+void LuaAPI_Assembly::Register(lua_State*) {}
 
 namespace {
 
@@ -1249,6 +1259,137 @@ void testProcessPaginationAndOpen() {
     expect(!changed.ok() &&
                changed.error().code == Mem::ErrorCode::ConnectionChanged,
            "connection replacement during process open must be rejected");
+}
+
+void testLuaOperationContextTargetSelection() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    Mem::OperationContext scriptContext = service.captureContext(true);
+    const auto originalCancellation =
+        std::make_shared<std::atomic<bool>>(false);
+    scriptContext.cancellation = originalCancellation;
+    scriptContext.deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    Mem::OpenProcessRequest openRequest;
+    openRequest.pid = 84;
+    const auto opened = service.openProcess(scriptContext, openRequest);
+    expect(opened.ok(),
+           "Lua target-selection fixture should open the new process");
+    const auto advanceError = Mem::advanceLuaOperationTarget(
+        service, scriptContext, opened.value().target);
+    expect(!advanceError && scriptContext.target &&
+               scriptContext.target->pid == 84 &&
+               scriptContext.cancellation == originalCancellation,
+           "Lua context should adopt only the confirmed target while retaining cancellation");
+
+    Mem::MemoryReadRequest readRequest{0x1000, 4};
+    expect(service.readMemory(scriptContext, readRequest).ok(),
+           "Lua operations after process.attach should use the advanced target");
+
+    Mem::TargetSnapshot forged = opened.value().target;
+    forged.pid = 126;
+    expect(Mem::advanceLuaOperationTarget(
+               service, scriptContext, forged)
+                   ->code == Mem::ErrorCode::TargetChanged &&
+               scriptContext.target->pid == 84,
+           "Lua context must reject an unconfirmed selected target");
+
+    backend.target.processRevision += 2;
+    const auto externalChange = Mem::validateLuaOperationContext(
+        service, scriptContext, true);
+    expect(externalChange &&
+               externalChange->code == Mem::ErrorCode::TargetChanged,
+           "external target changes must not be accepted as Lua-owned selection");
+}
+
+void testLuaScriptTargetSelection() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    struct ShutdownGuard {
+        ~ShutdownGuard() {
+            LuaEngine::GetInstance().Shutdown();
+        }
+    } shutdownGuard;
+
+    Mem::OperationContext context = service.captureContext(true);
+    context.cancellation = std::make_shared<std::atomic<bool>>(false);
+    context.deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    const std::string code = R"(
+local attached, attach_error = process.attach(84)
+assert(attached, attach_error)
+assert(process.getCurrent() == 84)
+local bytes, read_error = mem.read("0x1000", 4)
+assert(bytes, read_error)
+assert(#bytes == 4)
+print(process.getCurrent(), bytes[1], bytes[4])
+)";
+    const json result = json::parse(Mem::executeLuaJson(
+        service, json{{"code", code}, {"timeout_seconds", 2}}.dump(),
+        context));
+    expect(result.at("success").get<bool>() &&
+               result.at("completion") == "completed" &&
+               result.at("pid") == 84 &&
+               result.at("handle") == 1084 &&
+               result.at("connection_generation") == backend.generation &&
+               result.at("output") == "84\t222\t239\n" &&
+               backend.target.pid == 84 && backend.readCalls == 1 &&
+               backend.lastReadAddress == 0x1000 &&
+               backend.lastReadSize == 4,
+           "a real Lua script should continue on the service-confirmed target after process.attach");
+
+    Mem::OperationContext failureContext = service.captureContext(true);
+    failureContext.deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const json failure = json::parse(Mem::executeLuaJson(
+        service,
+        json{{"code", R"(
+local attached, attach_error = process.attach(10)
+assert(attached, attach_error)
+error("failure after target selection")
+)"},
+             {"timeout_seconds", 2}}
+            .dump(),
+        failureContext));
+    expect(!failure.at("success").get<bool>() &&
+               failure.at("completion") == "completed" &&
+               failure.at("pid") == 10 &&
+               failure.at("handle") == 1010 &&
+               backend.target.pid == 10,
+           "Lua failure after process.attach should preserve the final selected target metadata");
+
+    auto& registry = AI::ToolExecutor::getInstance();
+    registry.registerTool(
+        "lua_execute", "Lua selection test", "{}", AI::ToolSafety::Write,
+        [&service](const std::string& args,
+                   const Mem::OperationContext& operation) {
+            return Mem::executeLuaJson(service, args, operation);
+        },
+        AI::ToolTargetPolicy::Selection);
+    AI::AgentController controller(service);
+    AI::AgentController::ToolConfig config;
+    controller.resetForNewRun();
+    const AI::ToolCall lua = toolCall(
+        "lua-select-then-fail", "lua_execute",
+        R"JSON({"code":"local ok, err = process.attach(84); assert(ok, err); error('after selection')","timeout_seconds":2})JSON");
+    auto ready = controller.beginToolCalls({lua}, config);
+    expect(ready.kind == AI::AgentRunner::OutcomeKind::NeedsExecution &&
+               ready.toolCallToExecute &&
+               ready.toolCallToExecute->id == lua.id,
+           "the default Lua permission should release the script without confirmation");
+    const AI::ToolResult failedSelection =
+        registry.execute(lua, controller.operationContext());
+    expect(!failedSelection.success && failedSelection.selectedTarget &&
+               failedSelection.selectedTarget->pid == 84,
+           "the Agent executor should retain a selected target from a later-failing Lua script");
+    const auto completed = controller.completeToolExecution(
+        lua, failedSelection, 1, config);
+    expect(completed.kind == AI::AgentRunner::OutcomeKind::ReadyForFollowUp &&
+               controller.operationContext().target &&
+               controller.operationContext().target->pid == 84,
+           "the Agent run should advance to Lua's final target even when later script code fails");
 }
 
 void testMemoryReadTargetValidation() {
@@ -2656,6 +2797,9 @@ void testAgentRunnerApprovalMatrix() {
     registry.registerTool(
         "test_runner_write", "runner write", "{}", AI::ToolSafety::Write,
         [](const std::string&) { return std::string(R"({"success":true})"); });
+    registry.registerTool(
+        "lua_execute", "runner Lua", "{}", AI::ToolSafety::Write,
+        [](const std::string&) { return std::string(R"({"success":true})"); });
 
     const auto hasTrace = [](const AI::AgentRunner::Outcome& outcome,
                              AI::AgentTraceType type,
@@ -2683,6 +2827,39 @@ void testAgentRunnerApprovalMatrix() {
         toolCall("runner-write", "test_runner_write");
     const AI::ToolCall secondRead =
         toolCall("runner-read-2", "test_runner_read");
+    const AI::ToolCall lua = toolCall("runner-lua", "lua_execute");
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        auto luaReady = runner.beginToolCalls({lua}, config);
+        expect(luaReady.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsExecution &&
+                   luaReady.toolCallToExecute &&
+                   luaReady.toolCallToExecute->id == lua.id &&
+                   !runner.hasPendingConfirmation() &&
+                   hasTrace(luaReady, AI::AgentTraceType::AutoApproved,
+                            "lua_execute"),
+               "Lua execution must be auto-approved by its default independent policy");
+    }
+
+    {
+        AI::AgentRunner runner;
+        AI::AgentRunner::Config config;
+        config.autoApproveWrites = true;
+        config.autoApproveLuaExecution = false;
+        auto waiting = runner.beginToolCalls({lua}, config);
+        expect(waiting.kind ==
+                   AI::AgentRunner::OutcomeKind::NeedsConfirmation &&
+                   waiting.pendingToolCall &&
+                   waiting.pendingToolCall->id == lua.id &&
+                   runner.hasPendingConfirmation() &&
+                   hasTrace(waiting, AI::AgentTraceType::AwaitingApproval,
+                            "lua_execute") &&
+                   !hasTrace(waiting, AI::AgentTraceType::AutoApproved,
+                             "lua_execute"),
+               "disabling Lua auto-approval must require confirmation even in write YOLO mode");
+    }
 
     {
         AI::AgentRunner runner;
@@ -3466,7 +3643,7 @@ void testMutationAuditPersistence() {
     }.dump();
     lua.result.completion =
         AI::ToolCompletionState::CompletedAfterCancelRequest;
-    lua.targetPolicy = AI::ToolTargetPolicy::Bound;
+    lua.targetPolicy = AI::ToolTargetPolicy::Selection;
     lua.approval = AI::MutationApproval::AutoApproved;
     expect(audit.append(lua, &appendError),
            "Lua mutation audit should persist: " + appendError);
@@ -4397,6 +4574,8 @@ int main() {
         {"driver initialization and secret redaction",
          &testDriverInitializationAndSecretRedaction},
         {"process pagination and open", &testProcessPaginationAndOpen},
+        {"Lua operation context target selection",
+         &testLuaOperationContextTargetSelection},
         {"memory target validation", &testMemoryReadTargetValidation},
         {"memory batch service", &testMemoryBatchService},
         {"memory write completion contract", &testMemoryWriteCompletionContract},
@@ -4422,6 +4601,7 @@ int main() {
         {"approval context invalidation", &testApprovalContextInvalidation},
         {"process open advances run target", &testProcessOpenAdvancesRunTarget},
         {"non-target and stale result handling", &testNonTargetToolsAndStaleResult},
+        {"Lua script target selection", &testLuaScriptTargetSelection},
     };
 
     int failed = 0;

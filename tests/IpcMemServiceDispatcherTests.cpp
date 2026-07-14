@@ -293,6 +293,15 @@ public:
       ++current.target->processRevision;
     }
 
+    Mem::TargetSnapshot selectTarget(int pid) {
+      std::lock_guard<std::mutex> lock(currentMutex_);
+      Mem::TargetSnapshot selected{
+          pid, pid * 10, current.target->processRevision + 1,
+          current.connectionGeneration};
+      current.target = selected;
+      return selected;
+    }
+
     void setBlockOpenAfterTarget(bool value) {
       blockOpenAfterTarget_.store(value, std::memory_order_release);
       if (value) {
@@ -429,16 +438,39 @@ public:
     lastMethod = method;
     lastParamsJson = paramsJson;
     lastContext = context;
-    return json({{"success", true},
-                 {"output", "host-ok"},
-                 {"completion", "completed"}})
-        .dump();
+    if (nextExecution) {
+      auto execution = std::move(nextExecution);
+      nextExecution = {};
+      return execution(context).dump();
+    }
+    if (nextResult) {
+      json result = *nextResult;
+      nextResult.reset();
+      return result.dump();
+    }
+    return successResult(context.target).dump();
+  }
+
+  static json successResult(
+      const std::optional<Mem::TargetSnapshot> &target) {
+    json result{{"success", true},
+                {"output", "host-ok"},
+                {"completion", "completed"}};
+    if (target) {
+      result["pid"] = target->pid;
+      result["handle"] = target->processHandle;
+      result["process_revision"] = target->processRevision;
+      result["connection_generation"] = target->connectionGeneration;
+    }
+    return result;
   }
 
   int calls = 0;
   std::string lastMethod;
   std::string lastParamsJson;
   Mem::OperationContext lastContext;
+  std::optional<json> nextResult;
+  std::function<json(const Mem::OperationContext &)> nextExecution;
 };
 
 class FailConsumedAuditSink final : public NativeIpc::IIpcApprovalAuditSink {
@@ -883,34 +915,101 @@ void testExecutionAuditFailureDoesNotRewriteReceipt() {
          "post-effect audit failure must retain the confirmed device receipt");
 }
 
-void testApprovedHostMethodUsesInjectedExecutor() {
+void testLuaPolicyAutoApprovalAndManualFallback() {
   StubMemService service;
   FakeHostExecutor host;
   NativeIpc::IpcApprovalBroker broker;
+  CapturingExecutionAuditSink executionAudit;
+  bool autoApproveLua = true;
   NativeIpc::IpcMemServiceDispatcher dispatcher(
-      service, &broker, {94, "AMem.DispatcherTests", "1.0"}, &host);
+      service, &broker, {94, "AMem.DispatcherTests", "1.0"}, &host,
+      &executionAudit, [&] { return autoApproveLua; });
+
+  const auto automatic = dispatcher.execute(
+      request(30, "lua_execute", {{"code", "print('automatic')"}}),
+      context());
+  const auto automaticRecords = broker.snapshot();
+  const auto automaticOutcomes = executionAudit.records();
+  expect(automatic.ok && host.calls == 1 && automaticRecords.size() == 1 &&
+             automaticRecords[0].state ==
+                 NativeIpc::IpcApprovalState::Consumed &&
+             automaticRecords[0].autoApproved &&
+             automaticOutcomes.size() == 1 &&
+             automaticOutcomes[0].autoApproved,
+         "enabled Lua policy must execute without a pending UI decision and remain audited");
+
+  autoApproveLua = false;
   auto requestContext = context();
   auto future = std::async(std::launch::async, [&] {
     return dispatcher.execute(
-        request(30, "lua_execute", {{"code", "print('secret')"}}),
+        request(31, "lua_execute", {{"code", "print('manual')"}}),
         requestContext);
   });
-  expect(waitUntil([&] { return broker.snapshot().size() == 1; }),
-         "host method should reach approval");
-  const auto pending = broker.snapshot().front();
+  expect(waitUntil([&] { return broker.snapshot().size() == 2; }),
+         "disabled Lua policy should reach manual approval");
+  const auto pending = broker.snapshot().back();
+  expect(pending.state == NativeIpc::IpcApprovalState::Pending &&
+             !pending.autoApproved && host.calls == 1,
+         "manual Lua fallback must not execute before the decision");
   expect(broker
              .decide(pending.approvalId,
                      NativeIpc::IpcApprovalDecision::Approve,
                      service.captureContext(true))
              .ok,
-         "host method should approve");
+         "manual Lua fallback should approve");
   const auto result = future.get();
-  expect(result.ok && host.calls == 1 && host.lastMethod == "lua_execute" &&
-             json::parse(host.lastParamsJson)["code"] == "print('secret')" &&
+  const auto outcomes = executionAudit.records();
+  expect(result.ok && host.calls == 2 && host.lastMethod == "lua_execute" &&
+             json::parse(host.lastParamsJson)["code"] == "print('manual')" &&
              host.lastContext.target == service.captureContext(true).target &&
              broker.find(pending.approvalId)->state ==
-                 NativeIpc::IpcApprovalState::Consumed,
-         "approved host method should execute once with the grant context");
+                 NativeIpc::IpcApprovalState::Consumed &&
+             outcomes.size() == 2 && !outcomes[1].autoApproved,
+         "manual Lua fallback must execute once with a non-policy grant");
+}
+
+void testLuaSelectionAdvancesBaselineOnSuccessAndFailure() {
+  StubMemService service;
+  FakeHostExecutor host;
+  NativeIpc::IpcApprovalBroker broker;
+  NativeIpc::IpcMemServiceDispatcher dispatcher(
+      service, &broker, {100, "AMem.DispatcherTests", "1.0"}, &host,
+      nullptr, [] { return true; });
+
+  Mem::TargetSnapshot selected;
+  host.nextExecution = [&](const Mem::OperationContext &) {
+    selected = service.selectTarget(84);
+    return FakeHostExecutor::successResult(selected);
+  };
+  const auto success = dispatcher.execute(
+      request(32, "lua_execute", {{"code", "process.attach(84)"}}),
+      context());
+  expect(success.ok && dispatcher.baselineContext().target == selected,
+         "successful Lua process.attach must advance the IPC session baseline");
+
+  Mem::TargetSnapshot selectedAfterError;
+  host.nextExecution = [&](const Mem::OperationContext &) {
+    selectedAfterError = service.selectTarget(126);
+    return json{
+        {"success", false},
+        {"error", {{"code", "internal_error"},
+                   {"message", "script failed after attach"},
+                   {"retryable", false}}},
+        {"completion", "completed"},
+        {"pid", selectedAfterError.pid},
+        {"handle", selectedAfterError.processHandle},
+        {"process_revision", selectedAfterError.processRevision},
+        {"connection_generation",
+         selectedAfterError.connectionGeneration},
+    };
+  };
+  const auto failed = dispatcher.execute(
+      request(33, "lua_execute",
+              {{"code", "process.attach(126); error('after')"}}),
+      context());
+  expect(!failed.ok && failed.errorCode == "internal_error" &&
+             dispatcher.baselineContext().target == selectedAfterError,
+         "Lua target selection must remain accepted when later script code fails");
 }
 
 void testProcessSelectionAdvancesBaselineSafely() {
@@ -1129,8 +1228,10 @@ int main() {
        &testCancellationAfterConsumeStopsBeforeSend},
       {"execution audit failure preserves receipt",
        &testExecutionAuditFailureDoesNotRewriteReceipt},
-      {"approved host method uses injected executor",
-       &testApprovedHostMethodUsesInjectedExecutor},
+      {"Lua policy auto-approval and manual fallback",
+       &testLuaPolicyAutoApprovalAndManualFallback},
+      {"Lua selection advances baseline on success and failure",
+       &testLuaSelectionAdvancesBaselineOnSuccessAndFailure},
       {"process selection advances baseline safely",
        &testProcessSelectionAdvancesBaselineSafely},
       {"selection rejects mismatched receipt",

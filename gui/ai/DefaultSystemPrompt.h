@@ -25,7 +25,7 @@ Tool groups:
     R"PROMPT(
 
 Safety rules:
-1. Write-classified tools show a confirmation dialog. Before calling process_open, driver_initialize, memory_write, memory_write_value, scan_start, scan_refine, scan_clear, breakpoint_set, breakpoint_remove, or breakpoint_suspend)PROMPT"
+1. Write-classified tools follow the configured write or Lua permission policy. Before calling process_open, driver_initialize, memory_write, memory_write_value, scan_start, scan_refine, scan_clear, breakpoint_set, breakpoint_remove, or breakpoint_suspend)PROMPT"
 #ifdef HAVE_LUAJIT
     R"PROMPT(, breakpoint_resume, or lua_execute)PROMPT"
 #else

@@ -71,6 +71,8 @@ void ChatWindow::loadSettingsDraft() {
     settingsDraft_.maxAgentSteps = settings.maxAgentSteps;
     settingsDraft_.maxToolCallsPerTurn = settings.maxToolCallsPerTurn;
     settingsDraft_.autoApproveWrites = settings.autoApproveWrites;
+    settingsDraft_.autoApproveLuaExecution =
+        settings.autoApproveLuaExecution;
     settingsDraft_.proxyEnabled = settings.proxy.enabled;
     settingsDraft_.proxyPort = settings.proxy.port;
 
@@ -320,12 +322,22 @@ void ChatWindow::drawSettingsPanel() {
         ImGui::TextDisabled("(%d..%d)", kMinCalls, kMaxCalls);
     }
 
+    // ---- Lua-permission policy ----------------------------------------
+    ImGui::Separator();
+    ImGui::TextDisabled("Lua Execution Permission");
+    ImGui::Checkbox("Allow Lua execution without confirmation",
+                    &settingsDraft_.autoApproveLuaExecution);
+    if (settingsDraft_.autoApproveLuaExecution) {
+        ImGui::TextDisabled(
+            "Default: applies to both AI Chat and Native IPC.");
+    } else {
+        ImGui::TextDisabled(
+            "lua_execute requires per-request confirmation in both entry points.");
+    }
+
     // ---- Write-permission policy --------------------------------------
-    // Off by default: every AI-requested write pops the modal. Turning
-    // this on lets the AI execute memory_write / set_breakpoint /
-    // remove_breakpoint / open_process without confirmation — use at
-    // your own risk. The red warning below the checkbox exists so the
-    // state can't be flipped by accident while skimming the panel.
+    // Lua is controlled independently above. This switch applies only to
+    // the remaining write-classified tools.
     ImGui::Separator();
     ImGui::TextDisabled("AI Write Permissions");
     ImGui::Checkbox("Auto-approve AI write operations (YOLO mode)",
@@ -423,6 +435,8 @@ void ChatWindow::drawSettingsPanel() {
                 settings.maxToolCallsPerTurn =
                     settingsDraft_.maxToolCallsPerTurn;
                 settings.autoApproveWrites = settingsDraft_.autoApproveWrites;
+                settings.autoApproveLuaExecution =
+                    settingsDraft_.autoApproveLuaExecution;
                 if (settings.systemPrompt.empty()) {
                     settings.systemPrompt = kDefaultSystemPrompt;
                 }

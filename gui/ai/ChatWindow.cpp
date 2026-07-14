@@ -1847,12 +1847,14 @@ void ChatWindow::startToolExecution(const ToolCall& call) {
     task.call = call;
     task.context = operationContext;
     MutationApproval approval = MutationApproval::NotRequired;
-    if (ToolExecutor::getInstance().getToolSafety(call.name) ==
-        ToolSafety::Write) {
-        approval =
-            AiSettings::getInstance().get().autoApproveWrites
-                ? MutationApproval::AutoApproved
-                : MutationApproval::Approved;
+    const ToolSafety safety =
+        ToolExecutor::getInstance().getToolSafety(call.name);
+    if (safety == ToolSafety::Write) {
+        const AgentController::ToolConfig config = makeAgentConfig();
+        approval = AgentRunner::isAutomaticallyApproved(
+                       call.name, safety, config)
+            ? MutationApproval::AutoApproved
+            : MutationApproval::Approved;
         task.approval = approval;
     }
     const bool queued = AgentTaskExecutor::getInstance().enqueue(
@@ -2019,7 +2021,9 @@ AgentController::ToolConfig ChatWindow::makeAgentConfig() const {
     AgentController::ToolConfig cfg;
     cfg.maxAgentSteps = maxAgentSteps_;
     cfg.maxToolCallsPerTurn = maxToolCallsPerTurn_;
-    cfg.autoApproveWrites = AiSettings::getInstance().get().autoApproveWrites;
+    const AiSettingsData settings = AiSettings::getInstance().get();
+    cfg.autoApproveWrites = settings.autoApproveWrites;
+    cfg.autoApproveLuaExecution = settings.autoApproveLuaExecution;
     return cfg;
 }
 

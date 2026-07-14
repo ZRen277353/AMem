@@ -2,6 +2,7 @@
 
 #include "ColorScheme.h"
 #include "Gui.h"
+#include "ai/AiSettings.h"
 #include "imgui.h"
 #include "ipc/NativeAgentRuntime.h"
 #include "ipc/SystemNativeAgentRuntime.h"
@@ -237,15 +238,16 @@ const char *auditEventName(const std::string &eventType) {
 
 std::string auditStatus(const NativeIpc::IpcApprovalAuditEntry &entry) {
   if (entry.eventType != "execution_outcome") {
-    return entry.state;
+    return entry.autoApproved ? entry.state + " / policy" : entry.state;
   }
+  const std::string policy = entry.autoApproved ? " / policy" : "";
   if (entry.success.value_or(false)) {
-    return entry.completion;
+    return entry.completion + policy;
   }
   if (entry.errorCode.empty()) {
-    return entry.completion;
+    return entry.completion + policy;
   }
-  return entry.errorCode + " / " + entry.completion;
+  return entry.errorCode + " / " + entry.completion + policy;
 }
 
 void drawApprovalAudit(
@@ -322,6 +324,14 @@ void NativeAgentIpcWindow::onDraw() {
   NativeIpc::NativeAgentRuntimeSnapshot snapshot = runtime.snapshot();
   const bool running = isRunning(snapshot.server.state);
 
+  AI::AiSettingsData aiSettings = AI::AiSettings::getInstance().get();
+  bool autoApproveLua = aiSettings.autoApproveLuaExecution;
+  if (ImGui::Checkbox("Lua 请求免审批", &autoApproveLua)) {
+    AI::AiSettings::getInstance().setAutoApproveLuaExecution(autoApproveLua);
+    Gui::log("Lua 自动授权已%s", autoApproveLua ? "启用" : "关闭");
+  }
+  ImGui::TextDisabled("启用时 lua_execute 自动消费一次性授权并保留审计");
+
   const ImVec4 statusColor =
       running ? ColorScheme::SuccessBright : ColorScheme::TextDisabled;
   ImGui::TextColored(statusColor, "%s", serverStateName(snapshot.server.state));
@@ -335,7 +345,7 @@ void NativeAgentIpcWindow::onDraw() {
   } else if (ImGui::Button("启用")) {
     std::wstring error;
     if (runtime.start(error)) {
-      Gui::log("Native Agent IPC 已启用（Observe + 逐请求审批）");
+      Gui::log("Native Agent IPC 已启用（Observe + 特权策略审批）");
     } else {
       const std::string message = utf8(error);
       Gui::log("Native Agent IPC 启用失败: %s", message.c_str());
@@ -350,7 +360,7 @@ void NativeAgentIpcWindow::onDraw() {
     ImGui::TableSetupColumn("项目", ImGuiTableColumnFlags_WidthFixed, 150.0f);
     ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthStretch);
     textRow("权限", "Observe");
-    textRow("特权能力", "逐请求审批");
+    textRow("特权能力", "逐请求审批；Lua 可自动授权");
     textRow("运行阶段", phaseName(snapshot.phase));
     const std::string pipeName = utf8(snapshot.server.pipeName);
     textRow("管道", pipeName.c_str());

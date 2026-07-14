@@ -42,7 +42,8 @@ IpcApprovalBroker::IpcApprovalBroker(IpcApprovalBrokerConfig config,
       auditSink_(auditSink) {}
 
 IpcApprovalResult
-IpcApprovalBroker::submit(const IpcApprovalSubmission &submission) {
+IpcApprovalBroker::submit(const IpcApprovalSubmission &submission,
+                          IpcApprovalSubmissionMode mode) {
   const auto now = std::chrono::steady_clock::now();
   if (submission.sessionId == 0 || submission.requestId == 0) {
     return failure("invalid_identity",
@@ -69,6 +70,11 @@ IpcApprovalBroker::submit(const IpcApprovalSubmission &submission) {
       method->capability == IpcCapability::Observe) {
     return failure("approval_not_required",
                    "Observe methods cannot enter the approval broker");
+  }
+  if (mode == IpcApprovalSubmissionMode::AutoApproved &&
+      submission.method != "lua_execute") {
+    return failure("auto_approval_not_allowed",
+                   "policy auto-approval is reserved for lua_execute");
   }
   if (!validExpectedContext(*method, submission.expected)) {
     return failure("invalid_context",
@@ -113,6 +119,11 @@ IpcApprovalBroker::submit(const IpcApprovalSubmission &submission) {
     created.targetPolicy = method->targetPolicy;
     created.connectionGeneration = submission.expected.connectionGeneration;
     created.target = submission.expected.target;
+    created.state = mode == IpcApprovalSubmissionMode::AutoApproved
+                        ? IpcApprovalState::Approved
+                        : IpcApprovalState::Pending;
+    created.autoApproved =
+        mode == IpcApprovalSubmissionMode::AutoApproved;
     created.createdAt = now;
     created.deadline = submission.deadline;
     records_.push_back(created);
@@ -352,6 +363,7 @@ IpcApprovalGrant IpcApprovalBroker::makeGrant(const IpcApprovalRecord &record) {
   grant.targetPolicy = record.targetPolicy;
   grant.connectionGeneration = record.connectionGeneration;
   grant.target = record.target;
+  grant.autoApproved = record.autoApproved;
   return grant;
 }
 

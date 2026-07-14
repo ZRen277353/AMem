@@ -52,7 +52,7 @@ public:
                               const std::string& chunkName,
                               std::string& output,
                               int timeoutMs = 0,
-                              const Mem::OperationContext* context = nullptr);
+                              Mem::OperationContext* context = nullptr);
 
     // 脚本管理
     bool ReloadScript(const std::string& name);

@@ -54,7 +54,7 @@ constexpr std::array<IpcMethodDescriptor, 24> kMethods = {{
     {"symbol_list", IpcCapability::Observe,
      IpcMethodTargetPolicy::Bound, true, true},
     {"lua_execute", IpcCapability::HostExecution,
-     IpcMethodTargetPolicy::Bound, false, false},
+     IpcMethodTargetPolicy::Selection, false, false},
 }};
 
 } // namespace

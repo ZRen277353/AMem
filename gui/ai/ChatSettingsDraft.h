@@ -40,6 +40,7 @@ struct ChatSettingsDraft {
     int maxToolCallsPerTurn = 0;
     int proxyPort = 0;
     bool autoApproveWrites = false;
+    bool autoApproveLuaExecution = true;
     bool proxyEnabled = false;
     bool loaded = false;
 

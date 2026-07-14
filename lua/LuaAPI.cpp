@@ -4,6 +4,7 @@
 #include "LuaAPI_Assembly.h"
 #include "../socket/socket_io_timeout.h"
 #include "../mem/IMemService.h"
+#include "../mem/LuaOperationContext.h"
 #include "../gui/Gui.h"
 #include <string>
 #include <vector>
@@ -192,18 +193,17 @@ Mem::OperationContext LuaAPI::GetOperationContext(
     return context;
 }
 
-const Mem::OperationContext* LuaAPI::BindOperationContext(
-    lua_State* L, const Mem::OperationContext* context) {
+Mem::OperationContext* LuaAPI::BindOperationContext(
+    lua_State* L, Mem::OperationContext* context) {
     lua_pushlightuserdata(L, &g_operationContextRegistryKey);
     lua_gettable(L, LUA_REGISTRYINDEX);
-    const auto* previous = static_cast<const Mem::OperationContext*>(
+    auto* previous = static_cast<Mem::OperationContext*>(
         lua_touserdata(L, -1));
     lua_pop(L, 1);
 
     lua_pushlightuserdata(L, &g_operationContextRegistryKey);
     if (context) {
-        lua_pushlightuserdata(
-            L, const_cast<Mem::OperationContext*>(context));
+        lua_pushlightuserdata(L, context);
     } else {
         lua_pushnil(L);
     }
@@ -327,9 +327,23 @@ int LuaAPI::AttachProcess(lua_State* L) {
     auto& service = GetMemService(L);
     Mem::OpenProcessRequest request;
     request.pid = static_cast<int>(rawPid);
-    auto response = service.openProcess(
-        GetOperationContext(L, true), request);
+    lua_pushlightuserdata(L, &g_operationContextRegistryKey);
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    auto* bound = static_cast<Mem::OperationContext*>(
+        lua_touserdata(L, -1));
+    lua_pop(L, 1);
+
+    const Mem::OperationContext expected =
+        bound ? *bound : service.captureContext(true);
+    auto response = service.openProcess(expected, request);
     if (response.ok()) {
+        if (bound) {
+            if (const auto error = Mem::advanceLuaOperationTarget(
+                    service, *bound, response.value().target)) {
+                PushError(L, error->message);
+                return 2;
+            }
+        }
         lua_pushboolean(L, 1);
         return 1;
     }

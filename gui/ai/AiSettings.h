@@ -25,6 +25,8 @@ namespace AI {
 //       "maxToolCallsPerTurn": 16,
 //       "tokenLimit": 16000,
 //       "systemPrompt": "...",
+//       "autoApproveWrites": false,
+//       "autoApproveLuaExecution": true,
 //       "proxy": { "enabled": false, "host": "", "port": 0 }
 //     }
 struct AiSettingsData {
@@ -36,12 +38,13 @@ struct AiSettingsData {
     std::string systemPrompt;    // prepended to every request
     ProxyConfig proxy;           // host / port / enabled
 
-    // YOLO mode: when true, write-classified tool calls (memory_write,
-    // set_breakpoint, remove_breakpoint, open_process) execute without
-    // the confirmation modal. Opt-in only, off by default — the modal
-    // is the primary safety net against hallucinated writes from the
-    // model, so flipping this is a deliberate trust decision.
+    // YOLO mode for non-Lua writes. Lua has a separate permission so users
+    // can keep ordinary target mutations gated independently.
     bool autoApproveWrites = false;
+
+    // Shared by the in-app Agent and Native IPC. When true, lua_execute gets
+    // a policy approval without opening the per-request confirmation UI.
+    bool autoApproveLuaExecution = true;
 };
 
 class AiSettings {
@@ -71,6 +74,7 @@ public:
     void setTokenLimit(int limit);
     void setSystemPrompt(const std::string& prompt);
     void setProxy(const ProxyConfig& proxy);
+    void setAutoApproveLuaExecution(bool enabled);
 
     // Initialize from disk if present. Only a genuinely missing file is
     // created from defaults; invalid or unreadable files are preserved.

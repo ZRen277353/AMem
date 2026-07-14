@@ -138,20 +138,37 @@ void testBrokerTransitionsPersistBoundedMetadata() {
                  .ok,
          "broker should emit pending and denied transitions");
 
+  auto luaSubmission = submission(9, 8);
+  luaSubmission.method = "lua_execute";
+  const auto autoApproved = broker.submit(
+      luaSubmission, NativeIpc::IpcApprovalSubmissionMode::AutoApproved);
+  expect(autoApproved.ok && autoApproved.record &&
+             broker.consume(autoApproved.record->approvalId, 9, 8, context())
+                 .ok,
+         "Lua policy approval should emit approved and consumed transitions");
+
   const auto snapshot = audit.snapshot();
-  expect(snapshot.successfulWrites == 2 && snapshot.failedWrites == 0 &&
-             snapshot.lastError.empty() && snapshot.recent.size() == 2 &&
+  expect(snapshot.successfulWrites == 4 && snapshot.failedWrites == 0 &&
+             snapshot.lastError.empty() && snapshot.recent.size() == 4 &&
              snapshot.recent[0].state == "pending" &&
-             snapshot.recent[1].state == "denied",
+             snapshot.recent[1].state == "denied" &&
+             snapshot.recent[2].state == "approved" &&
+             snapshot.recent[2].autoApproved &&
+             snapshot.recent[3].state == "consumed" &&
+             snapshot.recent[3].autoApproved,
          "audit snapshot should retain ordered broker transitions");
   const auto lines = readValidLines(path);
-  expect(lines.size() == 2 && lines[0]["schema_version"] == 2 &&
+  expect(lines.size() == 4 && lines[0]["schema_version"] == 2 &&
              lines[0]["event_type"] == "approval_transition" &&
              lines[0]["session_id"] == 9 &&
              lines[0]["request_id"] == 7 &&
              lines[0]["method"] == "memory_write" &&
              lines[0]["capability"] == "TargetMutation" &&
              lines[0]["target"]["pid"] == 42 &&
+             lines[0]["auto_approved"] == false &&
+             lines[2]["method"] == "lua_execute" &&
+             lines[2]["auto_approved"] == true &&
+             lines[3]["auto_approved"] == true &&
              !lines[0].contains("params") &&
              !lines[0].contains("result") &&
              !lines[0].contains("result_json"),
@@ -163,7 +180,9 @@ void testExecutionOutcomesPersistWithoutRawData() {
   const auto path = directory.path() / "security.jsonl";
   NativeIpc::IpcApprovalAuditLog audit(path.string(), 64u * 1024u, 10);
 
-  expect(audit.recordExecution(executionRecord(20)),
+  auto policyExecution = executionRecord(20);
+  policyExecution.autoApproved = true;
+  expect(audit.recordExecution(policyExecution),
          "successful execution outcome should persist");
   expect(audit.recordExecution(
              executionRecord(
@@ -177,7 +196,9 @@ void testExecutionOutcomesPersistWithoutRawData() {
              snapshot.recent[0].eventType == "execution_outcome" &&
              snapshot.recent[0].success == std::optional<bool>{true} &&
              snapshot.recent[0].completion == "completed" &&
+             snapshot.recent[0].autoApproved &&
              snapshot.recent[1].success == std::optional<bool>{false} &&
+             !snapshot.recent[1].autoApproved &&
              snapshot.recent[1].errorCode == "completion_unknown",
          "snapshot should distinguish execution summaries from approvals");
 
@@ -186,6 +207,7 @@ void testExecutionOutcomesPersistWithoutRawData() {
              lines[0]["event_type"] == "execution_outcome" &&
              lines[0]["success"] == true &&
              lines[0]["completion"] == "completed" &&
+             lines[0]["auto_approved"] == true &&
              lines[0]["target"]["pid"] == 42 &&
              lines[0]["observed_target"]["pid"] == 42 &&
              !lines[0].contains("params") &&
@@ -193,6 +215,13 @@ void testExecutionOutcomesPersistWithoutRawData() {
              !lines[0].contains("result_json") &&
              !lines[0].contains("error_message"),
          "execution audit must exclude request and result content");
+
+  NativeIpc::IpcApprovalAuditLog reloaded(path.string(), 64u * 1024u, 10);
+  const auto reloadedSnapshot = reloaded.snapshot();
+  expect(reloadedSnapshot.recent.size() == 2 &&
+             reloadedSnapshot.recent[0].autoApproved &&
+             !reloadedSnapshot.recent[1].autoApproved,
+         "auto-approved execution metadata must survive bounded audit reload");
 }
 
 void testRotationReloadAndMalformedLinesStayBounded() {

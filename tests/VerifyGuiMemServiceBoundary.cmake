@@ -71,7 +71,7 @@ file(READ "${SOURCE_ROOT}/lua/LuaEngine.cpp" lua_engine_source)
 file(READ "${SOURCE_ROOT}/mem/LuaJsonTool.cpp" lua_tool_source)
 foreach(required IN ITEMS
         "Initialize(Mem::IMemService& memService)"
-        "const Mem::OperationContext* context = nullptr")
+        "Mem::OperationContext* context = nullptr")
     string(FIND "${lua_engine_header}" "${required}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR
@@ -87,11 +87,25 @@ foreach(required IN ITEMS
             "Lua execution context binding is missing: ${required}")
     endif()
 endforeach()
-string(FIND "${lua_tool_source}" "&context))" lua_context_position)
+string(FIND "${lua_tool_source}" "&scriptContext))" lua_context_position)
 if(lua_context_position EQUAL -1)
     message(FATAL_ERROR
-        "LuaJsonTool must bind its approved OperationContext for execution")
+        "LuaJsonTool must bind its mutable approved OperationContext for execution")
 endif()
+file(READ "${SOURCE_ROOT}/lua/LuaAPI.cpp" lua_api_source)
+foreach(required IN ITEMS
+        "advanceLuaOperationTarget("
+        "context.target = selectedTarget;")
+    string(FIND "${lua_api_source}${lua_tool_source}" "${required}" position)
+    if(position EQUAL -1)
+        file(READ "${SOURCE_ROOT}/mem/LuaOperationContext.cpp" lua_context_source)
+        string(FIND "${lua_context_source}" "${required}" context_position)
+        if(context_position EQUAL -1)
+            message(FATAL_ERROR
+                "Lua controlled target selection is missing: ${required}")
+        endif()
+    endif()
+endforeach()
 
 foreach(app_context IN ITEMS
         "${SOURCE_ROOT}/gui/AppContext.h"

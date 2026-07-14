@@ -33,7 +33,7 @@ option(USE_DX12 "Use DirectX 12 backend" ON)
 # NativeAgent 产品固定包含 AI Chat、Capstone 和 Keystone；缺失依赖时配置失败。
 
 # 原生 Named Pipe transport 是显式编译能力；即使编入产品，运行时仍默认停止，
-# 只能由用户在 GUI 中启用 Observe + 逐请求审批。
+# 只能由用户在 GUI 中启用 Observe + 逐请求特权策略。
 option(ENABLE_NATIVE_IPC "Compile native Named Pipe transport" OFF)
 
 # 生成版本信息头文件
@@ -247,6 +247,7 @@ set(SOCKET_SOURCES
 
 set(MEM_SOURCES
     mem/Address.cpp
+    mem/LuaOperationContext.cpp
     mem/MemService.cpp
     mem/SystemMemService.cpp
     mem/ValueCodec.cpp
@@ -347,6 +348,7 @@ if(ENABLE_NATIVE_IPC)
     target_link_libraries(NativeIpcGuiControl PUBLIC
         NativeIpcTransport
     )
+    target_compile_definitions(NativeIpcGuiControl PRIVATE HAVE_AI_CHAT)
     if(HAVE_LUAJIT)
         target_compile_definitions(NativeIpcGuiControl PRIVATE HAVE_LUAJIT)
     endif()
@@ -359,7 +361,7 @@ if(ENABLE_NATIVE_IPC)
         ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/native-ipc"
     )
     message(STATUS
-        "Native IPC compiled with explicit Observe + per-request approval control")
+        "Native IPC compiled with explicit Observe + privileged policy control")
 else()
     message(STATUS "Native IPC transport disabled")
 endif()
@@ -823,7 +825,12 @@ if(BUILD_TESTING)
 
     add_executable(NativeAgentMemTests
         tests/MemServiceTests.cpp
+        lua/LuaAPI.cpp
+        lua/LuaAPI_Memory.cpp
+        lua/LuaEngine.cpp
         mem/Address.cpp
+        mem/LuaJsonTool.cpp
+        mem/LuaOperationContext.cpp
         mem/MemService.cpp
         mem/ValueCodec.cpp
         socket/DeviceSession.cpp
@@ -844,11 +851,19 @@ if(BUILD_TESTING)
     target_include_directories(NativeAgentMemTests PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/third_party
+        ${LUAJIT_INCLUDE}
     )
-    target_compile_definitions(NativeAgentMemTests PRIVATE HAVE_AI_CHAT)
+    target_compile_definitions(NativeAgentMemTests PRIVATE
+        HAVE_AI_CHAT
+        HAVE_LUAJIT
+    )
+    if(LUAJIT_IS_STATIC)
+        target_compile_definitions(NativeAgentMemTests PRIVATE LUAJIT_STATIC)
+    endif()
     target_link_libraries(NativeAgentMemTests PRIVATE
         NativeMemJsonTools
         NativeBoundedJson
+        ${LUAJIT_LIBRARY}
         crypt32
     )
     if(MSVC)
@@ -858,6 +873,7 @@ if(BUILD_TESTING)
     endif()
     set_target_properties(NativeAgentMemTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
     )
     add_test(NAME native_agent_mem_service COMMAND NativeAgentMemTests)
 

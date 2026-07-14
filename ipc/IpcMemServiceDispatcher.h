@@ -7,6 +7,7 @@
 #include "mem/IMemService.h"
 #include "mem/MemJsonTools.h"
 
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -36,7 +37,8 @@ public:
       Mem::IMemService &service, IpcApprovalBroker *approvalBroker = nullptr,
       IpcExternalSession session = {},
       IIpcHostMethodExecutor *hostExecutor = nullptr,
-      IIpcExecutionAuditSink *executionAuditSink = nullptr);
+      IIpcExecutionAuditSink *executionAuditSink = nullptr,
+      std::function<bool()> autoApproveLuaExecution = {});
 
   bool resolveCapability(const std::string &method,
                          IpcCapability &capability) const override;
@@ -63,6 +65,7 @@ private:
                                   const IpcMethodDescriptor &descriptor,
                                   IpcDispatchResult result) const;
   bool supportsExecution(const IpcMethodDescriptor &descriptor) const;
+  bool shouldAutoApproveLua(const std::string &method) const;
   bool beginSelection(const Mem::OperationContext &expected,
                       SessionValidation &validation);
   IpcDispatchResult finishSelection(const IpcDispatchResult &result,
@@ -83,6 +86,7 @@ private:
   const IpcExternalSession session_;
   IIpcHostMethodExecutor *const hostExecutor_;
   IIpcExecutionAuditSink *const executionAuditSink_;
+  const std::function<bool()> autoApproveLuaExecution_;
 };
 
 } // namespace NativeIpc

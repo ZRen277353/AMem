@@ -154,16 +154,31 @@ bool applySelectionCompletion(IpcDispatchResult &result,
   return true;
 }
 
+IpcDispatchResult selectionFailure(
+    const IpcDispatchResult &result,
+    const char *code,
+    const char *message,
+    RequestCompletion fallbackCompletion) {
+  IpcDispatchResult failed = localError(
+      code, message,
+      result.completion == RequestCompletion::Completed
+          ? fallbackCompletion
+          : result.completion);
+  return failed;
+}
+
 } // namespace
 
 IpcMemServiceDispatcher::IpcMemServiceDispatcher(
     Mem::IMemService &service, IpcApprovalBroker *approvalBroker,
     IpcExternalSession session, IIpcHostMethodExecutor *hostExecutor,
-    IIpcExecutionAuditSink *executionAuditSink)
+    IIpcExecutionAuditSink *executionAuditSink,
+    std::function<bool()> autoApproveLuaExecution)
     : service_(service), tools_(service),
       baseline_(service.captureContext(true)), approvalBroker_(approvalBroker),
       session_(std::move(session)), hostExecutor_(hostExecutor),
-      executionAuditSink_(executionAuditSink) {}
+      executionAuditSink_(executionAuditSink),
+      autoApproveLuaExecution_(std::move(autoApproveLuaExecution)) {}
 
 Mem::OperationContext IpcMemServiceDispatcher::baselineContext() const {
   std::lock_guard<std::mutex> lock(baselineMutex_);
@@ -189,6 +204,18 @@ bool IpcMemServiceDispatcher::canSubmitForApproval(
            !descriptor->executableWithoutApproval &&
            descriptor->capability != IpcCapability::Observe &&
            supportsExecution(*descriptor);
+}
+
+bool IpcMemServiceDispatcher::shouldAutoApproveLua(
+    const std::string &method) const {
+  if (method != "lua_execute" || !autoApproveLuaExecution_) {
+    return false;
+  }
+  try {
+    return autoApproveLuaExecution_();
+  } catch (...) {
+    return false;
+  }
 }
 
 IIpcRequestDispatcher::SessionValidation
@@ -307,7 +334,12 @@ IpcDispatchResult IpcMemServiceDispatcher::submitForApproval(
   submission.method = request.method;
   submission.expected = baselineContext();
   submission.deadline = context.deadline;
-  const IpcApprovalResult submitted = approvalBroker_->submit(submission);
+  const IpcApprovalSubmissionMode submissionMode =
+      shouldAutoApproveLua(request.method)
+          ? IpcApprovalSubmissionMode::AutoApproved
+          : IpcApprovalSubmissionMode::Pending;
+  const IpcApprovalResult submitted =
+      approvalBroker_->submit(submission, submissionMode);
   if (!submitted.ok || !submitted.record.has_value()) {
     return localError(submitted.code.empty() ? "approval_submission_failed"
                                              : submitted.code.c_str(),
@@ -463,6 +495,7 @@ IpcDispatchResult IpcMemServiceDispatcher::auditApproved(
   record.targetPolicy = descriptor.targetPolicy;
   record.authorizedConnectionGeneration = grant.connectionGeneration;
   record.authorizedTarget = grant.target;
+  record.autoApproved = grant.autoApproved;
   record.success = result.ok;
   record.completion = result.completion;
   if (!result.ok) {
@@ -591,10 +624,24 @@ IpcDispatchResult IpcMemServiceDispatcher::finishSelection(
 
   if (!result.ok) {
     const SessionValidation validation = validateCurrentLocked(current);
-    if (!validation.valid) {
-      return validationFailure(validation,
-                               RequestCompletion::CompletionUnknown);
+    if (validation.valid) {
+      return result;
     }
+    const auto failedTarget = selectedTarget(result.resultJson);
+    if (!failedTarget.has_value() ||
+        failedTarget->connectionGeneration != expected.connectionGeneration ||
+        current.connectionGeneration != expected.connectionGeneration ||
+        !current.target.has_value() ||
+        *current.target != *failedTarget) {
+      return selectionFailure(
+          result, validation.code.empty() ? "session_invalidated"
+                                          : validation.code.c_str(),
+          validation.message.empty()
+              ? "selection failed after the IPC target changed"
+              : validation.message.c_str(),
+          RequestCompletion::CompletionUnknown);
+    }
+    baseline_ = current;
     return result;
   }
 
@@ -603,9 +650,10 @@ IpcDispatchResult IpcMemServiceDispatcher::finishSelection(
       target->connectionGeneration != expected.connectionGeneration ||
       current.connectionGeneration != expected.connectionGeneration ||
       !current.target.has_value() || *current.target != *target) {
-    return localError("selection_result_invalid",
-                      "selected target is incomplete or no longer current",
-                      RequestCompletion::CompletionUnknown);
+    return selectionFailure(
+        result, "selection_result_invalid",
+        "selected target is incomplete or no longer current",
+        RequestCompletion::CompletionUnknown);
   }
   baseline_ = current;
   return result;
@@ -657,6 +705,7 @@ IpcDispatchResult IpcMemServiceDispatcher::fromToolJson(
                           RequestCompletion::CompletionUnknown);
     }
     result.errorCode = code->get<std::string>();
+    result.resultJson = payload;
     result.errorMessage = message->get<std::string>();
     const auto retryable = error->find("retryable");
     result.retryable = retryable != error->end() && retryable->is_boolean() &&

@@ -217,7 +217,7 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code,
                                      const std::string& chunkName,
                                      std::string& output,
                                      int timeoutMs,
-                                     const Mem::OperationContext* context) {
+                                     Mem::OperationContext* context) {
     std::lock_guard<std::mutex> lock(mutex);
 
     if (!initialized || !L) {
@@ -276,7 +276,7 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code,
         lua_sethook(L, LuaTimeoutHook, LUA_MASKCOUNT, kLuaTimeoutInstructionInterval);
     }
 
-    const Mem::OperationContext* previousContext =
+    Mem::OperationContext* previousContext =
         LuaAPI::BindOperationContext(L, context);
     result = lua_pcall(L, 0, 0, 0);
     LuaAPI::BindOperationContext(L, previousContext);

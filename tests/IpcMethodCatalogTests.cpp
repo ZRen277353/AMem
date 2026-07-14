@@ -83,8 +83,11 @@ void testTargetPolicies() {
             break;
         }
     }
-    expect(none == 3 && bound == 20 && selection == 1,
+    expect(none == 3 && bound == 19 && selection == 2,
            "target-policy counts must match the canonical surface");
+    expect(NativeIpc::FindIpcMethod("lua_execute")->targetPolicy ==
+               NativeIpc::IpcMethodTargetPolicy::Selection,
+           "Lua must be allowed to report a controlled final target");
 }
 
 void testApprovalAndServiceBoundaries() {

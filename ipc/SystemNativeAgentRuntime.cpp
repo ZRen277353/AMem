@@ -2,6 +2,7 @@
 
 #include "IpcMemServiceDispatcher.h"
 #include "NativeAgentRuntime.h"
+#include "gui/ai/AiSettings.h"
 #include "mem/LuaJsonTool.h"
 #include "mem/SystemMemService.h"
 
@@ -52,7 +53,11 @@ public:
       runtime_ = std::make_unique<NativeAgentRuntime>(
           Mem::getSystemMemService(), kDefaultPipeName, HandshakeConfig{},
           RequestSessionConfig{}, approvalBroker_.get(), hostExecutor_.get(),
-          approvalAudit_.get());
+          approvalAudit_.get(), [] {
+            return AI::AiSettings::getInstance()
+                .get()
+                .autoApproveLuaExecution;
+          });
     }
     return *runtime_;
   }

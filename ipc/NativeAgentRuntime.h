@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -58,7 +59,8 @@ public:
                      RequestSessionConfig requestConfig = {},
                      IpcApprovalBroker *approvalBroker = nullptr,
                      IIpcHostMethodExecutor *hostExecutor = nullptr,
-                     IIpcExecutionAuditSink *executionAuditSink = nullptr);
+                     IIpcExecutionAuditSink *executionAuditSink = nullptr,
+                     std::function<bool()> autoApproveLuaExecution = {});
   ~NativeAgentRuntime();
 
   NativeAgentRuntime(const NativeAgentRuntime &) = delete;
@@ -80,6 +82,7 @@ private:
   IpcApprovalBroker *const approvalBroker_;
   IIpcHostMethodExecutor *const hostExecutor_;
   IIpcExecutionAuditSink *const executionAuditSink_;
+  const std::function<bool()> autoApproveLuaExecution_;
   const HandshakeConfig handshakeConfig_;
   const RequestSessionConfig requestConfig_;
   NamedPipeServer server_;

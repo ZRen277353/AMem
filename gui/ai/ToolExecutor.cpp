@@ -769,8 +769,13 @@ ToolResult ToolExecutor::execute(const ToolCall& call,
         result.errorMessage = extractToolError(resultDocument);
         result.success = result.errorMessage.empty();
         result.completion = extractCompletionState(resultDocument);
-        if (result.success &&
-            registration.targetPolicy == ToolTargetPolicy::Selection) {
+        const bool hasAnyTargetField =
+            resultDocument.contains("pid") ||
+            resultDocument.contains("handle") ||
+            resultDocument.contains("process_revision") ||
+            resultDocument.contains("connection_generation");
+        if (registration.targetPolicy == ToolTargetPolicy::Selection &&
+            (result.success || hasAnyTargetField)) {
             std::string targetError;
             result.selectedTarget =
                 extractSelectedTarget(resultDocument, targetError);

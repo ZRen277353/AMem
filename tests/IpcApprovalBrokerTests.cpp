@@ -140,6 +140,11 @@ void testCatalogOwnedValidationAndBoundedDto() {
          "Observe method must not enter approval");
   expect(broker.submit(submission("not_registered")).code == "method_not_found",
          "unknown method must be rejected");
+  expect(broker
+             .submit(submission("memory_write", 1, 5),
+                     NativeIpc::IpcApprovalSubmissionMode::AutoApproved)
+             .code == "auto_approval_not_allowed",
+         "policy auto-approval must be restricted to lua_execute");
 
   auto invalidIdentity = submission("memory_write");
   invalidIdentity.sessionId = 0;
@@ -211,6 +216,28 @@ void testApproveConsumeIsOneShot() {
   expect(broker.consume(approvalId, 10, 20, expected).code ==
              "approval_not_approved",
          "approval grant must not be reusable");
+
+  const auto autoApproved = broker.submit(
+      submission("lua_execute", 10, 22, expected),
+      NativeIpc::IpcApprovalSubmissionMode::AutoApproved);
+  expect(autoApproved.ok && autoApproved.record &&
+             autoApproved.record->state ==
+                 NativeIpc::IpcApprovalState::Approved &&
+             autoApproved.record->autoApproved &&
+             autoApproved.record->targetPolicy ==
+                 NativeIpc::IpcMethodTargetPolicy::Selection,
+         "Lua policy submission must start approved without a pending decision");
+  const auto autoConsumed = broker.consume(
+      autoApproved.record->approvalId, 10, 22, expected);
+  expect(autoConsumed.ok && autoConsumed.grant &&
+             autoConsumed.grant->autoApproved && autoConsumed.record &&
+             autoConsumed.record->state ==
+                 NativeIpc::IpcApprovalState::Consumed &&
+             broker
+                     .consume(autoApproved.record->approvalId, 10, 22,
+                              expected)
+                     .code == "approval_not_approved",
+         "auto-approved Lua grant must remain target-bound and one-shot");
 
   const auto denied =
       broker.submit(submission("memory_write", 10, 21, expected));
