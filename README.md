@@ -1,5 +1,7 @@
 当前项目仅只有ui，QQ交流群:1065266874
 
+精简版[AndroidMiniMem](https://github.com/niqiuqiux/AndroidMiniMem)项目 mcp专为ai服务
+
 [视频效果](https://www.bilibili.com/video/BV1KpWbzeEFU/)
 
 [TG频道 内存库文件获取](https://t.me/AndroidMemX)
