@@ -1,7 +1,4 @@
-
-项目全部由ai开发，快成石山了，有兴趣优化的欢迎pr
-我要重构去写QT版本的了
-当前项目仅只有ui，内存库回头发频道里面
+当前项目仅只有ui，QQ交流群:1065266874
 
 [视频效果](https://www.bilibili.com/video/BV1KpWbzeEFU/)
 
